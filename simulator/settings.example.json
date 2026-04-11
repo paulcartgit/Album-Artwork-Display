@@ -1,0 +1,12 @@
+{
+    "sonos_ip": "",
+    "spotify_client_id": "",
+    "spotify_client_secret": "",
+    "acrcloud_host": "",
+    "acrcloud_key": "",
+    "acrcloud_secret": "",
+    "google_photos_url": "",
+    "poll_interval_ms": 45000,
+    "show_track_info": true,
+    "use_dithering": true
+}
