@@ -166,13 +166,7 @@ void webServerInit() {
 
     // ─── Scan for WiFi networks ───
     server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
-        // Non-blocking async scan
-        WiFi.scanNetworks(true);
-        unsigned long deadline = millis() + 8000;
-        while (WiFi.scanComplete() == WIFI_SCAN_RUNNING && millis() < deadline) {
-            delay(100);
-        }
-        int n = WiFi.scanComplete();
+        int n = WiFi.scanNetworks();  // synchronous; yields internally via RTOS
 
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();

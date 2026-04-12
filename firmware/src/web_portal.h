@@ -276,8 +276,10 @@ async function scanWifi() {
         const div = document.createElement('div');
         div.className = 'scan-item';
         const sig = n.rssi > -60 ? '▊▊▊' : n.rssi > -75 ? '▊▊░' : '▊░░';
+        const sigLabel = n.rssi > -60 ? 'Strong' : n.rssi > -75 ? 'Medium' : 'Weak';
+        const secLabel = n.secure ? ' 🔒' : '';
         div.innerHTML = '<span>' + escHtml(n.ssid) + '</span>'
-                      + '<span style="color:#888;font-size:.8rem">' + sig + (n.secure ? ' 🔒' : '') + '</span>';
+                      + '<span style="color:#888;font-size:.8rem" title="Signal: ' + sigLabel + (n.secure ? ', Secured' : ', Open') + ' (' + n.rssi + ' dBm)">' + sig + secLabel + '</span>';
         div.onclick = () => {
           document.getElementById('fWifiSsid').value = n.ssid;
           document.getElementById('fWifiPass').focus();
