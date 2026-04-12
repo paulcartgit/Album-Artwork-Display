@@ -37,6 +37,18 @@ bool sdReadWifiConfig(WifiConfig& cfg) {
     return strlen(cfg.ssid) > 0;
 }
 
+bool sdWriteWifiConfig(const WifiConfig& cfg) {
+    JsonDocument doc;
+    doc["ssid"]     = cfg.ssid;
+    doc["password"] = cfg.password;
+
+    File f = SD_MMC.open("/config.json", FILE_WRITE);
+    if (!f) return false;
+    serializeJson(doc, f);
+    f.close();
+    return true;
+}
+
 bool sdReadSettings(Settings& settings) {
     memset(&settings, 0, sizeof(settings));
     settings.poll_interval_ms = SONOS_POLL_INTERVAL_MS;

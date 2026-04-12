@@ -15,11 +15,15 @@
 #include "web_server.h"
 
 // ─── Globals (shared with web_server.cpp) ───
-Settings g_settings;
-AppState g_state = STATE_BOOT;
-String   g_currentArtist;
-String   g_currentTitle;
-String   g_currentAlbum;
+Settings   g_settings;
+AppState   g_state = STATE_BOOT;
+String     g_currentArtist;
+String     g_currentTitle;
+String     g_currentAlbum;
+
+// ─── Deferred WiFi reconnect (triggered by web UI) ───
+WifiConfig       g_pendingWifiConfig;
+unsigned long    g_wifiReconnectAfter = 0;
 
 // ─── Track-change detection ───
 static String g_lastTrackHash;
@@ -111,6 +115,13 @@ void loop() {
     if (g_state == STATE_ERROR) {
         delay(10000);
         return;
+    }
+
+    // ── Deferred WiFi reconnect (requested via web UI) ──
+    if (g_wifiReconnectAfter > 0 && millis() >= g_wifiReconnectAfter) {
+        g_wifiReconnectAfter = 0;
+        Serial.println("[Main] Applying new WiFi config...");
+        wifiConnect(g_pendingWifiConfig);
     }
 
     static unsigned long lastPoll = 0;

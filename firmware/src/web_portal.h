@@ -23,7 +23,7 @@ h2{font-size:1.1rem;margin:16px 0 8px;color:#ccc}
 .status-label{font-size:.75rem;color:#888;text-transform:uppercase;letter-spacing:.05em}
 .status-value{font-size:1.1rem;margin-top:2px}
 label{display:block;font-size:.85rem;color:#aaa;margin-top:12px}
-input[type=text],input[type=number]{width:100%;padding:8px 10px;margin-top:4px;
+input[type=text],input[type=number],input[type=password]{width:100%;padding:8px 10px;margin-top:4px;
      background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#eee;font-size:.9rem}
 input:focus{outline:none;border-color:#666}
 button{padding:10px 20px;background:#2a6;border:none;border-radius:6px;color:#fff;
@@ -43,6 +43,9 @@ button.danger:active{background:#722}
 .msg{padding:8px 12px;border-radius:6px;margin-top:8px;font-size:.85rem;display:none}
 .msg.ok{display:block;background:#1a3a1a;color:#6d6}
 .msg.err{display:block;background:#3a1a1a;color:#d66}
+.scan-item{background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px 12px;
+           cursor:pointer;margin-top:4px;display:flex;justify-content:space-between;align-items:center}
+.scan-item:hover{border-color:#555;background:#222}
 </style>
 </head>
 <body>
@@ -51,6 +54,7 @@ button.danger:active{background:#722}
 <div class="tabs">
   <div class="tab active" onclick="showTab('status')">Status</div>
   <div class="tab" onclick="showTab('settings')">Settings</div>
+  <div class="tab" onclick="showTab('wifi')">WiFi</div>
   <div class="tab" onclick="showTab('gallery')">Gallery</div>
 </div>
 
@@ -79,6 +83,8 @@ button.danger:active{background:#722}
 <div id="settings" class="panel">
   <h2>Sonos</h2>
   <label>Speaker IP<input type="text" id="fSonosIp" placeholder="192.168.1.x"></label>
+  <button onclick="scanSonos()" id="btnSonosScan" style="margin-top:8px">Scan for Speakers</button>
+  <div id="sonosList" style="margin-top:4px;display:none"></div>
 
   <h2>ACRCloud</h2>
   <label>Host<input type="text" id="fAcrHost" placeholder="identify-eu-west-1.acrcloud.com"></label>
@@ -109,6 +115,27 @@ button.danger:active{background:#722}
   <div class="gallery-grid" id="galleryGrid"></div>
 </div>
 
+<!-- WIFI -->
+<div id="wifi" class="panel">
+  <div class="status-card">
+    <div class="status-label">Connected Network</div>
+    <div class="status-value" id="wSSID">—</div>
+  </div>
+  <h2>Change Network</h2>
+  <label>Network Name (SSID)<input type="text" id="fWifiSsid" placeholder="Enter SSID or scan below"></label>
+  <label>Password<input type="password" id="fWifiPass" placeholder="WiFi password"></label>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button onclick="scanWifi()" id="btnWifiScan">Scan Networks</button>
+    <button onclick="saveWifi()">Save &amp; Reconnect</button>
+  </div>
+  <div id="wifiNetworks" style="margin-top:8px;display:none">
+    <div style="font-size:.8rem;color:#888;margin-bottom:4px">Tap a network to select:</div>
+    <div id="wifiList"></div>
+  </div>
+  <div id="wifiMsg" class="msg"></div>
+  <p style="font-size:.75rem;color:#555;margin-top:12px">After saving, the device will reconnect. You may need to wait a moment then access <strong>vinyl.local</strong> again.</p>
+</div>
+
 <script>
 const STATES = ['BOOT','IDLE','DIGITAL','VINYL','ERROR'];
 
@@ -118,6 +145,7 @@ function showTab(name) {
   if (name==='status') loadStatus();
   if (name==='settings') loadSettings();
   if (name==='gallery') loadGallery();
+  if (name==='wifi') loadWifi();
 }
 
 async function loadStatus() {
@@ -213,6 +241,103 @@ async function uploadFile(file) {
     el.textContent = r.ok ? 'Uploaded!' : 'Upload failed';
     loadGallery();
   } catch(e) { el.className='msg err'; el.textContent=e.message; }
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function loadWifi() {
+  try {
+    const r = await fetch('/api/wifi');
+    const d = await r.json();
+    document.getElementById('wSSID').textContent = d.ssid || '—';
+    document.getElementById('fWifiSsid').value = d.ssid || '';
+  } catch(e) { console.error(e); }
+}
+
+async function scanWifi() {
+  const btn = document.getElementById('btnWifiScan');
+  const list = document.getElementById('wifiList');
+  const container = document.getElementById('wifiNetworks');
+  btn.textContent = 'Scanning...';
+  btn.disabled = true;
+  container.style.display = 'block';
+  list.innerHTML = '<div style="color:#888;font-size:.8rem;padding:8px">Scanning...</div>';
+  try {
+    const r = await fetch('/api/wifi/scan');
+    const nets = await r.json();
+    list.innerHTML = '';
+    if (!nets.length) {
+      list.innerHTML = '<div style="color:#888;font-size:.8rem;padding:8px">No networks found</div>';
+    } else {
+      nets.sort((a,b) => b.rssi - a.rssi);
+      nets.forEach(n => {
+        const div = document.createElement('div');
+        div.className = 'scan-item';
+        const sig = n.rssi > -60 ? '▊▊▊' : n.rssi > -75 ? '▊▊░' : '▊░░';
+        div.innerHTML = '<span>' + escHtml(n.ssid) + '</span>'
+                      + '<span style="color:#888;font-size:.8rem">' + sig + (n.secure ? ' 🔒' : '') + '</span>';
+        div.onclick = () => {
+          document.getElementById('fWifiSsid').value = n.ssid;
+          document.getElementById('fWifiPass').focus();
+          document.querySelectorAll('#wifiList .scan-item').forEach(el => el.style.borderColor = '');
+          div.style.borderColor = '#2a6';
+        };
+        list.appendChild(div);
+      });
+    }
+  } catch(e) {
+    list.innerHTML = '<div style="color:#d66;font-size:.8rem;padding:8px">Scan failed: ' + escHtml(e.message) + '</div>';
+  }
+  btn.textContent = 'Scan Networks';
+  btn.disabled = false;
+}
+
+async function saveWifi() {
+  const ssid = document.getElementById('fWifiSsid').value.trim();
+  const pass = document.getElementById('fWifiPass').value;
+  const el = document.getElementById('wifiMsg');
+  if (!ssid) { el.className = 'msg err'; el.textContent = 'SSID is required'; return; }
+  try {
+    const r = await fetch('/api/wifi', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ssid, password:pass})});
+    el.className = r.ok ? 'msg ok' : 'msg err';
+    el.textContent = r.ok ? 'Saved! Device is reconnecting...' : 'Error saving';
+  } catch(e) { el.className='msg err'; el.textContent=e.message; }
+}
+
+async function scanSonos() {
+  const btn = document.getElementById('btnSonosScan');
+  const list = document.getElementById('sonosList');
+  btn.textContent = 'Scanning...';
+  btn.disabled = true;
+  list.style.display = 'block';
+  list.innerHTML = '<div style="color:#888;font-size:.8rem;padding:8px">Scanning for Sonos speakers...</div>';
+  try {
+    const r = await fetch('/api/sonos/scan');
+    const devices = await r.json();
+    list.innerHTML = '';
+    if (!devices.length) {
+      list.innerHTML = '<div style="color:#888;font-size:.8rem;padding:8px">No Sonos speakers found</div>';
+    } else {
+      devices.forEach(d => {
+        const div = document.createElement('div');
+        div.className = 'scan-item';
+        div.innerHTML = '<span>' + escHtml(d.name) + '</span>'
+                      + '<span style="color:#888;font-size:.8rem">' + escHtml(d.ip) + '</span>';
+        div.onclick = () => {
+          document.getElementById('fSonosIp').value = d.ip;
+          document.querySelectorAll('#sonosList .scan-item').forEach(el => el.style.borderColor = '');
+          div.style.borderColor = '#2a6';
+        };
+        list.appendChild(div);
+      });
+    }
+  } catch(e) {
+    list.innerHTML = '<div style="color:#d66;font-size:.8rem;padding:8px">Scan failed: ' + escHtml(e.message) + '</div>';
+  }
+  btn.textContent = 'Scan for Speakers';
+  btn.disabled = false;
 }
 
 loadStatus();

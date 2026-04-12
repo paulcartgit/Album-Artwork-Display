@@ -1,6 +1,8 @@
 #include "sonos_client.h"
 #include "xml_utils.h"
 #include <HTTPClient.h>
+#include <WiFiUDP.h>
+#include <ArduinoJson.h>
 
 static const char GETPOS_ENVELOPE[] PROGMEM =
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
@@ -89,4 +91,97 @@ bool sonosIsPlaying(const char* sonosIp) {
 
     String state = extractTag(body, "CurrentTransportState");
     return state == "PLAYING";
+}
+
+// ─── SSDP Discovery ───
+
+String sonosDiscover(int timeoutMs) {
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+
+    WiFiUDP udp;
+    if (!udp.begin(54321)) {
+        Serial.println("[Sonos] Discovery: UDP bind failed");
+        String out; serializeJson(doc, out); return out;
+    }
+
+    static const char MSEARCH[] =
+        "M-SEARCH * HTTP/1.1\r\n"
+        "HOST: 239.255.255.250:1900\r\n"
+        "MAN: \"ssdp:discover\"\r\n"
+        "MX: 3\r\n"
+        "ST: urn:schemas-upnp-org:device:ZonePlayer:1\r\n"
+        "\r\n";
+
+    udp.beginPacket("239.255.255.250", 1900);
+    udp.write((const uint8_t*)MSEARCH, strlen(MSEARCH));
+    udp.endPacket();
+    Serial.println("[Sonos] SSDP M-SEARCH sent");
+
+    static const int MAX_DEVICES = 8;
+    char foundIPs[MAX_DEVICES][16];
+    int foundCount = 0;
+
+    unsigned long deadline = millis() + (unsigned long)timeoutMs;
+    while (millis() < deadline && foundCount < MAX_DEVICES) {
+        int sz = udp.parsePacket();
+        if (sz > 0) {
+            char buf[512];
+            int len = udp.read(buf, sizeof(buf) - 1);
+            if (len > 0) {
+                buf[len] = '\0';
+                String resp(buf);
+                String lower = resp;
+                lower.toLowerCase();
+                int locIdx = lower.indexOf("location:");
+                if (locIdx >= 0) {
+                    int s = locIdx + 9;
+                    while (s < (int)resp.length() && resp[s] == ' ') s++;
+                    int e = resp.indexOf('\n', s);
+                    if (e < 0) e = resp.length();
+                    String loc = resp.substring(s, e);
+                    loc.trim();
+                    // Extract IP from http://IP:PORT/...
+                    int ipS = loc.startsWith("http://") ? 7 :
+                               (loc.startsWith("https://") ? 8 : 0);
+                    int colon = loc.indexOf(':', ipS);
+                    int slash  = loc.indexOf('/', ipS);
+                    int ipE = (colon > ipS && (slash < 0 || colon < slash)) ? colon :
+                               (slash > ipS ? slash : (int)loc.length());
+                    String ip = loc.substring(ipS, ipE);
+                    if (ip.length() > 0 && ip.length() < 16) {
+                        bool dup = false;
+                        for (int i = 0; i < foundCount; i++) {
+                            if (strcmp(foundIPs[i], ip.c_str()) == 0) { dup = true; break; }
+                        }
+                        if (!dup) {
+                            strlcpy(foundIPs[foundCount++], ip.c_str(), 16);
+                            Serial.printf("[Sonos] Discovered: %s\n", ip.c_str());
+                        }
+                    }
+                }
+            }
+        }
+        delay(10);
+    }
+    udp.stop();
+
+    // Resolve friendly names from device description
+    for (int i = 0; i < foundCount; i++) {
+        String ip   = String(foundIPs[i]);
+        String name = ip;
+        HTTPClient http;
+        http.begin("http://" + ip + ":1400/xml/device_description.xml");
+        http.setTimeout(2000);
+        if (http.GET() == HTTP_CODE_OK) {
+            String fn = extractTag(http.getString(), "friendlyName");
+            if (fn.length() > 0) name = fn;
+        }
+        http.end();
+        JsonObject obj = arr.add<JsonObject>();
+        obj["ip"]   = ip;
+        obj["name"] = name;
+    }
+
+    String out; serializeJson(doc, out); return out;
 }

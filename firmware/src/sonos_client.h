@@ -11,3 +11,4 @@ struct SonosTrackInfo {
 
 bool sonosGetTrackInfo(const char* sonosIp, SonosTrackInfo& info);
 bool sonosIsPlaying(const char* sonosIp);
+String sonosDiscover(int timeoutMs = 3000);

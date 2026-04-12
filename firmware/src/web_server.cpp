@@ -3,6 +3,7 @@
 #include "config.h"
 #include "sd_manager.h"
 #include "image_pipeline.h"
+#include "sonos_client.h"
 
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
@@ -10,11 +11,13 @@
 #include <WiFi.h>
 
 // Globals declared in main.cpp
-extern Settings   g_settings;
-extern AppState   g_state;
-extern String     g_currentArtist;
-extern String     g_currentTitle;
-extern String     g_currentAlbum;
+extern Settings       g_settings;
+extern AppState       g_state;
+extern String         g_currentArtist;
+extern String         g_currentTitle;
+extern String         g_currentAlbum;
+extern WifiConfig     g_pendingWifiConfig;
+extern unsigned long  g_wifiReconnectAfter;
 
 static AsyncWebServer server(80);
 
@@ -149,6 +152,76 @@ void webServerInit() {
         } else {
             req->send(404, "application/json", "{\"error\":\"not found\"}");
         }
+    });
+
+    // ─── Get current WiFi SSID ───
+    server.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest* req) {
+        JsonDocument doc;
+        doc["ssid"] = WiFi.SSID();
+        doc["ip"]   = WiFi.localIP().toString();
+        String out;
+        serializeJson(doc, out);
+        req->send(200, "application/json", out);
+    });
+
+    // ─── Scan for WiFi networks ───
+    server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
+        // Non-blocking async scan
+        WiFi.scanNetworks(true);
+        unsigned long deadline = millis() + 8000;
+        while (WiFi.scanComplete() == WIFI_SCAN_RUNNING && millis() < deadline) {
+            delay(100);
+        }
+        int n = WiFi.scanComplete();
+
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        if (n > 0) {
+            for (int i = 0; i < n; i++) {
+                JsonObject obj = arr.add<JsonObject>();
+                obj["ssid"]   = WiFi.SSID(i);
+                obj["rssi"]   = WiFi.RSSI(i);
+                obj["secure"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+            }
+        }
+        WiFi.scanDelete();
+
+        String out;
+        serializeJson(doc, out);
+        req->send(200, "application/json", out);
+    });
+
+    // ─── Save WiFi credentials & schedule reconnect ───
+    server.on("/api/wifi", HTTP_POST,
+        [](AsyncWebServerRequest* req) { /* handled in body callback */ },
+        nullptr,
+        [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
+            static String body;
+            if (index == 0) body = "";
+            body += String((char*)data, len);
+
+            if (index + len >= total) {
+                JsonDocument doc;
+                if (deserializeJson(doc, body)) {
+                    req->send(400, "application/json", "{\"error\":\"bad json\"}");
+                    return;
+                }
+                if (!doc["ssid"].is<const char*>() || strlen(doc["ssid"]) == 0) {
+                    req->send(400, "application/json", "{\"error\":\"ssid required\"}");
+                    return;
+                }
+                strlcpy(g_pendingWifiConfig.ssid,     doc["ssid"],     sizeof(g_pendingWifiConfig.ssid));
+                strlcpy(g_pendingWifiConfig.password, doc["password"] | "", sizeof(g_pendingWifiConfig.password));
+                sdWriteWifiConfig(g_pendingWifiConfig);
+                g_wifiReconnectAfter = millis() + 2000;
+                req->send(200, "application/json", "{\"ok\":true}");
+            }
+        }
+    );
+
+    // ─── Discover Sonos speakers via SSDP ───
+    server.on("/api/sonos/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "application/json", sonosDiscover(3000));
     });
 
     server.begin();
