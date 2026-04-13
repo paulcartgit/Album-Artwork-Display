@@ -146,9 +146,23 @@ void webServerInit() {
         }
     );
 
-    // ─── List album art history ───
-    server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "application/json", sdHistoryList());
+    // ─── Serve history image (must register before /api/history) ───
+    server.on("/api/history/image", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!req->hasParam("f")) {
+            req->send(400, "text/plain", "missing f");
+            return;
+        }
+        String file = req->getParam("f")->value();
+        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+            req->send(400, "text/plain", "invalid");
+            return;
+        }
+        String path = "/history/" + file;
+        if (!SD_MMC.exists(path)) {
+            req->send(404, "text/plain", "not found");
+            return;
+        }
+        req->send(SD_MMC, path, "image/jpeg");
     });
 
     // ─── Toggle history entry on/off ───
@@ -171,23 +185,9 @@ void webServerInit() {
         }
     });
 
-    // ─── Serve history image (thumbnail / full) ───
-    server.on("/api/history/image", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (!req->hasParam("f")) {
-            req->send(400, "text/plain", "missing f");
-            return;
-        }
-        String file = req->getParam("f")->value();
-        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
-            req->send(400, "text/plain", "invalid");
-            return;
-        }
-        String path = "/history/" + file;
-        if (!SD_MMC.exists(path)) {
-            req->send(404, "text/plain", "not found");
-            return;
-        }
-        req->send(SD_MMC, path, "image/jpeg");
+    // ─── List album art history ───
+    server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "application/json", sdHistoryList());
     });
 
     // ─── Force display refresh ───
