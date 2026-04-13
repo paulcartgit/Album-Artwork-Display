@@ -38,15 +38,9 @@ button.danger:active{background:#722}
 .debug-btn{padding:8px 14px;background:#333;border:1px solid #444;border-radius:6px;color:#aaa;
            font-size:.85rem;cursor:pointer;margin-right:8px;margin-top:8px}
 .debug-btn:active{background:#444}
-.gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:12px}
-.gallery-item{background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px;
-              text-align:center;font-size:.75rem;color:#aaa;word-break:break-all;position:relative}
-.gallery-item .del{position:absolute;top:4px;right:4px;background:#a33;color:#fff;
-                   border:none;border-radius:50%;width:22px;height:22px;cursor:pointer;font-size:.7rem}
-.upload-area{border:2px dashed #333;border-radius:8px;padding:24px;text-align:center;
-             color:#666;margin-top:12px;cursor:pointer}
-.upload-area.hover{border-color:#2a6;color:#2a6}
-#uploadInput{display:none}
+.gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-top:12px}
+.gallery-item{background:#1a1a1a;border:1px solid #333;border-radius:6px;
+              text-align:center;font-size:.75rem;color:#aaa;word-break:break-all;position:relative;overflow:hidden}
 .msg{padding:8px 12px;border-radius:6px;margin-top:8px;font-size:.85rem;display:none}
 .msg.ok{display:block;background:#1a3a1a;color:#6d6}
 .msg.err{display:block;background:#3a1a1a;color:#d66}
@@ -58,7 +52,7 @@ button.danger:active{background:#722}
 <div class="tabs">
   <div class="tab active" onclick="showTab('status')">Now Playing</div>
   <div class="tab" onclick="showTab('settings')">Settings</div>
-  <div class="tab" onclick="showTab('gallery')">Gallery</div>
+  <div class="tab" onclick="showTab('history')">History</div>
   <div class="tab" onclick="showTab('debug')">Debug</div>
 </div>
 
@@ -139,14 +133,11 @@ button.danger:active{background:#722}
   <div id="settingsMsg" class="msg"></div>
 </div>
 
-<!-- GALLERY -->
-<div id="gallery" class="panel">
-  <div class="upload-area" id="dropZone" onclick="document.getElementById('uploadInput').click()">
-    Tap or drop an image here to upload
-  </div>
-  <input type="file" id="uploadInput" accept="image/jpeg,image/png">
-  <div id="uploadMsg" class="msg"></div>
-  <div class="gallery-grid" id="galleryGrid"></div>
+<!-- HISTORY -->
+<div id="history" class="panel">
+  <p style="font-size:.8rem;color:#888;margin-bottom:12px">Album covers are saved automatically as you play music. Toggle covers on/off to control what shows when idle.</p>
+  <div class="gallery-grid" id="historyGrid"></div>
+  <div id="historyEmpty" style="text-align:center;color:#666;padding:32px;display:none">No album art yet — play some music!</div>
 </div>
 
 <!-- DEBUG -->
@@ -179,13 +170,13 @@ function fmtSec(s) {
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => {
     const tabName = t.textContent.toLowerCase().replace(' ','');
-    const map = {'nowplaying':'status','settings':'settings','gallery':'gallery','debug':'debug'};
+    const map = {'nowplaying':'status','settings':'settings','history':'history','debug':'debug'};
     t.classList.toggle('active', map[tabName]===name);
   });
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id===name));
   if (name==='status') loadStatus();
   if (name==='settings') loadSettings();
-  if (name==='gallery') loadGallery();
+  if (name==='history') loadHistory();
   if (name==='debug') loadDebug();
 }
 
@@ -307,47 +298,39 @@ async function saveSettings() {
   setTimeout(()=>el.style.display='none',3000);
 }
 
-async function loadGallery() {
-  const grid = document.getElementById('galleryGrid');
+async function loadHistory() {
+  const grid = document.getElementById('historyGrid');
+  const empty = document.getElementById('historyEmpty');
   try {
-    const r = await fetch('/api/gallery');
-    const files = await r.json();
+    const r = await fetch('/api/history');
+    const items = await r.json();
     grid.innerHTML = '';
-    files.forEach(f => {
+    if (!items.length) { empty.style.display=''; return; }
+    empty.style.display='none';
+    items.slice().reverse().forEach(h => {
       const div = document.createElement('div');
       div.className = 'gallery-item';
-      div.innerHTML = '<button class="del" onclick="delImg(\''+f.name+'\')">&times;</button>'
-                    + '<div>'+f.name+'</div><div style="color:#555">'+Math.round(f.size/1024)+'KB</div>';
+      div.style.cssText = 'padding:0;overflow:hidden;position:relative;cursor:pointer';
+      const on = h.on !== false;
+      div.innerHTML =
+        '<img src="/api/history/image?f='+h.f+'" style="width:100%;aspect-ratio:1;object-fit:cover;display:block;'+(on?'':'opacity:.35;')+'">'
+        + '<div style="padding:6px 8px;font-size:.7rem;line-height:1.3;'+(on?'':'opacity:.5;')+'">'
+        + '<div style="color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(h.a)+'</div>'
+        + '<div style="color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(h.al||h.t)+'</div></div>'
+        + '<div style="position:absolute;top:6px;right:6px;width:28px;height:28px;border-radius:50%;'
+        + 'background:'+(on?'#2a6':'#444')+';display:flex;align-items:center;justify-content:center;'
+        + 'font-size:.75rem;color:#fff;border:2px solid '+(on?'#2a6':'#666')+'">'
+        + (on?'&#10003;':'')+'</div>';
+      div.onclick = () => toggleHistory(h.f, !on);
       grid.appendChild(div);
     });
   } catch(e) { console.error(e); }
 }
-
-async function delImg(name) {
-  if (!confirm('Delete '+name+'?')) return;
-  await fetch('/api/gallery/delete', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'name='+encodeURIComponent(name)});
-  loadGallery();
-}
-
-// Upload
-const dropZone = document.getElementById('dropZone');
-const uploadInput = document.getElementById('uploadInput');
-dropZone.addEventListener('dragover', e=>{e.preventDefault();dropZone.classList.add('hover');});
-dropZone.addEventListener('dragleave', ()=>dropZone.classList.remove('hover'));
-dropZone.addEventListener('drop', e=>{e.preventDefault();dropZone.classList.remove('hover');if(e.dataTransfer.files.length)uploadFile(e.dataTransfer.files[0]);});
-uploadInput.addEventListener('change', ()=>{if(uploadInput.files.length)uploadFile(uploadInput.files[0]);});
-
-async function uploadFile(file) {
-  const el = document.getElementById('uploadMsg');
-  el.className='msg ok'; el.textContent='Uploading...';
-  try {
-    const fd = new FormData();
-    fd.append('file', file, file.name);
-    const r = await fetch('/api/upload', {method:'POST', body:fd});
-    el.className = r.ok ? 'msg ok' : 'msg err';
-    el.textContent = r.ok ? 'Uploaded!' : 'Upload failed';
-    loadGallery();
-  } catch(e) { el.className='msg err'; el.textContent=e.message; }
+function esc(s) { const d=document.createElement('div');d.textContent=s||'';return d.innerHTML; }
+async function toggleHistory(f, on) {
+  await fetch('/api/history/toggle', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'f='+encodeURIComponent(f)+'&on='+(on?'1':'0')});
+  loadHistory();
 }
 
 loadStatus();

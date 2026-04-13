@@ -10,9 +10,9 @@ bool sdInit() {
     }
     Serial.printf("[SD] Card size: %lluMB\n", SD_MMC.cardSize() / (1024 * 1024));
 
-    // Ensure gallery directory exists
-    if (!SD_MMC.exists("/gallery")) {
-        SD_MMC.mkdir("/gallery");
+    // Ensure history directory exists
+    if (!SD_MMC.exists("/history")) {
+        SD_MMC.mkdir("/history");
     }
     return true;
 }
@@ -96,64 +96,146 @@ bool sdFileExists(const char* path) {
     return SD_MMC.exists(path);
 }
 
-String sdListGallery() {
+// ─── History helpers ───
+
+static const char* HISTORY_INDEX = "/history/index.json";
+static const int   HISTORY_MAX   = 100;
+
+static uint32_t djb2(const char* s) {
+    uint32_t h = 5381;
+    while (*s) h = ((h << 5) + h) + (uint8_t)*s++;
+    return h;
+}
+
+// Read the index file into a JsonDocument.  Returns false if missing/corrupt.
+static bool readIndex(JsonDocument& doc) {
+    File f = SD_MMC.open(HISTORY_INDEX, FILE_READ);
+    if (!f) return false;
+    bool ok = !deserializeJson(doc, f);
+    f.close();
+    return ok;
+}
+
+static bool writeIndex(const JsonDocument& doc) {
+    File f = SD_MMC.open(HISTORY_INDEX, FILE_WRITE);
+    if (!f) return false;
+    serializeJson(doc, f);
+    f.close();
+    return true;
+}
+
+bool sdHistorySave(const char* artist, const char* title, const char* album,
+                   const uint8_t* jpegBuf, size_t jpegSize)
+{
+    if (!artist || !title || !artist[0] || !title[0]) return false;
+
+    // Deterministic filename from artist+title
+    String key = String(artist) + "|" + String(title);
+    char fname[20];
+    snprintf(fname, sizeof(fname), "%08x.jpg", djb2(key.c_str()));
+    String fpath = String("/history/") + fname;
+
+    // Load existing index
     JsonDocument doc;
-    JsonArray arr = doc.to<JsonArray>();
+    readIndex(doc);
+    JsonArray arr = doc.is<JsonArray>() ? doc.as<JsonArray>() : doc.to<JsonArray>();
 
-    File dir = SD_MMC.open("/gallery");
-    if (!dir || !dir.isDirectory()) {
-        String out;
-        serializeJson(doc, out);
-        return out;
-    }
-
-    File entry;
-    while ((entry = dir.openNextFile())) {
-        if (!entry.isDirectory()) {
-            JsonObject obj = arr.add<JsonObject>();
-            obj["name"] = String(entry.name());
-            obj["size"] = entry.size();
+    // Check if entry already exists — just bump timestamp
+    for (JsonObject obj : arr) {
+        if (strcmp(obj["f"] | "", fname) == 0) {
+            obj["ts"] = (unsigned long)millis();
+            writeIndex(doc);
+            Serial.printf("[History] Already cached: %s\n", fname);
+            return true;
         }
-        entry.close();
     }
-    dir.close();
 
+    // Write JPEG to SD
+    File f = SD_MMC.open(fpath, FILE_WRITE);
+    if (!f) {
+        Serial.printf("[History] Failed to write %s\n", fpath.c_str());
+        return false;
+    }
+    f.write(jpegBuf, jpegSize);
+    f.close();
+
+    // Prune oldest if at capacity
+    while (arr.size() >= HISTORY_MAX) {
+        // Find oldest by timestamp
+        int oldest = 0;
+        unsigned long oldestTs = ULONG_MAX;
+        int i = 0;
+        for (JsonObject obj : arr) {
+            unsigned long ts = obj["ts"] | 0UL;
+            if (ts < oldestTs) { oldestTs = ts; oldest = i; }
+            i++;
+        }
+        // Delete file and remove entry
+        String delPath = String("/history/") + (arr[oldest]["f"] | "?.jpg");
+        SD_MMC.remove(delPath);
+        Serial.printf("[History] Pruned: %s\n", delPath.c_str());
+        arr.remove(oldest);
+    }
+
+    // Add new entry
+    JsonObject obj = arr.add<JsonObject>();
+    obj["f"]  = fname;
+    obj["a"]  = artist;
+    obj["t"]  = title;
+    obj["al"] = album ? album : "";
+    obj["ts"] = (unsigned long)millis();
+    obj["on"] = true;
+
+    writeIndex(doc);
+    Serial.printf("[History] Saved: %s (%s — %s)\n", fname, artist, title);
+    return true;
+}
+
+String sdHistoryList() {
+    JsonDocument doc;
+    if (!readIndex(doc)) {
+        return "[]";
+    }
     String out;
     serializeJson(doc, out);
     return out;
 }
 
-bool sdDeleteFile(const char* path) {
-    return SD_MMC.remove(path);
+bool sdHistorySetEnabled(const char* file, bool on) {
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    JsonArray arr = doc.as<JsonArray>();
+    for (JsonObject obj : arr) {
+        if (strcmp(obj["f"] | "", file) == 0) {
+            obj["on"] = on;
+            writeIndex(doc);
+            return true;
+        }
+    }
+    return false;
 }
 
-String sdRandomGalleryFile() {
-    File dir = SD_MMC.open("/gallery");
-    if (!dir || !dir.isDirectory()) return "";
+String sdHistoryRandomFile() {
+    JsonDocument doc;
+    if (!readIndex(doc)) return "";
+    JsonArray arr = doc.as<JsonArray>();
 
-    int count = 0;
-    File entry;
-    while ((entry = dir.openNextFile())) {
-        if (!entry.isDirectory()) count++;
-        entry.close();
+    // Count enabled entries
+    int enabled = 0;
+    for (JsonObject obj : arr) {
+        if (obj["on"] | true) enabled++;
     }
-    if (count == 0) return "";
+    if (enabled == 0) return "";
 
-    int pick = random(count);
-    dir.rewindDirectory();
+    int pick = random(enabled);
     int idx = 0;
-    String result;
-    while ((entry = dir.openNextFile())) {
-        if (!entry.isDirectory()) {
+    for (JsonObject obj : arr) {
+        if (obj["on"] | true) {
             if (idx == pick) {
-                result = String("/gallery/") + entry.name();
-                entry.close();
-                break;
+                return String("/history/") + (obj["f"] | "?.jpg");
             }
             idx++;
         }
-        entry.close();
     }
-    dir.close();
-    return result;
+    return "";
 }

@@ -2,6 +2,7 @@
 #include "config.h"
 #include "dither.h"
 #include "display.h"
+#include "sd_manager.h"
 
 #include <HTTPClient.h>
 #include <WiFiClient.h>
@@ -544,11 +545,19 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
 
 // ─── Public API ───
 
-bool pipelineProcessUrl(const char* url, const char* artist, const char* album) {
+bool pipelineProcessUrl(const char* url,
+                        const char* overlayArtist, const char* overlayAlbum,
+                        const char* artist, const char* title, const char* album) {
     size_t jpegSize;
     uint8_t* jpegBuf = downloadJpeg(url, jpegSize);
     if (!jpegBuf || jpegSize == 0) return false;
-    return processJpegBuffer(jpegBuf, jpegSize, artist, album); // takes ownership of jpegBuf
+
+    // Save to album art history (before processJpegBuffer frees the buffer)
+    if (artist && artist[0] && title && title[0]) {
+        sdHistorySave(artist, title, album, jpegBuf, jpegSize);
+    }
+
+    return processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum); // takes ownership
 }
 
 bool pipelineProcessFile(const char* path) {

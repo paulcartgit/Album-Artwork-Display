@@ -27,6 +27,9 @@ String g_lastArtUrl;
 
 // ─── Pending display update (queued while display is refreshing) ───
 static String g_pendingArtUrl;
+static String g_pendingArtist;
+static String g_pendingTitle;
+static String g_pendingAlbum;
 
 static String trackHash(const String& artist, const String& title) {
     return artist + "|" + title;
@@ -168,9 +171,18 @@ void loop() {
     // Process pending display update once panel finishes refreshing
     if (g_pendingArtUrl.length() > 0 && !displayIsBusy()) {
         String url = g_pendingArtUrl;
+        String artist = g_pendingArtist;
+        String title  = g_pendingTitle;
+        String album  = g_pendingAlbum;
         g_pendingArtUrl = "";
+        g_pendingArtist = "";
+        g_pendingTitle  = "";
+        g_pendingAlbum  = "";
         activityLog("Processing queued artwork...");
-        if (pipelineProcessUrl(url.c_str())) {
+        const char* overlayArtist = g_settings.show_track_info ? artist.c_str() : nullptr;
+        const char* overlayAlbum  = g_settings.show_track_info ? album.c_str()  : nullptr;
+        if (pipelineProcessUrl(url.c_str(), overlayArtist, overlayAlbum,
+                               artist.c_str(), title.c_str(), album.c_str())) {
             g_lastArtUrl = url;
             activityLog("Queued artwork displayed");
         }
@@ -400,7 +412,8 @@ static void handlePlaying() {
         if (artUrl.length() > 0) {
             const char* overlayArtist = g_settings.show_track_info ? shazam.artist.c_str() : nullptr;
             const char* overlayAlbum  = g_settings.show_track_info ? shazam.album.c_str() : nullptr;
-            pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum);
+            pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum,
+                               shazam.artist.c_str(), shazam.title.c_str(), shazam.album.c_str());
             g_lastArtUrl = artUrl;
             activityLog("Display updated");
         } else {
@@ -436,12 +449,16 @@ static void handlePlaying() {
             if (displayIsBusy()) {
                 // Display still refreshing — queue for later instead of blocking
                 activityLog("Display busy — queuing artwork");
-                g_pendingArtUrl = artUrl;
+                g_pendingArtUrl   = artUrl;
+                g_pendingArtist   = track.artist;
+                g_pendingTitle    = track.title;
+                g_pendingAlbum    = track.album;
             } else {
                 activityLog("Downloading artwork...");
                 const char* overlayArtist = g_settings.show_track_info ? track.artist.c_str() : nullptr;
                 const char* overlayAlbum  = g_settings.show_track_info ? track.album.c_str() : nullptr;
-                if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum)) {
+                if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum,
+                                       track.artist.c_str(), track.title.c_str(), track.album.c_str())) {
                     g_lastArtUrl = artUrl;
                     activityLog("Display updated");
                 }
@@ -463,12 +480,12 @@ static void handleIdle() {
 }
 
 static void showFallbackImage() {
-    String path = sdRandomGalleryFile();
+    String path = sdHistoryRandomFile();
     if (path.length() > 0) {
-        activityLogf("Showing gallery: %s", path.c_str());
+        activityLogf("Showing history: %s", path.c_str());
         pipelineProcessFile(path.c_str());
     } else {
-        displayShowMessage("No images\nUpload at vinyl.local");
+        displayShowMessage("No images\nPlay some music!");
     }
 }
 
@@ -599,7 +616,8 @@ static void handleListen() {
     if (artUrl.length() > 0) {
         const char* overlayArtist = g_settings.show_track_info ? shazam.artist.c_str() : nullptr;
         const char* overlayAlbum  = g_settings.show_track_info ? shazam.album.c_str() : nullptr;
-        if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum)) {
+        if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum,
+                               shazam.artist.c_str(), shazam.title.c_str(), shazam.album.c_str())) {
             g_lastArtUrl = artUrl;
             activityLog("Listen: display updated");
         }

@@ -146,53 +146,48 @@ void webServerInit() {
         }
     );
 
-    // ─── List gallery ───
-    server.on("/api/gallery", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "application/json", sdListGallery());
+    // ─── List album art history ───
+    server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "application/json", sdHistoryList());
     });
 
-    // ─── Upload to gallery ───
-    server.on("/api/upload", HTTP_POST,
-        [](AsyncWebServerRequest* req) {
-            req->send(200, "application/json", "{\"ok\":true}");
-        },
-        [](AsyncWebServerRequest* req, const String& filename, size_t index,
-           uint8_t* data, size_t len, bool final) {
-            static File uploadFile;
-            if (index == 0) {
-                String path = "/gallery/" + filename;
-                SD_MMC.mkdir("/gallery");
-                uploadFile = SD_MMC.open(path, FILE_WRITE);
-                Serial.printf("[Web] Upload start: %s\n", filename.c_str());
-            }
-            if (uploadFile) {
-                uploadFile.write(data, len);
-            }
-            if (final && uploadFile) {
-                uploadFile.close();
-                Serial.printf("[Web] Upload done: %s (%u bytes)\n", filename.c_str(), index + len);
-            }
-        }
-    );
-
-    // ─── Delete gallery image ───
-    server.on("/api/gallery/delete", HTTP_POST, [](AsyncWebServerRequest* req) {
-        if (!req->hasParam("name", true)) {
-            req->send(400, "application/json", "{\"error\":\"missing name\"}");
+    // ─── Toggle history entry on/off ───
+    server.on("/api/history/toggle", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!req->hasParam("f", true) || !req->hasParam("on", true)) {
+            req->send(400, "application/json", "{\"error\":\"missing f or on\"}");
             return;
         }
-        String name = req->getParam("name", true)->value();
+        String file = req->getParam("f", true)->value();
         // Path traversal protection
-        if (name.indexOf("..") >= 0 || name.indexOf("/") >= 0) {
+        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
             req->send(400, "application/json", "{\"error\":\"invalid name\"}");
             return;
         }
-        String path = "/gallery/" + name;
-        if (sdDeleteFile(path.c_str())) {
+        bool on = req->getParam("on", true)->value() == "1";
+        if (sdHistorySetEnabled(file.c_str(), on)) {
             req->send(200, "application/json", "{\"ok\":true}");
         } else {
             req->send(404, "application/json", "{\"error\":\"not found\"}");
         }
+    });
+
+    // ─── Serve history image (thumbnail / full) ───
+    server.on("/api/history/image", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!req->hasParam("f")) {
+            req->send(400, "text/plain", "missing f");
+            return;
+        }
+        String file = req->getParam("f")->value();
+        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+            req->send(400, "text/plain", "invalid");
+            return;
+        }
+        String path = "/history/" + file;
+        if (!SD_MMC.exists(path)) {
+            req->send(404, "text/plain", "not found");
+            return;
+        }
+        req->send(SD_MMC, path, "image/jpeg");
     });
 
     // ─── Force display refresh ───
