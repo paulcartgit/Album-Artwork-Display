@@ -9,7 +9,7 @@
 #include "display.h"
 #include "sonos_client.h"
 #include "audio_capture.h"
-#include "acrcloud_client.h"
+#include "shazam_client.h"
 #include "spotify_client.h"
 #include "google_photos.h"
 #include "image_pipeline.h"
@@ -118,7 +118,7 @@ void setup() {
         return;
     }
 
-    // ── NTP time sync (needed for ACRCloud timestamp) ──
+    // ── NTP time sync ──
     configTime(0, 0, "pool.ntp.org");
 
     // ── Load settings ──
@@ -250,37 +250,37 @@ static void handlePlaying() {
             return;
         }
 
-        activityLogf("Recorded %u bytes — identifying via ACRCloud...", (unsigned)recorded);
+        activityLogf("Recorded %u bytes — identifying via Shazam...", (unsigned)recorded);
 
-        // Identify via ACRCloud
-        AcrResult acr;
-        bool identified = acrcloudIdentify(
-            g_settings.acrcloud_host,
-            g_settings.acrcloud_key,
-            g_settings.acrcloud_secret,
-            audioBuf, recorded, acr
+        // Identify via Shazam
+        ShazamResult shazam;
+        bool identified = shazamIdentify(
+            g_settings.shazam_api_key,
+            audioBuf, recorded, shazam
         );
         heap_caps_free(audioBuf);
 
         if (!identified) {
-            activityLog("ACRCloud — no match");
+            activityLog("Shazam — no match");
             showFallbackImage();
             return;
         }
 
-        activityLogf("Identified: %s — %s", acr.artist.c_str(), acr.title.c_str());
+        activityLogf("Identified: %s — %s", shazam.artist.c_str(), shazam.title.c_str());
 
-        g_currentArtist = acr.artist;
-        g_currentTitle  = acr.title;
-        g_currentAlbum  = acr.album;
-        g_lastTrackHash = trackHash(acr.artist, acr.title);
+        g_currentArtist = shazam.artist;
+        g_currentTitle  = shazam.title;
+        g_currentAlbum  = shazam.album;
+        g_lastTrackHash = trackHash(shazam.artist, shazam.title);
 
-        // Fetch album art via Spotify
-        activityLog("Fetching album art via Spotify...");
-        String artUrl = spotifyGetAlbumArtUrl(acr.artist.c_str(), acr.title.c_str());
+        // Fetch album art — prefer Shazam cover art, fall back to Spotify
+        activityLog("Fetching album art...");
+        String artUrl = shazam.coverArtUrl;
+        if (artUrl.length() == 0)
+            artUrl = spotifyGetAlbumArtUrl(shazam.artist.c_str(), shazam.title.c_str());
         if (artUrl.length() > 0) {
-            const char* overlayArtist = g_settings.show_track_info ? acr.artist.c_str() : nullptr;
-            const char* overlayAlbum  = g_settings.show_track_info ? acr.album.c_str() : nullptr;
+            const char* overlayArtist = g_settings.show_track_info ? shazam.artist.c_str() : nullptr;
+            const char* overlayAlbum  = g_settings.show_track_info ? shazam.album.c_str() : nullptr;
             pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum);
             activityLog("Display updated");
         } else {
@@ -392,7 +392,7 @@ static void handleListen() {
         return;
     }
 
-    activityLogf("Listen: recorded %uKB — sending to ACRCloud...", (unsigned)(recorded / 1024));
+    activityLogf("Listen: recorded %uKB — sending to Shazam...", (unsigned)(recorded / 1024));
 
     // Stash a copy of raw stereo data for web download/debug
     if (g_lastAudio) { heap_caps_free(g_lastAudio); g_lastAudio = nullptr; }
@@ -433,33 +433,35 @@ static void handleListen() {
         activityLogf("Listen: mono %uKB (gain %dx)", (unsigned)(monoBytes/1024), (int)gain);
     }
 
-    AcrResult acr;
-    bool identified = acrcloudIdentify(
-        g_settings.acrcloud_host,
-        g_settings.acrcloud_key,
-        g_settings.acrcloud_secret,
-        audioBuf, monoBytes, acr
+    // Shazam wants raw PCM as base64 — send mono audio directly
+    ShazamResult shazam;
+    bool identified = shazamIdentify(
+        g_settings.shazam_api_key,
+        audioBuf, monoBytes, shazam
     );
     heap_caps_free(audioBuf);
 
     if (!identified) {
-        activityLog("Listen: ACRCloud — no match");
+        activityLog("Listen: Shazam — no match");
         digitalWrite(LED_RED, LOW);
         return;
     }
 
-    activityLogf("Listen: %s — %s (%s)", acr.artist.c_str(), acr.title.c_str(), acr.album.c_str());
+    activityLogf("Listen: %s — %s (%s)", shazam.artist.c_str(), shazam.title.c_str(), shazam.album.c_str());
 
-    g_currentArtist = acr.artist;
-    g_currentTitle  = acr.title;
-    g_currentAlbum  = acr.album;
-    g_lastTrackHash = trackHash(acr.artist, acr.title);
+    g_currentArtist = shazam.artist;
+    g_currentTitle  = shazam.title;
+    g_currentAlbum  = shazam.album;
+    g_lastTrackHash = trackHash(shazam.artist, shazam.title);
 
     activityLog("Listen: fetching album art...");
-    String artUrl = spotifyGetAlbumArtUrl(acr.artist.c_str(), acr.title.c_str());
+    // Use Shazam's cover art if available, otherwise fall back to Spotify
+    String artUrl = shazam.coverArtUrl;
+    if (artUrl.length() == 0)
+        artUrl = spotifyGetAlbumArtUrl(shazam.artist.c_str(), shazam.title.c_str());
     if (artUrl.length() > 0) {
-        const char* overlayArtist = g_settings.show_track_info ? acr.artist.c_str() : nullptr;
-        const char* overlayAlbum  = g_settings.show_track_info ? acr.album.c_str() : nullptr;
+        const char* overlayArtist = g_settings.show_track_info ? shazam.artist.c_str() : nullptr;
+        const char* overlayAlbum  = g_settings.show_track_info ? shazam.album.c_str() : nullptr;
         if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum)) {
             g_lastArtUrl = artUrl;
             activityLog("Listen: display updated");

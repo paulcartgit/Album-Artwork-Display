@@ -54,9 +54,7 @@ bool sdReadSettings(Settings& settings) {
     f.close();
 
     strlcpy(settings.sonos_ip, doc["sonos_ip"] | "", sizeof(settings.sonos_ip));
-    strlcpy(settings.acrcloud_host, doc["acrcloud_host"] | "", sizeof(settings.acrcloud_host));
-    strlcpy(settings.acrcloud_key, doc["acrcloud_key"] | "", sizeof(settings.acrcloud_key));
-    strlcpy(settings.acrcloud_secret, doc["acrcloud_secret"] | "", sizeof(settings.acrcloud_secret));
+    strlcpy(settings.shazam_api_key, doc["shazam_api_key"] | "", sizeof(settings.shazam_api_key));
     strlcpy(settings.spotify_client_id, doc["spotify_client_id"] | "", sizeof(settings.spotify_client_id));
     strlcpy(settings.spotify_client_secret, doc["spotify_client_secret"] | "", sizeof(settings.spotify_client_secret));
     strlcpy(settings.google_photos_url, doc["google_photos_url"] | "", sizeof(settings.google_photos_url));
@@ -69,9 +67,7 @@ bool sdReadSettings(Settings& settings) {
 bool sdWriteSettings(const Settings& settings) {
     JsonDocument doc;
     doc["sonos_ip"] = settings.sonos_ip;
-    doc["acrcloud_host"] = settings.acrcloud_host;
-    doc["acrcloud_key"] = settings.acrcloud_key;
-    doc["acrcloud_secret"] = settings.acrcloud_secret;
+    doc["shazam_api_key"] = settings.shazam_api_key;
     doc["spotify_client_id"] = settings.spotify_client_id;
     doc["spotify_client_secret"] = settings.spotify_client_secret;
     doc["google_photos_url"] = settings.google_photos_url;

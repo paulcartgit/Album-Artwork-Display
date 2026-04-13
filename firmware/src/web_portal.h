@@ -89,10 +89,8 @@ button.danger:active{background:#722}
   <h2>Sonos</h2>
   <label>Speaker IP<input type="text" id="fSonosIp" placeholder="192.168.1.x"></label>
 
-  <h2>ACRCloud</h2>
-  <label>Host<input type="text" id="fAcrHost" placeholder="identify-eu-west-1.acrcloud.com"></label>
-  <label>Access Key<input type="text" id="fAcrKey"></label>
-  <label>Access Secret<input type="text" id="fAcrSecret" placeholder="leave blank to keep current"></label>
+  <h2>Shazam (RapidAPI)</h2>
+  <label>API Key<input type="text" id="fShazamKey" placeholder="your-rapidapi-key"></label>
 
   <h2>Spotify</h2>
   <label>Client ID<input type="text" id="fSpotifyId"></label>
@@ -188,10 +186,8 @@ async function loadSettings() {
     const r = await fetch('/api/settings');
     const d = await r.json();
     document.getElementById('fSonosIp').value = d.sonos_ip||'';
-    document.getElementById('fAcrHost').value = d.acrcloud_host||'';
-    document.getElementById('fAcrKey').value = d.acrcloud_key||'';
-    document.getElementById('fAcrSecret').value = '';
-    document.getElementById('fAcrSecret').placeholder = d.acrcloud_secret_set ? '(set — leave blank to keep)' : '';
+    document.getElementById('fShazamKey').value = '';
+    document.getElementById('fShazamKey').placeholder = d.shazam_api_key_set ? '(set — leave blank to keep)' : '';
     document.getElementById('fSpotifyId').value = d.spotify_client_id||'';
     document.getElementById('fSpotifySecret').value = '';
     document.getElementById('fSpotifySecret').placeholder = d.spotify_client_secret_set ? '(set — leave blank to keep)' : '';
@@ -205,16 +201,14 @@ async function loadSettings() {
 async function saveSettings() {
   const body = {
     sonos_ip: document.getElementById('fSonosIp').value,
-    acrcloud_host: document.getElementById('fAcrHost').value,
-    acrcloud_key: document.getElementById('fAcrKey').value,
     spotify_client_id: document.getElementById('fSpotifyId').value,
     google_photos_url: document.getElementById('fPhotosUrl').value,
     poll_interval_ms: parseInt(document.getElementById('fPollMs').value)||45000,
     show_track_info: document.getElementById('fShowTrackInfo').checked,
     use_dithering: document.getElementById('fUseDithering').checked
   };
-  const sec = document.getElementById('fAcrSecret').value;
-  if (sec) body.acrcloud_secret = sec;
+  const shz = document.getElementById('fShazamKey').value;
+  if (shz) body.shazam_api_key = shz;
   const sps = document.getElementById('fSpotifySecret').value;
   if (sps) body.spotify_client_secret = sps;
 

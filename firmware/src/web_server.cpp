@@ -51,9 +51,7 @@ void webServerInit() {
     server.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest* req) {
         JsonDocument doc;
         doc["sonos_ip"]                = g_settings.sonos_ip;
-        doc["acrcloud_host"]           = g_settings.acrcloud_host;
-        doc["acrcloud_key"]            = g_settings.acrcloud_key;
-        doc["acrcloud_secret_set"]     = strlen(g_settings.acrcloud_secret) > 0;
+        doc["shazam_api_key_set"]      = strlen(g_settings.shazam_api_key) > 0;
         doc["spotify_client_id"]       = g_settings.spotify_client_id;
         doc["spotify_client_secret_set"] = strlen(g_settings.spotify_client_secret) > 0;
         doc["google_photos_url"]       = g_settings.google_photos_url;
@@ -85,12 +83,8 @@ void webServerInit() {
 
                 if (doc["sonos_ip"].is<const char*>())
                     strlcpy(g_settings.sonos_ip, doc["sonos_ip"], sizeof(g_settings.sonos_ip));
-                if (doc["acrcloud_host"].is<const char*>())
-                    strlcpy(g_settings.acrcloud_host, doc["acrcloud_host"], sizeof(g_settings.acrcloud_host));
-                if (doc["acrcloud_key"].is<const char*>())
-                    strlcpy(g_settings.acrcloud_key, doc["acrcloud_key"], sizeof(g_settings.acrcloud_key));
-                if (doc["acrcloud_secret"].is<const char*>())
-                    strlcpy(g_settings.acrcloud_secret, doc["acrcloud_secret"], sizeof(g_settings.acrcloud_secret));
+                if (doc["shazam_api_key"].is<const char*>())
+                    strlcpy(g_settings.shazam_api_key, doc["shazam_api_key"], sizeof(g_settings.shazam_api_key));
                 if (doc["spotify_client_id"].is<const char*>())
                     strlcpy(g_settings.spotify_client_id, doc["spotify_client_id"], sizeof(g_settings.spotify_client_id));
                 if (doc["spotify_client_secret"].is<const char*>())

@@ -61,8 +61,8 @@ bool acrcloudIdentify(const char* host, const char* accessKey, const char* acces
 
     // File part header
     pre += "--" + boundary + "\r\n";
-    pre += "Content-Disposition: form-data; name=\"sample\"; filename=\"audio.pcm\"\r\n";
-    pre += "Content-Type: application/octet-stream\r\n\r\n";
+    pre += "Content-Disposition: form-data; name=\"sample\"; filename=\"audio.wav\"\r\n";
+    pre += "Content-Type: audio/wav\r\n\r\n";
 
     String post = "\r\n--" + boundary + "--\r\n";
 
@@ -107,6 +107,7 @@ bool acrcloudIdentify(const char* host, const char* accessKey, const char* acces
     const char* statusMsg = doc["status"]["msg"] | "unknown";
     Serial.printf("[ACRCloud] Status %d: %s\n", status, statusMsg);
     if (status != 0) {
+        Serial.printf("[ACRCloud] Full response: %s\n", response.c_str());
         return false;
     }
 

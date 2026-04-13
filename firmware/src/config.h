@@ -90,9 +90,7 @@ enum AppState {
 // ─── Settings (stored in /settings.json on SD) ───
 struct Settings {
     char sonos_ip[64];
-    char acrcloud_host[128];
-    char acrcloud_key[64];
-    char acrcloud_secret[128];
+    char shazam_api_key[128];
     char spotify_client_id[64];
     char spotify_client_secret[128];
     char google_photos_url[256];
