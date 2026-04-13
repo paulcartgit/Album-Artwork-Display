@@ -94,8 +94,6 @@ enum AppState {
 struct Settings {
     char sonos_ip[64];
     char shazam_api_key[128];
-    char spotify_client_id[64];
-    char spotify_client_secret[128];
     // Timing
     uint32_t sonos_poll_ms;
     uint32_t vinyl_recheck_ms;

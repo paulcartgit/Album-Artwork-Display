@@ -94,8 +94,6 @@ void webServerInit() {
         JsonDocument doc;
         doc["sonos_ip"]                = g_settings.sonos_ip;
         doc["shazam_api_key_set"]      = strlen(g_settings.shazam_api_key) > 0;
-        doc["spotify_client_id"]       = g_settings.spotify_client_id;
-        doc["spotify_client_secret_set"] = strlen(g_settings.spotify_client_secret) > 0;
         doc["sonos_poll_ms"]           = g_settings.sonos_poll_ms;
         doc["vinyl_recheck_ms"]        = g_settings.vinyl_recheck_ms;
         doc["no_match_cooldown_ms"]    = g_settings.no_match_cooldown_ms;
@@ -129,10 +127,6 @@ void webServerInit() {
                     strlcpy(g_settings.sonos_ip, doc["sonos_ip"], sizeof(g_settings.sonos_ip));
                 if (doc["shazam_api_key"].is<const char*>())
                     strlcpy(g_settings.shazam_api_key, doc["shazam_api_key"], sizeof(g_settings.shazam_api_key));
-                if (doc["spotify_client_id"].is<const char*>())
-                    strlcpy(g_settings.spotify_client_id, doc["spotify_client_id"], sizeof(g_settings.spotify_client_id));
-                if (doc["spotify_client_secret"].is<const char*>())
-                    strlcpy(g_settings.spotify_client_secret, doc["spotify_client_secret"], sizeof(g_settings.spotify_client_secret));
                 if (doc["sonos_poll_ms"].is<unsigned int>())
                     g_settings.sonos_poll_ms = doc["sonos_poll_ms"];
                 if (doc["vinyl_recheck_ms"].is<unsigned int>())

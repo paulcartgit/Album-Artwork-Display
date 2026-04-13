@@ -40,29 +40,48 @@ static bool tjpgCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t*
     return true;
 }
 
-// ─── Compute average color of image edges (for background fill) ───
+// ─── Compute background fill color from image edges ───
+// Saturation-weighted average: vibrant edge pixels dominate over dull/grey ones,
+// preventing the common "muddy brown" result from simple averaging.
+// A mild saturation boost afterward pushes the result toward the dominant hue.
 static void averageEdgeColor(const uint8_t* src, int w, int h, uint8_t& rOut, uint8_t& gOut, uint8_t& bOut) {
-    uint32_t rSum = 0, gSum = 0, bSum = 0, count = 0;
-    // Sample top/bottom rows and left/right columns
+    float rSum = 0, gSum = 0, bSum = 0, wSum = 0;
+
+    auto addPixel = [&](int i) {
+        uint8_t r = src[i], g = src[i+1], b = src[i+2];
+        uint8_t mx = max(max(r, g), b);
+        uint8_t mn = min(min(r, g), b);
+        // HSV saturation (0..1), squared to strongly prefer vibrant pixels
+        float sat = (mx > 0) ? (float)(mx - mn) / mx : 0.0f;
+        float weight = 0.1f + sat * sat;
+        rSum += r * weight;
+        gSum += g * weight;
+        bSum += b * weight;
+        wSum += weight;
+    };
+
     for (int x = 0; x < w; x++) {
-        // Top row
-        int i = x * 3;
-        rSum += src[i]; gSum += src[i+1]; bSum += src[i+2]; count++;
-        // Bottom row
-        i = ((h-1) * w + x) * 3;
-        rSum += src[i]; gSum += src[i+1]; bSum += src[i+2]; count++;
+        addPixel(x * 3);                     // top row
+        addPixel(((h-1) * w + x) * 3);       // bottom row
     }
     for (int y = 1; y < h - 1; y++) {
-        // Left column
-        int i = (y * w) * 3;
-        rSum += src[i]; gSum += src[i+1]; bSum += src[i+2]; count++;
-        // Right column
-        i = (y * w + w - 1) * 3;
-        rSum += src[i]; gSum += src[i+1]; bSum += src[i+2]; count++;
+        addPixel((y * w) * 3);               // left column
+        addPixel((y * w + w - 1) * 3);       // right column
     }
-    rOut = rSum / count;
-    gOut = gSum / count;
-    bOut = bSum / count;
+
+    float r = rSum / wSum;
+    float g = gSum / wSum;
+    float b = bSum / wSum;
+
+    // Boost saturation ~30% to push away from grey toward dominant hue
+    float gray = 0.299f * r + 0.587f * g + 0.114f * b;
+    r = gray + (r - gray) * 1.3f;
+    g = gray + (g - gray) * 1.3f;
+    b = gray + (b - gray) * 1.3f;
+
+    rOut = constrain((int)(r + 0.5f), 0, 255);
+    gOut = constrain((int)(g + 0.5f), 0, 255);
+    bOut = constrain((int)(b + 0.5f), 0, 255);
 }
 
 // ─── Render text into RGB888 buffer using Adafruit GFX ───
@@ -114,6 +133,96 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
             // else: leave the background fill color as-is
         }
     }
+}
+
+// ─── Pre-dither image enhancement for e-ink output ───
+// Applies mild unsharp-mask sharpening + contrast boost + gamma correction
+// in a single pass using a 3-row rolling buffer (~4 KB working memory).
+static void enhanceForEink(uint8_t* rgb, int w, int h) {
+    const float sharpenAmt   = 0.4f;   // unsharp mask strength
+    const float contrastFact = 1.2f;   // 20 % contrast boost
+    const float gamma        = 0.9f;   // < 1 lifts midtones slightly
+    const int   rowBytes     = w * 3;
+
+    // Combined contrast + gamma LUT (one per intensity level)
+    // Shadow protection: below shadowThresh, blend toward identity so darks
+    // stay dark and map cleanly to black on e-ink (no dither noise in hair etc.)
+    const int shadowThresh = 50;
+    uint8_t lut[256];
+    for (int i = 0; i < 256; i++) {
+        float v = 128.0f + (i - 128.0f) * contrastFact;
+        if (v < 0.0f)   v = 0.0f;
+        if (v > 255.0f) v = 255.0f;
+        v = 255.0f * powf(v / 255.0f, gamma);
+        int enhanced = (int)(v + 0.5f);
+        if (enhanced < 0)   enhanced = 0;
+        if (enhanced > 255) enhanced = 255;
+
+        // Blend: shadows keep original value, midtones/highlights get enhanced
+        if (i < shadowThresh) {
+            float t = (float)i / shadowThresh; // 0 at black → 1 at threshold
+            lut[i] = (uint8_t)(i + t * (enhanced - i) + 0.5f);
+        } else {
+            lut[i] = (uint8_t)enhanced;
+        }
+    }
+
+    // 3-row rolling buffer so we can read original values while writing back
+    uint8_t* prev = (uint8_t*)malloc(rowBytes);
+    uint8_t* curr = (uint8_t*)malloc(rowBytes);
+    uint8_t* next = (uint8_t*)malloc(rowBytes);
+    if (!prev || !curr || !next) {
+        free(prev); free(curr); free(next);
+        Serial.println("[Pipeline] Enhance alloc failed, contrast+gamma only");
+        for (int i = 0; i < w * h * 3; i++) rgb[i] = lut[rgb[i]];
+        return;
+    }
+
+    memcpy(prev, &rgb[0], rowBytes);                         // top-edge clamp
+    memcpy(curr, &rgb[0], rowBytes);
+    memcpy(next, (h > 1) ? &rgb[rowBytes] : &rgb[0], rowBytes);
+
+    for (int y = 0; y < h; y++) {
+        uint8_t* dst = &rgb[y * rowBytes];
+
+        for (int x = 0; x < w; x++) {
+            int xl = (x > 0)     ? x - 1 : 0;
+            int xr = (x < w - 1) ? x + 1 : w - 1;
+
+            for (int c = 0; c < 3; c++) {
+                // 3×3 box-blur average
+                int sum = prev[xl*3+c] + prev[x*3+c] + prev[xr*3+c]
+                        + curr[xl*3+c] + curr[x*3+c] + curr[xr*3+c]
+                        + next[xl*3+c] + next[x*3+c] + next[xr*3+c];
+                int blur = sum / 9;
+                int orig = curr[x*3+c];
+
+                // Unsharp mask
+                int sharp = orig + (int)(sharpenAmt * (orig - blur));
+                if (sharp < 0)   sharp = 0;
+                if (sharp > 255) sharp = 255;
+
+                // Apply contrast + gamma via LUT
+                dst[x*3+c] = lut[sharp];
+            }
+        }
+
+        // Rotate rolling buffer
+        uint8_t* tmp = prev;
+        prev = curr;
+        curr = next;
+        next = tmp;
+
+        if (y + 2 < h)
+            memcpy(next, &rgb[(y + 2) * rowBytes], rowBytes);
+        else
+            memcpy(next, curr, rowBytes);   // bottom-edge clamp
+    }
+
+    free(prev);
+    free(curr);
+    free(next);
+    Serial.println("[Pipeline] Enhanced (sharpen+contrast+gamma)");
 }
 
 // ─── Core: decode JPEG buffer → scale → optional text → dither → display ───
@@ -198,7 +307,10 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
                    textAreaY, textAreaH, bgR, bgG, bgB);
     }
 
-    // 4. Dither to 7-colour packed buffer
+    // 3.5. Pre-dither enhancement (sharpen + contrast + gamma)
+    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+
+    // 4. Dither to 6-colour packed buffer
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
     uint8_t* packedBuf = (uint8_t*)heap_caps_calloc(packedSize, 1, MALLOC_CAP_SPIRAM);
     if (!packedBuf) {

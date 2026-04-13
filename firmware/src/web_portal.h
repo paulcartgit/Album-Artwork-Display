@@ -96,10 +96,6 @@ button.danger:active{background:#722}
   <h2>Shazam (RapidAPI)</h2>
   <label>API Key<input type="text" id="fShazamKey" placeholder="your-rapidapi-key"></label>
 
-  <h2>Spotify</h2>
-  <label>Client ID<input type="text" id="fSpotifyId"></label>
-  <label>Client Secret<input type="text" id="fSpotifySecret" placeholder="leave blank to keep current"></label>
-
   <h2>Timing</h2>
   <label>Sonos check interval
     <div style="display:flex;align-items:center;gap:8px">
@@ -163,7 +159,7 @@ button.danger:active{background:#722}
   <a href="/api/last-audio" download="recording.wav"><button type="button" class="debug-btn">Download Last Audio</button></a>
   <p style="color:#666;font-size:.75rem;margin-top:16px">
     <b>Force Display Refresh</b> — re-fetches artwork and redraws the e-ink display.<br>
-    <b>Test Color Pattern</b> — shows 6 color bands to verify e-ink panel.<br>
+    <b>Test Color Pattern</b> — shows 6 color bands to verify all e-ink pigments.<br>
     <b>Download Last Audio</b> — saves the most recent recording as a WAV file.
   </p>
 </div>
@@ -273,9 +269,6 @@ async function loadSettings() {
     document.getElementById('fSonosIp').value = d.sonos_ip||'';
     document.getElementById('fShazamKey').value = '';
     document.getElementById('fShazamKey').placeholder = d.shazam_api_key_set ? '(set — leave blank to keep)' : '';
-    document.getElementById('fSpotifyId').value = d.spotify_client_id||'';
-    document.getElementById('fSpotifySecret').value = '';
-    document.getElementById('fSpotifySecret').placeholder = d.spotify_client_secret_set ? '(set — leave blank to keep)' : '';
     // Timing sliders (API gives ms, sliders use seconds/minutes)
     const sp = document.getElementById('fSonosPoll');
     sp.value = Math.round((d.sonos_poll_ms||10000)/1000); sp.oninput();
@@ -293,7 +286,6 @@ async function loadSettings() {
 async function saveSettings() {
   const body = {
     sonos_ip: document.getElementById('fSonosIp').value,
-    spotify_client_id: document.getElementById('fSpotifyId').value,
     sonos_poll_ms: parseInt(document.getElementById('fSonosPoll').value)*1000,
     vinyl_recheck_ms: parseInt(document.getElementById('fVinylRecheck').value)*60000,
     no_match_cooldown_ms: parseInt(document.getElementById('fCooldown').value)*60000,
@@ -303,9 +295,6 @@ async function saveSettings() {
   };
   const shz = document.getElementById('fShazamKey').value;
   if (shz) body.shazam_api_key = shz;
-  const sps = document.getElementById('fSpotifySecret').value;
-  if (sps) body.spotify_client_secret = sps;
-
   const el = document.getElementById('settingsMsg');
   try {
     const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});

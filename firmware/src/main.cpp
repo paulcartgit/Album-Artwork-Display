@@ -10,7 +10,6 @@
 #include "sonos_client.h"
 #include "audio_capture.h"
 #include "shazam_client.h"
-#include "spotify_client.h"
 #include "image_pipeline.h"
 #include "web_server.h"
 #include "activity_log.h"
@@ -25,6 +24,9 @@ String   g_currentAlbum;
 // ─── Track-change detection ───
 static String g_lastTrackHash;
 String g_lastArtUrl;
+
+// ─── Pending display update (queued while display is refreshing) ───
+static String g_pendingArtUrl;
 
 static String trackHash(const String& artist, const String& title) {
     return artist + "|" + title;
@@ -143,11 +145,6 @@ void setup() {
     // ── Load settings ──
     sdReadSettings(g_settings);
 
-    // ── Init subsystems ──
-    if (strlen(g_settings.spotify_client_id) > 0) {
-        spotifyInit(g_settings.spotify_client_id, g_settings.spotify_client_secret);
-    }
-
     // ── Web server ──
     webServerInit();
 
@@ -167,6 +164,17 @@ void loop() {
     }
 
     unsigned long now = millis();
+
+    // Process pending display update once panel finishes refreshing
+    if (g_pendingArtUrl.length() > 0 && !displayIsBusy()) {
+        String url = g_pendingArtUrl;
+        g_pendingArtUrl = "";
+        activityLog("Processing queued artwork...");
+        if (pipelineProcessUrl(url.c_str())) {
+            g_lastArtUrl = url;
+            activityLog("Queued artwork displayed");
+        }
+    }
 
     // Test color pattern (must run in main loop, not web handler)
     if (g_testColors) {
@@ -386,11 +394,9 @@ static void handlePlaying() {
         g_currentTitle  = shazam.title;
         g_currentAlbum  = shazam.album;
 
-        // Fetch album art — prefer Shazam cover art, fall back to Spotify
+        // Fetch album art from Shazam
         activityLog("Fetching album art...");
         String artUrl = shazam.coverArtUrl;
-        if (artUrl.length() == 0)
-            artUrl = spotifyGetAlbumArtUrl(shazam.artist.c_str(), shazam.title.c_str());
         if (artUrl.length() > 0) {
             const char* overlayArtist = g_settings.show_track_info ? shazam.artist.c_str() : nullptr;
             const char* overlayAlbum  = g_settings.show_track_info ? shazam.album.c_str() : nullptr;
@@ -418,12 +424,7 @@ static void handlePlaying() {
         activityLogf("Track: %s — %s (%s)",
                       track.artist.c_str(), track.title.c_str(), track.album.c_str());
 
-        // Prefer Sonos-provided art URL, fall back to Spotify search
         String artUrl = track.artUrl;
-        if (artUrl.length() == 0) {
-            activityLog("No Sonos art URL — searching Spotify...");
-            artUrl = spotifyGetAlbumArtUrl(track.artist.c_str(), track.title.c_str());
-        }
 
         // Skip display refresh if the artwork hasn't changed (same album)
         if (artUrl.length() > 0 && artUrl == g_lastArtUrl) {
@@ -432,12 +433,18 @@ static void handlePlaying() {
         }
 
         if (artUrl.length() > 0) {
-            activityLog("Downloading artwork...");
-            const char* overlayArtist = g_settings.show_track_info ? track.artist.c_str() : nullptr;
-            const char* overlayAlbum  = g_settings.show_track_info ? track.album.c_str() : nullptr;
-            if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum)) {
-                g_lastArtUrl = artUrl;
-                activityLog("Display updated");
+            if (displayIsBusy()) {
+                // Display still refreshing — queue for later instead of blocking
+                activityLog("Display busy — queuing artwork");
+                g_pendingArtUrl = artUrl;
+            } else {
+                activityLog("Downloading artwork...");
+                const char* overlayArtist = g_settings.show_track_info ? track.artist.c_str() : nullptr;
+                const char* overlayAlbum  = g_settings.show_track_info ? track.album.c_str() : nullptr;
+                if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum)) {
+                    g_lastArtUrl = artUrl;
+                    activityLog("Display updated");
+                }
             }
         } else {
             activityLog("No album art found — showing fallback");
@@ -588,10 +595,7 @@ static void handleListen() {
     g_lastTrackHash = trackHash(shazam.artist, shazam.title);
 
     activityLog("Listen: fetching album art...");
-    // Use Shazam's cover art if available, otherwise fall back to Spotify
     String artUrl = shazam.coverArtUrl;
-    if (artUrl.length() == 0)
-        artUrl = spotifyGetAlbumArtUrl(shazam.artist.c_str(), shazam.title.c_str());
     if (artUrl.length() > 0) {
         const char* overlayArtist = g_settings.show_track_info ? shazam.artist.c_str() : nullptr;
         const char* overlayAlbum  = g_settings.show_track_info ? shazam.album.c_str() : nullptr;
