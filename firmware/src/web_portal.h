@@ -31,6 +31,13 @@ button{padding:10px 20px;background:#2a6;border:none;border-radius:6px;color:#ff
 button:active{background:#185}
 button.danger{background:#a33}
 button.danger:active{background:#722}
+.listen-btn{display:block;width:100%;padding:14px;background:#2980b9;border:none;border-radius:8px;
+            color:#fff;font-size:1rem;cursor:pointer;margin:12px 0;text-align:center}
+.listen-btn:active{background:#1a5276}
+.listen-btn:disabled{background:#333;color:#666;cursor:default}
+.debug-btn{padding:8px 14px;background:#333;border:1px solid #444;border-radius:6px;color:#aaa;
+           font-size:.85rem;cursor:pointer;margin-right:8px;margin-top:8px}
+.debug-btn:active{background:#444}
 .gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:12px}
 .gallery-item{background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:8px;
               text-align:center;font-size:.75rem;color:#aaa;word-break:break-all;position:relative}
@@ -49,40 +56,33 @@ button.danger:active{background:#722}
 <h1>&#127926; Vinyl Display</h1>
 
 <div class="tabs">
-  <div class="tab active" onclick="showTab('status')">Status</div>
+  <div class="tab active" onclick="showTab('status')">Now Playing</div>
   <div class="tab" onclick="showTab('settings')">Settings</div>
   <div class="tab" onclick="showTab('gallery')">Gallery</div>
+  <div class="tab" onclick="showTab('debug')">Debug</div>
 </div>
 
-<!-- STATUS -->
+<!-- NOW PLAYING -->
 <div id="status" class="panel active">
-  <div class="status-card">
-    <div class="status-label">State</div>
-    <div class="status-value" id="sState">—</div>
+  <div class="status-card" style="text-align:center">
+    <div class="status-label" id="sStateLabel">Idle</div>
+    <img id="sArt" style="display:none;max-width:100%;border-radius:6px;margin:12px auto 8px">
+    <div class="status-value" id="sTrack" style="font-size:1.2rem">Nothing playing</div>
+    <div id="sAlbum" style="font-size:.9rem;color:#999;margin-top:2px"></div>
   </div>
-  <div class="status-card">
-    <div class="status-label">Now Playing</div>
-    <div class="status-value" id="sTrack">—</div>
-    <div class="status-value" id="sAlbum" style="font-size:.9rem;color:#999;margin-top:2px"></div>
+  <div class="status-card" id="scheduleCard" style="display:none">
+    <div class="status-label">Next check</div>
+    <div class="status-value" id="sSchedule" style="font-size:.9rem;color:#bbb"></div>
   </div>
-  <div class="status-card">
-    <div class="status-label">Schedule</div>
-    <div class="status-value" id="sSchedule" style="font-size:.9rem;color:#bbb">—</div>
+  <div style="display:flex;gap:8px;margin:12px 0">
+    <button class="listen-btn" style="flex:1;margin:0" onclick="forceListen()">&#127911; Listen</button>
+    <button class="listen-btn" style="flex:1;margin:0;background:#2a6" onclick="forceRefresh()">&#x1f504; Check Sonos</button>
   </div>
-  <div class="status-card">
-    <div class="status-label">IP Address</div>
-    <div class="status-value" id="sIP">—</div>
+  <div style="display:flex;gap:8px;text-align:center;font-size:.7rem;color:#666;margin-top:-4px;margin-bottom:12px">
+    <div style="flex:1">Identify what's playing in the room</div>
+    <div style="flex:1">Re-check Sonos for track info</div>
   </div>
-  <div class="status-card">
-    <div class="status-label">Uptime</div>
-    <div class="status-value" id="sUptime">—</div>
-  </div>
-  <button onclick="loadStatus()">Refresh Status</button>
-  <button onclick="forceRefresh()" style="background:#e67e22;margin-left:8px">Force Display Refresh</button>
-  <button onclick="forceListen()" style="background:#2980b9;margin-left:8px">&#127911; Listen</button>
-  <a href="/api/last-audio" download="recording.wav" style="margin-left:8px"><button type="button" style="background:#16a085">&#128266; Download Audio</button></a>
-  <button onclick="testColors()" style="background:#8e44ad;margin-left:8px">Test Colors</button>
-  <div class="status-card" style="margin-top:16px">
+  <div class="status-card" style="margin-top:12px">
     <div class="status-label">Activity Log</div>
     <div id="sLog" style="font-family:monospace;font-size:.75rem;color:#aaa;max-height:300px;overflow-y:auto;margin-top:8px;line-height:1.6"></div>
   </div>
@@ -100,11 +100,31 @@ button.danger:active{background:#722}
   <label>Client ID<input type="text" id="fSpotifyId"></label>
   <label>Client Secret<input type="text" id="fSpotifySecret" placeholder="leave blank to keep current"></label>
 
-  <h2>Google Photos</h2>
-  <label>Bridge URL<input type="text" id="fPhotosUrl" placeholder="https://script.google.com/..."></label>
-
-  <h2>Polling</h2>
-  <label>Interval (ms)<input type="number" id="fPollMs" min="10000" step="1000"></label>
+  <h2>Timing</h2>
+  <label>Sonos check interval
+    <div style="display:flex;align-items:center;gap:8px">
+      <input type="range" id="fSonosPoll" min="5" max="60" style="flex:1">
+      <span id="fSonosPollVal" style="min-width:3em;color:#eee"></span>
+    </div>
+  </label>
+  <label>Vinyl re-identify interval
+    <div style="display:flex;align-items:center;gap:8px">
+      <input type="range" id="fVinylRecheck" min="1" max="30" style="flex:1">
+      <span id="fVinylRecheckVal" style="min-width:3em;color:#eee"></span>
+    </div>
+  </label>
+  <label>No-match cooldown
+    <div style="display:flex;align-items:center;gap:8px">
+      <input type="range" id="fCooldown" min="1" max="15" style="flex:1">
+      <span id="fCooldownVal" style="min-width:3em;color:#eee"></span>
+    </div>
+  </label>
+  <label>Idle gallery rotation
+    <div style="display:flex;align-items:center;gap:8px">
+      <input type="range" id="fIdleGallery" min="1" max="30" style="flex:1">
+      <span id="fIdleGalleryVal" style="min-width:3em;color:#eee"></span>
+    </div>
+  </label>
 
   <h2>Display</h2>
   <label style="margin-top:8px;display:flex;align-items:center;gap:8px">
@@ -130,6 +150,24 @@ button.danger:active{background:#722}
   <div class="gallery-grid" id="galleryGrid"></div>
 </div>
 
+<!-- DEBUG -->
+<div id="debug" class="panel">
+  <div class="status-card">
+    <div class="status-label">Device Info</div>
+    <div class="status-value" style="font-size:.9rem">
+      <span id="dIP">—</span> &middot; Uptime: <span id="dUptime">—</span>
+    </div>
+  </div>
+  <button class="debug-btn" onclick="forceRefresh()">Force Display Refresh</button>
+  <button class="debug-btn" onclick="testColors()">Test Color Pattern</button>
+  <a href="/api/last-audio" download="recording.wav"><button type="button" class="debug-btn">Download Last Audio</button></a>
+  <p style="color:#666;font-size:.75rem;margin-top:16px">
+    <b>Force Display Refresh</b> — re-fetches artwork and redraws the e-ink display.<br>
+    <b>Test Color Pattern</b> — shows 6 color bands to verify e-ink panel.<br>
+    <b>Download Last Audio</b> — saves the most recent recording as a WAV file.
+  </p>
+</div>
+
 <script>
 const STATES = ['BOOT','IDLE','DIGITAL','VINYL','ERROR'];
 function fmtSec(s) {
@@ -140,30 +178,40 @@ function fmtSec(s) {
 }
 
 function showTab(name) {
-  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', t.textContent.toLowerCase()===name));
+  document.querySelectorAll('.tab').forEach(t => {
+    const tabName = t.textContent.toLowerCase().replace(' ','');
+    const map = {'nowplaying':'status','settings':'settings','gallery':'gallery','debug':'debug'};
+    t.classList.toggle('active', map[tabName]===name);
+  });
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id===name));
   if (name==='status') loadStatus();
   if (name==='settings') loadSettings();
   if (name==='gallery') loadGallery();
+  if (name==='debug') loadDebug();
 }
 
 async function loadStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
-    document.getElementById('sState').textContent = d.state_name || STATES[d.state] || d.state;
-    document.getElementById('sTrack').textContent = (d.artist && d.title) ? d.artist+' — '+d.title : 'Nothing';
+    const state = d.state_name || STATES[d.state] || 'Unknown';
+    const hasTrack = d.artist && d.title;
+    const labels = {IDLE:'Idle',VINYL:'Listening to Vinyl',DIGITAL:'Playing Digital',BOOT:'Starting up',ERROR:'Error'};
+    document.getElementById('sStateLabel').textContent = labels[state] || state;
+    document.getElementById('sTrack').textContent = hasTrack ? d.artist+' — '+d.title : 'Nothing playing';
     document.getElementById('sAlbum').textContent = d.album || '';
-    // Schedule info
+    // Artwork
+    const artEl = document.getElementById('sArt');
+    if (d.art_url) { artEl.src = d.art_url; artEl.style.display = ''; }
+    else { artEl.style.display = 'none'; artEl.removeAttribute('src'); }
     let sched = [];
-    if (d.next_poll_sec != null) sched.push('Next Sonos poll: '+fmtSec(d.next_poll_sec));
-    if (d.next_vinyl_check_sec != null) sched.push('Next vinyl re-identify: '+fmtSec(d.next_vinyl_check_sec)+' (every '+d.vinyl_recheck_min+'m)');
-    if (d.retry_in_sec != null) sched.push('&#x1f504; Retry '+d.no_match_retries+'/3 — next attempt in '+fmtSec(d.retry_in_sec));
-    if (d.cooldown_remaining_sec != null) sched.push('&#x23f8; Cooldown (3 no-matches): '+fmtSec(d.cooldown_remaining_sec)+' remaining');
-    document.getElementById('sSchedule').innerHTML = sched.length ? sched.join('<br>') : 'No upcoming checks';
-    document.getElementById('sIP').textContent = d.ip;
-    const m = Math.floor(d.uptime/60), h = Math.floor(m/60);
-    document.getElementById('sUptime').textContent = h+'h '+m%60+'m';
+    if (d.next_poll_sec != null) sched.push('Sonos check in '+fmtSec(d.next_poll_sec));
+    if (d.next_vinyl_check_sec != null) sched.push('Vinyl re-identify in '+fmtSec(d.next_vinyl_check_sec));
+    if (d.retry_in_sec != null) sched.push('&#x1f504; Retry '+d.no_match_retries+'/3 in '+fmtSec(d.retry_in_sec));
+    if (d.cooldown_remaining_sec != null) sched.push('&#x23f8; Paused — retrying in '+fmtSec(d.cooldown_remaining_sec));
+    const schedEl = document.getElementById('scheduleCard');
+    if (sched.length) { schedEl.style.display=''; document.getElementById('sSchedule').innerHTML=sched.join('<br>'); }
+    else { schedEl.style.display='none'; }
   } catch(e) { console.error(e); }
   try {
     const r2 = await fetch('/api/log');
@@ -174,6 +222,16 @@ async function loadStatus() {
       const ts = hh+'h'+String(mm%60).padStart(2,'0')+'m'+String(l.t%60).padStart(2,'0')+'s';
       return '<div><span style="color:#666">'+ts+'</span> '+l.m+'</div>';
     }).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function loadDebug() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    document.getElementById('dIP').textContent = d.ip;
+    const m = Math.floor(d.uptime/60), h = Math.floor(m/60);
+    document.getElementById('dUptime').textContent = h+'h '+m%60+'m';
   } catch(e) { console.error(e); }
 }
 
@@ -198,6 +256,16 @@ async function testColors() {
   } catch(e) { alert('Failed: '+e.message); }
 }
 
+function bindSlider(id, valId, suffix) {
+  const sl = document.getElementById(id);
+  const vl = document.getElementById(valId);
+  sl.oninput = () => { vl.textContent = sl.value + suffix; };
+}
+bindSlider('fSonosPoll','fSonosPollVal','s');
+bindSlider('fVinylRecheck','fVinylRecheckVal',' min');
+bindSlider('fCooldown','fCooldownVal',' min');
+bindSlider('fIdleGallery','fIdleGalleryVal',' min');
+
 async function loadSettings() {
   try {
     const r = await fetch('/api/settings');
@@ -208,8 +276,15 @@ async function loadSettings() {
     document.getElementById('fSpotifyId').value = d.spotify_client_id||'';
     document.getElementById('fSpotifySecret').value = '';
     document.getElementById('fSpotifySecret').placeholder = d.spotify_client_secret_set ? '(set — leave blank to keep)' : '';
-    document.getElementById('fPhotosUrl').value = d.google_photos_url||'';
-    document.getElementById('fPollMs').value = d.poll_interval_ms||45000;
+    // Timing sliders (API gives ms, sliders use seconds/minutes)
+    const sp = document.getElementById('fSonosPoll');
+    sp.value = Math.round((d.sonos_poll_ms||10000)/1000); sp.oninput();
+    const vr = document.getElementById('fVinylRecheck');
+    vr.value = Math.round((d.vinyl_recheck_ms||600000)/60000); vr.oninput();
+    const cd = document.getElementById('fCooldown');
+    cd.value = Math.round((d.no_match_cooldown_ms||300000)/60000); cd.oninput();
+    const ig = document.getElementById('fIdleGallery');
+    ig.value = Math.round((d.idle_gallery_ms||300000)/60000); ig.oninput();
     document.getElementById('fShowTrackInfo').checked = !!d.show_track_info;
     document.getElementById('fUseDithering').checked = d.use_dithering !== false;
   } catch(e) { console.error(e); }
@@ -219,8 +294,10 @@ async function saveSettings() {
   const body = {
     sonos_ip: document.getElementById('fSonosIp').value,
     spotify_client_id: document.getElementById('fSpotifyId').value,
-    google_photos_url: document.getElementById('fPhotosUrl').value,
-    poll_interval_ms: parseInt(document.getElementById('fPollMs').value)||45000,
+    sonos_poll_ms: parseInt(document.getElementById('fSonosPoll').value)*1000,
+    vinyl_recheck_ms: parseInt(document.getElementById('fVinylRecheck').value)*60000,
+    no_match_cooldown_ms: parseInt(document.getElementById('fCooldown').value)*60000,
+    idle_gallery_ms: parseInt(document.getElementById('fIdleGallery').value)*60000,
     show_track_info: document.getElementById('fShowTrackInfo').checked,
     use_dithering: document.getElementById('fUseDithering').checked
   };

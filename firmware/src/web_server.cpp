@@ -25,10 +25,9 @@ extern uint32_t g_lastAudioChannels;
 extern uint32_t g_lastAudioSampleRate;
 extern unsigned long g_lastPollTime;
 extern unsigned long g_lastNoMatchTime;
-extern unsigned long NO_MATCH_COOLDOWN;
-extern unsigned long VINYL_RECHECK_MS;
 extern int g_vinylNoMatchCount;
 extern unsigned long g_lastVinylMatchTime;
+extern String g_lastArtUrl;
 
 static AsyncWebServer server(80);
 
@@ -48,13 +47,14 @@ void webServerInit() {
         doc["artist"]     = g_currentArtist;
         doc["title"]      = g_currentTitle;
         doc["album"]      = g_currentAlbum;
+        doc["art_url"]    = g_lastArtUrl;
         doc["ip"]         = WiFi.localIP().toString();
         doc["uptime"]     = millis() / 1000;
 
         // Timing: next Sonos poll
         unsigned long now = millis();
         unsigned long elapsed = now - g_lastPollTime;
-        unsigned long pollInterval = g_settings.poll_interval_ms;
+        unsigned long pollInterval = g_settings.sonos_poll_ms;
         if (elapsed < pollInterval)
             doc["next_poll_sec"] = (pollInterval - elapsed) / 1000;
         else
@@ -63,11 +63,11 @@ void webServerInit() {
         // Timing: vinyl recheck
         if (g_state == STATE_VINYL && g_lastVinylMatchTime != 0) {
             unsigned long since = now - g_lastVinylMatchTime;
-            if (since < VINYL_RECHECK_MS)
-                doc["next_vinyl_check_sec"] = (VINYL_RECHECK_MS - since) / 1000;
+            if (since < g_settings.vinyl_recheck_ms)
+                doc["next_vinyl_check_sec"] = (g_settings.vinyl_recheck_ms - since) / 1000;
             else
                 doc["next_vinyl_check_sec"] = 0;
-            doc["vinyl_recheck_min"] = VINYL_RECHECK_MS / 60000;
+            doc["vinyl_recheck_min"] = g_settings.vinyl_recheck_ms / 60000;
         }
 
         // Timing: no-match retry / cooldown
@@ -75,8 +75,8 @@ void webServerInit() {
             unsigned long since = now - g_lastNoMatchTime;
             doc["no_match_retries"] = g_vinylNoMatchCount;
             if (g_vinylNoMatchCount >= 3) {
-                if (since < NO_MATCH_COOLDOWN)
-                    doc["cooldown_remaining_sec"] = (NO_MATCH_COOLDOWN - since) / 1000;
+                if (since < g_settings.no_match_cooldown_ms)
+                    doc["cooldown_remaining_sec"] = (g_settings.no_match_cooldown_ms - since) / 1000;
             } else {
                 unsigned long retryDelay = 15000;
                 if (since < retryDelay)
@@ -96,8 +96,10 @@ void webServerInit() {
         doc["shazam_api_key_set"]      = strlen(g_settings.shazam_api_key) > 0;
         doc["spotify_client_id"]       = g_settings.spotify_client_id;
         doc["spotify_client_secret_set"] = strlen(g_settings.spotify_client_secret) > 0;
-        doc["google_photos_url"]       = g_settings.google_photos_url;
-        doc["poll_interval_ms"]        = g_settings.poll_interval_ms;
+        doc["sonos_poll_ms"]           = g_settings.sonos_poll_ms;
+        doc["vinyl_recheck_ms"]        = g_settings.vinyl_recheck_ms;
+        doc["no_match_cooldown_ms"]    = g_settings.no_match_cooldown_ms;
+        doc["idle_gallery_ms"]         = g_settings.idle_gallery_ms;
         doc["show_track_info"]         = g_settings.show_track_info;
         doc["use_dithering"]           = g_settings.use_dithering;
 
@@ -131,10 +133,14 @@ void webServerInit() {
                     strlcpy(g_settings.spotify_client_id, doc["spotify_client_id"], sizeof(g_settings.spotify_client_id));
                 if (doc["spotify_client_secret"].is<const char*>())
                     strlcpy(g_settings.spotify_client_secret, doc["spotify_client_secret"], sizeof(g_settings.spotify_client_secret));
-                if (doc["google_photos_url"].is<const char*>())
-                    strlcpy(g_settings.google_photos_url, doc["google_photos_url"], sizeof(g_settings.google_photos_url));
-                if (doc["poll_interval_ms"].is<unsigned int>())
-                    g_settings.poll_interval_ms = doc["poll_interval_ms"];
+                if (doc["sonos_poll_ms"].is<unsigned int>())
+                    g_settings.sonos_poll_ms = doc["sonos_poll_ms"];
+                if (doc["vinyl_recheck_ms"].is<unsigned int>())
+                    g_settings.vinyl_recheck_ms = doc["vinyl_recheck_ms"];
+                if (doc["no_match_cooldown_ms"].is<unsigned int>())
+                    g_settings.no_match_cooldown_ms = doc["no_match_cooldown_ms"];
+                if (doc["idle_gallery_ms"].is<unsigned int>())
+                    g_settings.idle_gallery_ms = doc["idle_gallery_ms"];
                 if (doc["show_track_info"].is<bool>())
                     g_settings.show_track_info = doc["show_track_info"];
                 if (doc["use_dithering"].is<bool>())

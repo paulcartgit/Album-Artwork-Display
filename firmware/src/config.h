@@ -58,8 +58,11 @@
 #define AUDIO_BUFFER_SIZE  (AUDIO_SAMPLE_RATE * (AUDIO_BITS / 8) * AUDIO_CHANNELS * AUDIO_RECORD_SECS)
 #define LISTEN_BUFFER_SIZE (AUDIO_SAMPLE_RATE * (AUDIO_BITS / 8) * AUDIO_CHANNELS * LISTEN_RECORD_SECS)
 
-// ─── Polling ───
-#define SONOS_POLL_INTERVAL_MS  45000
+// ─── Timing defaults ───
+#define SONOS_POLL_INTERVAL_MS      10000       // 10s — how often to check Sonos
+#define VINYL_RECHECK_INTERVAL_MS   600000      // 10 min — re-identify vinyl (~half LP side)
+#define NO_MATCH_COOLDOWN_MS        300000      // 5 min — pause after 3 failed identifications
+#define IDLE_GALLERY_INTERVAL_MS    300000      // 5 min — rotate gallery images when idle
 
 // ─── 6-Color Palette (calibrated to GDEP073E01 actual pigment appearance) ───
 // These RGB values represent what the e-ink pigments LOOK LIKE, not ideal RGB.
@@ -93,8 +96,12 @@ struct Settings {
     char shazam_api_key[128];
     char spotify_client_id[64];
     char spotify_client_secret[128];
-    char google_photos_url[256];
-    uint32_t poll_interval_ms;
+    // Timing
+    uint32_t sonos_poll_ms;
+    uint32_t vinyl_recheck_ms;
+    uint32_t no_match_cooldown_ms;
+    uint32_t idle_gallery_ms;
+    // Display
     bool show_track_info;
     bool use_dithering;
 };

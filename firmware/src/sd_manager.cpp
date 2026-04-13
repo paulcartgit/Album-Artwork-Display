@@ -39,7 +39,10 @@ bool sdReadWifiConfig(WifiConfig& cfg) {
 
 bool sdReadSettings(Settings& settings) {
     memset(&settings, 0, sizeof(settings));
-    settings.poll_interval_ms = SONOS_POLL_INTERVAL_MS;
+    settings.sonos_poll_ms = SONOS_POLL_INTERVAL_MS;
+    settings.vinyl_recheck_ms = VINYL_RECHECK_INTERVAL_MS;
+    settings.no_match_cooldown_ms = NO_MATCH_COOLDOWN_MS;
+    settings.idle_gallery_ms = IDLE_GALLERY_INTERVAL_MS;
     settings.show_track_info = true;
     settings.use_dithering = true;
 
@@ -57,8 +60,10 @@ bool sdReadSettings(Settings& settings) {
     strlcpy(settings.shazam_api_key, doc["shazam_api_key"] | "", sizeof(settings.shazam_api_key));
     strlcpy(settings.spotify_client_id, doc["spotify_client_id"] | "", sizeof(settings.spotify_client_id));
     strlcpy(settings.spotify_client_secret, doc["spotify_client_secret"] | "", sizeof(settings.spotify_client_secret));
-    strlcpy(settings.google_photos_url, doc["google_photos_url"] | "", sizeof(settings.google_photos_url));
-    settings.poll_interval_ms = doc["poll_interval_ms"] | SONOS_POLL_INTERVAL_MS;
+    settings.sonos_poll_ms = doc["sonos_poll_ms"] | SONOS_POLL_INTERVAL_MS;
+    settings.vinyl_recheck_ms = doc["vinyl_recheck_ms"] | VINYL_RECHECK_INTERVAL_MS;
+    settings.no_match_cooldown_ms = doc["no_match_cooldown_ms"] | NO_MATCH_COOLDOWN_MS;
+    settings.idle_gallery_ms = doc["idle_gallery_ms"] | IDLE_GALLERY_INTERVAL_MS;
     settings.show_track_info = doc["show_track_info"] | true;
     settings.use_dithering = doc["use_dithering"] | true;
     return true;
@@ -70,8 +75,10 @@ bool sdWriteSettings(const Settings& settings) {
     doc["shazam_api_key"] = settings.shazam_api_key;
     doc["spotify_client_id"] = settings.spotify_client_id;
     doc["spotify_client_secret"] = settings.spotify_client_secret;
-    doc["google_photos_url"] = settings.google_photos_url;
-    doc["poll_interval_ms"] = settings.poll_interval_ms;
+    doc["sonos_poll_ms"] = settings.sonos_poll_ms;
+    doc["vinyl_recheck_ms"] = settings.vinyl_recheck_ms;
+    doc["no_match_cooldown_ms"] = settings.no_match_cooldown_ms;
+    doc["idle_gallery_ms"] = settings.idle_gallery_ms;
     doc["show_track_info"] = settings.show_track_info;
     doc["use_dithering"] = settings.use_dithering;
 

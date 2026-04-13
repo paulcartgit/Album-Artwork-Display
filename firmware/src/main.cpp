@@ -11,7 +11,6 @@
 #include "audio_capture.h"
 #include "shazam_client.h"
 #include "spotify_client.h"
-#include "google_photos.h"
 #include "image_pipeline.h"
 #include "web_server.h"
 #include "activity_log.h"
@@ -25,7 +24,7 @@ String   g_currentAlbum;
 
 // ─── Track-change detection ───
 static String g_lastTrackHash;
-static String g_lastArtUrl;
+String g_lastArtUrl;
 
 static String trackHash(const String& artist, const String& title) {
     return artist + "|" + title;
@@ -44,16 +43,13 @@ uint32_t g_lastAudioSampleRate = AUDIO_SAMPLE_RATE;
 
 // ─── Idle state helpers ───
 static unsigned long g_lastIdleSwap = 0;
-static const unsigned long IDLE_SWAP_INTERVAL = 5 * 60 * 1000; // 5 min
 
 // ─── Vinyl API-call protection ───
 unsigned long g_lastNoMatchTime = 0;
-unsigned long NO_MATCH_COOLDOWN = 5 * 60 * 1000; // 5 min after 3 consecutive no-matches
 static const unsigned long VINYL_RETRY_DELAY = 15 * 1000; // 15 sec between no-match retries
 static const int VINYL_MAX_RETRIES = 3;
 int g_vinylNoMatchCount = 0;
 static const float SILENCE_RMS_THRESHOLD = 150.0f; // 16-bit PCM; typical noise floor ~50-100
-unsigned long VINYL_RECHECK_MS = 10 * 60 * 1000; // 10 min (~half an LP side)
 unsigned long g_lastVinylMatchTime = 0; // when last successful vinyl identify happened
 
 // ─── Sonos poll timing (accessible from web_server) ───
@@ -187,6 +183,16 @@ void loop() {
         return;
     }
 
+    // Physical button: immediately re-identify vinyl
+    if (g_buttonReIdentify) {
+        g_buttonReIdentify = false;
+        g_lastVinylMatchTime = 0;
+        g_lastNoMatchTime = 0;
+        g_vinylNoMatchCount = 0;
+        g_lastPollTime = 0; // force immediate poll
+        activityLog("Button pressed → re-identifying vinyl");
+    }
+
     // Force refresh: clear caches so next poll re-renders
     if (g_forceRefresh) {
         g_forceRefresh = false;
@@ -197,7 +203,7 @@ void loop() {
         activityLog("Force refresh — clearing caches");
     }
 
-    if (now - g_lastPollTime < g_settings.poll_interval_ms) {
+    if (now - g_lastPollTime < g_settings.sonos_poll_ms) {
         delay(100);
         return;
     }
@@ -242,20 +248,10 @@ static void handlePlaying() {
 
     if (track.isLineIn) {
         // ── VINYL mode ──
-        // Check if button was pressed to force re-identification
-        bool buttonPressed = g_buttonReIdentify;
-        if (buttonPressed) {
-            g_buttonReIdentify = false;
-            g_lastTrackHash = "";    // clear so hash check passes
-            g_lastNoMatchTime = 0;   // clear cooldown
-            g_vinylNoMatchCount = 0; // clear retry counter
-            g_lastVinylMatchTime = 0; // allow immediate re-identify
-            activityLog("Button pressed → re-identifying vinyl");
-        }
 
         // Skip if we identified recently and no retries pending
         if (g_lastVinylMatchTime != 0 && g_vinylNoMatchCount == 0 &&
-            (millis() - g_lastVinylMatchTime) < VINYL_RECHECK_MS) {
+            (millis() - g_lastVinylMatchTime) < g_settings.vinyl_recheck_ms) {
             return;
         }
 
@@ -264,7 +260,7 @@ static void handlePlaying() {
             unsigned long sinceNoMatch = millis() - g_lastNoMatchTime;
             if (g_vinylNoMatchCount >= VINYL_MAX_RETRIES) {
                 // 3 strikes — full cooldown
-                if (sinceNoMatch < NO_MATCH_COOLDOWN) return;
+                if (sinceNoMatch < g_settings.no_match_cooldown_ms) return;
                 // Cooldown expired — reset and try again
                 g_vinylNoMatchCount = 0;
                 g_lastNoMatchTime = 0;
@@ -370,7 +366,7 @@ static void handlePlaying() {
             g_lastNoMatchTime = millis();
             if (g_vinylNoMatchCount >= VINYL_MAX_RETRIES) {
                 activityLogf("Shazam — no match (%d/%d) — cooling down %lum",
-                             g_vinylNoMatchCount, VINYL_MAX_RETRIES, NO_MATCH_COOLDOWN / 60000);
+                             g_vinylNoMatchCount, VINYL_MAX_RETRIES, g_settings.no_match_cooldown_ms / 60000);
             } else {
                 activityLogf("Shazam — no match (%d/%d) — retrying in %lus",
                              g_vinylNoMatchCount, VINYL_MAX_RETRIES, VINYL_RETRY_DELAY / 1000);
@@ -399,6 +395,7 @@ static void handlePlaying() {
             const char* overlayArtist = g_settings.show_track_info ? shazam.artist.c_str() : nullptr;
             const char* overlayAlbum  = g_settings.show_track_info ? shazam.album.c_str() : nullptr;
             pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum);
+            g_lastArtUrl = artUrl;
             activityLog("Display updated");
         } else {
             activityLog("No album art found — showing fallback");
@@ -452,18 +449,9 @@ static void handlePlaying() {
 // ═══════════════════════════════════════════════════════════
 static void handleIdle() {
     unsigned long now = millis();
-    if (g_lastIdleSwap != 0 && (now - g_lastIdleSwap) < IDLE_SWAP_INTERVAL) return;
+    if (g_lastIdleSwap != 0 && (now - g_lastIdleSwap) < g_settings.idle_gallery_ms) return;
     g_lastIdleSwap = now;
 
-    // Try Google Photos bridge first
-    if (strlen(g_settings.google_photos_url) > 0) {
-        String url = googlePhotosGetUrl(g_settings.google_photos_url);
-        if (url.length() > 0 && pipelineProcessUrl(url.c_str())) {
-            return;
-        }
-    }
-
-    // Fall back to local gallery
     showFallbackImage();
 }
 
