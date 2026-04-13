@@ -44,7 +44,7 @@ bool sdReadSettings(Settings& settings) {
     settings.no_match_cooldown_ms = NO_MATCH_COOLDOWN_MS;
     settings.idle_gallery_ms = IDLE_GALLERY_INTERVAL_MS;
     settings.show_track_info = true;
-    settings.use_dithering = true;
+    settings.blur_background = true;
 
     File f = SD_MMC.open("/settings.json", FILE_READ);
     if (!f) return false;
@@ -63,7 +63,7 @@ bool sdReadSettings(Settings& settings) {
     settings.no_match_cooldown_ms = doc["no_match_cooldown_ms"] | NO_MATCH_COOLDOWN_MS;
     settings.idle_gallery_ms = doc["idle_gallery_ms"] | IDLE_GALLERY_INTERVAL_MS;
     settings.show_track_info = doc["show_track_info"] | true;
-    settings.use_dithering = doc["use_dithering"] | true;
+    settings.blur_background = doc["blur_background"] | true;
     return true;
 }
 
@@ -76,7 +76,7 @@ bool sdWriteSettings(const Settings& settings) {
     doc["no_match_cooldown_ms"] = settings.no_match_cooldown_ms;
     doc["idle_gallery_ms"] = settings.idle_gallery_ms;
     doc["show_track_info"] = settings.show_track_info;
-    doc["use_dithering"] = settings.use_dithering;
+    doc["blur_background"] = settings.blur_background;
 
     File f = SD_MMC.open("/settings.json", FILE_WRITE);
     if (!f) return false;

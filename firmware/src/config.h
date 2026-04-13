@@ -101,7 +101,7 @@ struct Settings {
     uint32_t idle_gallery_ms;
     // Display
     bool show_track_info;
-    bool use_dithering;
+    bool blur_background;
 };
 
 // ─── WiFi Config (stored in /config.json on SD) ───

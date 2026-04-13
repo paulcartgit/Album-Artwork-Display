@@ -190,6 +190,17 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
             float ea = a - g_palLab[ci].a;
             float eb = b - g_palLab[ci].b;
 
+            // Shadow chroma suppression: in very dark regions (low L), humans
+            // can't perceive colour, but error diffusion accumulates chrominance
+            // error across many black pixels until it flips one to blue/red.
+            // Dampen chroma error proportionally to darkness.
+            if (L < 25.0f) {
+                float chromaScale = L / 25.0f;           // 0 at black → 1 at L=25
+                chromaScale = chromaScale * chromaScale;  // steeper falloff
+                ea *= chromaScale;
+                eb *= chromaScale;
+            }
+
             // Boost error for poor palette matches on HIGH-CHROMA pixels only
             // (e.g. purple → blue has large residual toward red). Low-chroma
             // colours like brown/skin must NOT be boosted or they shift toward red.

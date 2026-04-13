@@ -225,6 +225,113 @@ static void enhanceForEink(uint8_t* rgb, int w, int h) {
     Serial.println("[Pipeline] Enhanced (sharpen+contrast+gamma)");
 }
 
+// ─── Blurred background fill ───
+// Scales source image to FILL the canvas (crop excess), then applies heavy box
+// blur + slight dim. Creates the "blurred pillarbox" look seen on TV/YouTube.
+static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
+                                   const uint8_t* src, int sW, int sH,
+                                   int fillH) {
+    // Scale to fill (cover crop) the fill area, with extra 30% zoom
+    // to focus on the central portion of the image (skip album borders)
+    float scaleX = (float)cW / sW;
+    float scaleY = (float)fillH / sH;
+    float scale  = (scaleX > scaleY) ? scaleX : scaleY; // pick LARGER to fill
+    scale *= 1.3f; // extra zoom into centre
+
+    int scaledW = (int)(sW * scale);
+    int scaledH = (int)(sH * scale);
+    int cropX = (scaledW - cW) / 2;
+    int cropY = (scaledH - fillH) / 2;
+
+    // Blit scaled+cropped source into canvas
+    for (int y = 0; y < fillH; y++) {
+        for (int x = 0; x < cW; x++) {
+            int sX = constrain((int)((x + cropX) / scale), 0, sW - 1);
+            int sY = constrain((int)((y + cropY) / scale), 0, sH - 1);
+            int si = (sY * sW + sX) * 3;
+            int di = (y * cW + x) * 3;
+            canvas[di]     = src[si];
+            canvas[di + 1] = src[si + 1];
+            canvas[di + 2] = src[si + 2];
+        }
+    }
+
+    // Heavy box blur — 4 passes of radius-8 horizontal then vertical.
+    // Uses a single row/col accumulator buffer (~1.5 KB).
+    const int radius = 8;
+    const int passes = 4;
+    uint8_t* tmp = (uint8_t*)malloc(max(cW, fillH) * 3);
+    if (!tmp) return; // degrade gracefully to unblurred
+
+    for (int pass = 0; pass < passes; pass++) {
+        // Horizontal pass
+        for (int y = 0; y < fillH; y++) {
+            uint8_t* row = &canvas[y * cW * 3];
+            // Running sum for first pixel
+            int rS = 0, gS = 0, bS = 0;
+            for (int k = -radius; k <= radius; k++) {
+                int xi = constrain(k, 0, cW - 1) * 3;
+                rS += row[xi]; gS += row[xi + 1]; bS += row[xi + 2];
+            }
+            int diam = 2 * radius + 1;
+            tmp[0] = rS / diam; tmp[1] = gS / diam; tmp[2] = bS / diam;
+
+            for (int x = 1; x < cW; x++) {
+                int addX = constrain(x + radius, 0, cW - 1) * 3;
+                int subX = constrain(x - radius - 1, 0, cW - 1) * 3;
+                rS += row[addX] - row[subX];
+                gS += row[addX + 1] - row[subX + 1];
+                bS += row[addX + 2] - row[subX + 2];
+                tmp[x * 3]     = rS / diam;
+                tmp[x * 3 + 1] = gS / diam;
+                tmp[x * 3 + 2] = bS / diam;
+            }
+            memcpy(row, tmp, cW * 3);
+        }
+
+        // Vertical pass
+        for (int x = 0; x < cW; x++) {
+            int rS = 0, gS = 0, bS = 0;
+            for (int k = -radius; k <= radius; k++) {
+                int yi = constrain(k, 0, fillH - 1);
+                int si = (yi * cW + x) * 3;
+                rS += canvas[si]; gS += canvas[si + 1]; bS += canvas[si + 2];
+            }
+            int diam = 2 * radius + 1;
+            tmp[0] = rS / diam; tmp[1] = gS / diam; tmp[2] = bS / diam;
+
+            for (int y = 1; y < fillH; y++) {
+                int addY = constrain(y + radius, 0, fillH - 1);
+                int subY = constrain(y - radius - 1, 0, fillH - 1);
+                int ai = (addY * cW + x) * 3;
+                int si = (subY * cW + x) * 3;
+                rS += canvas[ai] - canvas[si];
+                gS += canvas[ai + 1] - canvas[si + 1];
+                bS += canvas[ai + 2] - canvas[si + 2];
+                tmp[y * 3]     = rS / diam;
+                tmp[y * 3 + 1] = gS / diam;
+                tmp[y * 3 + 2] = bS / diam;
+            }
+
+            // Write back column
+            for (int y = 0; y < fillH; y++) {
+                int di = (y * cW + x) * 3;
+                canvas[di]     = tmp[y * 3];
+                canvas[di + 1] = tmp[y * 3 + 1];
+                canvas[di + 2] = tmp[y * 3 + 2];
+            }
+        }
+    }
+    free(tmp);
+
+    // Slight dim (70%) so sharp overlay pops
+    for (int i = 0; i < fillH * cW * 3; i++) {
+        canvas[i] = (uint8_t)(canvas[i] * 7 / 10);
+    }
+
+    Serial.println("[Pipeline] Blurred background fill applied");
+}
+
 // ─── Core: decode JPEG buffer → scale → optional text → dither → display ───
 static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
                               const char* artist = nullptr, const char* album = nullptr) {
@@ -264,15 +371,22 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         return false;
     }
 
-    // Compute edge color for background fill
+    // Compute edge color for background fill (used as fallback)
     uint8_t bgR, bgG, bgB;
     averageEdgeColor(g_decodeBuf, imgW, imgH, bgR, bgG, bgB);
 
-    // Fill entire canvas with background color
-    for (int i = 0; i < EPD_WIDTH * EPD_HEIGHT; i++) {
-        scaledBuf[i * 3]     = bgR;
-        scaledBuf[i * 3 + 1] = bgG;
-        scaledBuf[i * 3 + 2] = bgB;
+    if (g_settings.blur_background) {
+        // Blurred pillarbox: scale source to fill canvas, blur heavily, dim
+        int fillH = showText ? artAreaH : EPD_HEIGHT;
+        fillBlurredBackground(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
+                              g_decodeBuf, imgW, imgH, fillH);
+    } else {
+        // Solid colour fill
+        for (int i = 0; i < EPD_WIDTH * EPD_HEIGHT; i++) {
+            scaledBuf[i * 3]     = bgR;
+            scaledBuf[i * 3 + 1] = bgG;
+            scaledBuf[i * 3 + 2] = bgB;
+        }
     }
 
     // Scale artwork to fit art area (no crop)
@@ -319,11 +433,7 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         return false;
     }
 
-    if (g_settings.use_dithering) {
-        ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT);
-    } else {
-        quantizeNearest(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT);
-    }
+    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT);
     heap_caps_free(scaledBuf);
 
     // 5. Push to display

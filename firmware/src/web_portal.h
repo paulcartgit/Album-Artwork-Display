@@ -128,8 +128,8 @@ button.danger:active{background:#722}
     Show track info overlay on display
   </label>
   <label style="margin-top:8px;display:flex;align-items:center;gap:8px">
-    <input type="checkbox" id="fUseDithering" style="width:auto;margin:0">
-    Use Floyd-Steinberg dithering
+    <input type="checkbox" id="fBlurBg" style="width:auto;margin:0">
+    Blurred artwork background (instead of solid colour)
   </label>
 
   <button onclick="saveSettings()">Save Settings</button>
@@ -279,7 +279,7 @@ async function loadSettings() {
     const ig = document.getElementById('fIdleGallery');
     ig.value = Math.round((d.idle_gallery_ms||300000)/60000); ig.oninput();
     document.getElementById('fShowTrackInfo').checked = !!d.show_track_info;
-    document.getElementById('fUseDithering').checked = d.use_dithering !== false;
+    document.getElementById('fBlurBg').checked = d.blur_background !== false;
   } catch(e) { console.error(e); }
 }
 
@@ -291,7 +291,7 @@ async function saveSettings() {
     no_match_cooldown_ms: parseInt(document.getElementById('fCooldown').value)*60000,
     idle_gallery_ms: parseInt(document.getElementById('fIdleGallery').value)*60000,
     show_track_info: document.getElementById('fShowTrackInfo').checked,
-    use_dithering: document.getElementById('fUseDithering').checked
+    blur_background: document.getElementById('fBlurBg').checked
   };
   const shz = document.getElementById('fShazamKey').value;
   if (shz) body.shazam_api_key = shz;
