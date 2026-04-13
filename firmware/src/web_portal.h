@@ -63,6 +63,7 @@ button.danger:active{background:#722}
   <div class="status-card">
     <div class="status-label">Now Playing</div>
     <div class="status-value" id="sTrack">—</div>
+    <div class="status-value" id="sAlbum" style="font-size:.9rem;color:#999;margin-top:2px"></div>
   </div>
   <div class="status-card">
     <div class="status-label">IP Address</div>
@@ -72,7 +73,14 @@ button.danger:active{background:#722}
     <div class="status-label">Uptime</div>
     <div class="status-value" id="sUptime">—</div>
   </div>
-  <button onclick="loadStatus()">Refresh</button>
+  <button onclick="loadStatus()">Refresh Status</button>
+  <button onclick="forceRefresh()" style="background:#e67e22;margin-left:8px">Force Display Refresh</button>
+  <button onclick="forceListen()" style="background:#2980b9;margin-left:8px">&#127911; Listen</button>
+  <button onclick="testColors()" style="background:#8e44ad;margin-left:8px">Test Colors</button>
+  <div class="status-card" style="margin-top:16px">
+    <div class="status-label">Activity Log</div>
+    <div id="sLog" style="font-family:monospace;font-size:.75rem;color:#aaa;max-height:300px;overflow-y:auto;margin-top:8px;line-height:1.6"></div>
+  </div>
 </div>
 
 <!-- SETTINGS -->
@@ -94,6 +102,16 @@ button.danger:active{background:#722}
 
   <h2>Polling</h2>
   <label>Interval (ms)<input type="number" id="fPollMs" min="10000" step="1000"></label>
+
+  <h2>Display</h2>
+  <label style="margin-top:8px;display:flex;align-items:center;gap:8px">
+    <input type="checkbox" id="fShowTrackInfo" style="width:auto;margin:0">
+    Show track info overlay on display
+  </label>
+  <label style="margin-top:8px;display:flex;align-items:center;gap:8px">
+    <input type="checkbox" id="fUseDithering" style="width:auto;margin:0">
+    Use Floyd-Steinberg dithering
+  </label>
 
   <button onclick="saveSettings()">Save Settings</button>
   <div id="settingsMsg" class="msg"></div>
@@ -126,10 +144,42 @@ async function loadStatus() {
     const d = await r.json();
     document.getElementById('sState').textContent = STATES[d.state] || d.state;
     document.getElementById('sTrack').textContent = (d.artist && d.title) ? d.artist+' — '+d.title : 'Nothing';
+    document.getElementById('sAlbum').textContent = d.album || '';
     document.getElementById('sIP').textContent = d.ip;
     const m = Math.floor(d.uptime/60), h = Math.floor(m/60);
     document.getElementById('sUptime').textContent = h+'h '+m%60+'m';
   } catch(e) { console.error(e); }
+  try {
+    const r2 = await fetch('/api/log');
+    const logs = await r2.json();
+    const el = document.getElementById('sLog');
+    el.innerHTML = logs.map(l => {
+      const mm = Math.floor(l.t/60), hh = Math.floor(mm/60);
+      const ts = hh+'h'+String(mm%60).padStart(2,'0')+'m'+String(l.t%60).padStart(2,'0')+'s';
+      return '<div><span style="color:#666">'+ts+'</span> '+l.m+'</div>';
+    }).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function forceRefresh() {
+  try {
+    await fetch('/api/refresh', {method:'POST'});
+    loadStatus();
+  } catch(e) { alert('Failed: '+e.message); }
+}
+
+async function forceListen() {
+  try {
+    await fetch('/api/listen', {method:'POST'});
+    loadStatus();
+  } catch(e) { alert('Failed: '+e.message); }
+}
+
+async function testColors() {
+  try {
+    await fetch('/api/test-colors', {method:'POST'});
+    alert('Test pattern sent — 6 bands: Black, White, Green, Blue, Red, Yellow');
+  } catch(e) { alert('Failed: '+e.message); }
 }
 
 async function loadSettings() {
@@ -146,6 +196,8 @@ async function loadSettings() {
     document.getElementById('fSpotifySecret').placeholder = d.spotify_client_secret_set ? '(set — leave blank to keep)' : '';
     document.getElementById('fPhotosUrl').value = d.google_photos_url||'';
     document.getElementById('fPollMs').value = d.poll_interval_ms||45000;
+    document.getElementById('fShowTrackInfo').checked = !!d.show_track_info;
+    document.getElementById('fUseDithering').checked = d.use_dithering !== false;
   } catch(e) { console.error(e); }
 }
 
@@ -156,7 +208,9 @@ async function saveSettings() {
     acrcloud_key: document.getElementById('fAcrKey').value,
     spotify_client_id: document.getElementById('fSpotifyId').value,
     google_photos_url: document.getElementById('fPhotosUrl').value,
-    poll_interval_ms: parseInt(document.getElementById('fPollMs').value)||45000
+    poll_interval_ms: parseInt(document.getElementById('fPollMs').value)||45000,
+    show_track_info: document.getElementById('fShowTrackInfo').checked,
+    use_dithering: document.getElementById('fUseDithering').checked
   };
   const sec = document.getElementById('fAcrSecret').value;
   if (sec) body.acrcloud_secret = sec;
@@ -216,6 +270,7 @@ async function uploadFile(file) {
 }
 
 loadStatus();
+setInterval(()=>{ if(document.getElementById('status').classList.contains('active')) loadStatus(); }, 3000);
 </script>
 </body>
 </html>

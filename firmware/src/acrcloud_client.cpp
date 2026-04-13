@@ -104,9 +104,9 @@ bool acrcloudIdentify(const char* host, const char* accessKey, const char* acces
     }
 
     int status = doc["status"]["code"] | -1;
+    const char* statusMsg = doc["status"]["msg"] | "unknown";
+    Serial.printf("[ACRCloud] Status %d: %s\n", status, statusMsg);
     if (status != 0) {
-        Serial.printf("[ACRCloud] Status %d: %s\n", status,
-                      doc["status"]["msg"].as<const char*>());
         return false;
     }
 

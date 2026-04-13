@@ -3,6 +3,7 @@
 #include "config.h"
 #include "sd_manager.h"
 #include "image_pipeline.h"
+#include "activity_log.h"
 
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
@@ -15,6 +16,9 @@ extern AppState   g_state;
 extern String     g_currentArtist;
 extern String     g_currentTitle;
 extern String     g_currentAlbum;
+extern volatile bool g_forceRefresh;
+extern volatile bool g_testColors;
+extern volatile bool g_forceListen;
 
 static AsyncWebServer server(80);
 
@@ -149,6 +153,43 @@ void webServerInit() {
         } else {
             req->send(404, "application/json", "{\"error\":\"not found\"}");
         }
+    });
+
+    // ─── Force display refresh ───
+    server.on("/api/refresh", HTTP_POST, [](AsyncWebServerRequest* req) {
+        g_forceRefresh = true;
+        req->send(200, "application/json", "{\"ok\":true}");
+        Serial.println("[Web] Force refresh requested");
+    });
+
+    // ─── Test color pattern ───
+    server.on("/api/test-colors", HTTP_POST, [](AsyncWebServerRequest* req) {
+        g_testColors = true;
+        req->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // ─── Force listen (audio identify) ───
+    server.on("/api/listen", HTTP_POST, [](AsyncWebServerRequest* req) {
+        g_forceListen = true;
+        req->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // ─── Activity log ───
+    server.on("/api/log", HTTP_GET, [](AsyncWebServerRequest* req) {
+        LogEntry entries[LOG_MAX_ENTRIES];
+        int count = activityLogGet(entries, LOG_MAX_ENTRIES);
+
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        for (int i = 0; i < count; i++) {
+            JsonObject obj = arr.add<JsonObject>();
+            obj["t"] = entries[i].timestamp / 1000; // seconds
+            obj["m"] = entries[i].message;
+        }
+
+        String out;
+        serializeJson(doc, out);
+        req->send(200, "application/json", out);
     });
 
     server.begin();

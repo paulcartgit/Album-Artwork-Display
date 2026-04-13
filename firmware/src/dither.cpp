@@ -93,3 +93,21 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
     heap_caps_free(buf);
     Serial.printf("[Dither] Done — %dx%d → %d bytes packed\n", w, h, (w * h) / 2);
 }
+
+void quantizeNearest(const uint8_t* rgb888, uint8_t* packedOut, int w, int h) {
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int idx = (y * w + x) * 3;
+            uint8_t ci = nearestPaletteColor(rgb888[idx], rgb888[idx+1], rgb888[idx+2]);
+
+            int pixelIdx = y * w + x;
+            int byteIdx  = pixelIdx / 2;
+            if (pixelIdx % 2 == 0) {
+                packedOut[byteIdx] = (ci << 4);
+            } else {
+                packedOut[byteIdx] |= (ci & 0x0F);
+            }
+        }
+    }
+    Serial.printf("[Quantize] Done — %dx%d → %d bytes packed (no dither)\n", w, h, (w * h) / 2);
+}

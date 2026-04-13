@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <esp_heap_caps.h>
+#include <XPowersLib.h>
 
 #include "config.h"
 #include "sd_manager.h"
@@ -13,6 +14,7 @@
 #include "google_photos.h"
 #include "image_pipeline.h"
 #include "web_server.h"
+#include "activity_log.h"
 
 // ─── Globals (shared with web_server.cpp) ───
 Settings g_settings;
@@ -23,10 +25,16 @@ String   g_currentAlbum;
 
 // ─── Track-change detection ───
 static String g_lastTrackHash;
+static String g_lastArtUrl;
 
 static String trackHash(const String& artist, const String& title) {
     return artist + "|" + title;
 }
+
+// ─── Flags set from web API, handled in main loop ───
+volatile bool g_forceRefresh = false;
+volatile bool g_testColors = false;
+volatile bool g_forceListen = false;
 
 // ─── Idle state helpers ───
 static unsigned long g_lastIdleSwap = 0;
@@ -36,6 +44,7 @@ static const unsigned long IDLE_SWAP_INTERVAL = 5 * 60 * 1000; // 5 min
 static void handlePlaying();
 static void handleIdle();
 static void showFallbackImage();
+static void handleListen();
 
 // ═══════════════════════════════════════════════════════════
 void setup() {
@@ -48,6 +57,25 @@ void setup() {
     // I2C bus (shared: AXP2101, ES7210, ES8311)
     Wire.begin(I2C_SDA, I2C_SCL);
     Wire.setClock(400000);
+
+    // Power management (AXP2101) — must be before display/SD init
+    XPowersAXP2101 pmu;
+    if (pmu.begin(Wire, AXP2101_ADDR, I2C_SDA, I2C_SCL)) {
+        pmu.setDC1Voltage(3300);
+        pmu.enableDC1();
+        pmu.setALDO1Voltage(3300);
+        pmu.enableALDO1();
+        pmu.setALDO2Voltage(3300);
+        pmu.enableALDO2();
+        pmu.setALDO3Voltage(3300);
+        pmu.enableALDO3();
+        pmu.setALDO4Voltage(3300);
+        pmu.enableALDO4();
+        Serial.println("[BOOT] PMIC initialized — power rails enabled");
+    } else {
+        Serial.println("[BOOT] PMIC init failed!");
+    }
+    delay(100); // let rails stabilize
 
     // LED indicators
     pinMode(LED_RED, OUTPUT);
@@ -116,6 +144,31 @@ void loop() {
     static unsigned long lastPoll = 0;
     unsigned long now = millis();
 
+    // Test color pattern (must run in main loop, not web handler)
+    if (g_testColors) {
+        g_testColors = false;
+        activityLog("Test color pattern requested");
+        pipelineShowTestPattern();
+        return;
+    }
+
+    // Force listen: record audio and identify regardless of Sonos
+    if (g_forceListen) {
+        g_forceListen = false;
+        handleListen();
+        return;
+    }
+
+    // Force refresh: clear caches so next poll re-renders
+    if (g_forceRefresh) {
+        g_forceRefresh = false;
+        g_lastTrackHash = "";
+        g_lastArtUrl    = "";
+        g_lastIdleSwap  = 0;
+        lastPoll = 0; // force immediate poll
+        activityLog("Force refresh — clearing caches");
+    }
+
     if (now - lastPoll < g_settings.poll_interval_ms) {
         delay(100);
         return;
@@ -132,12 +185,13 @@ void loop() {
     bool playing = sonosIsPlaying(g_settings.sonos_ip);
     if (!playing) {
         if (g_state != STATE_IDLE) {
-            Serial.println("[Main] Sonos stopped → IDLE");
+            activityLog("Sonos stopped → idle");
             g_state = STATE_IDLE;
             g_currentArtist = "";
             g_currentTitle  = "";
             g_currentAlbum  = "";
             g_lastTrackHash = "";
+            g_lastArtUrl    = "";
         }
         handleIdle();
         return;
@@ -151,7 +205,7 @@ void loop() {
 static void handlePlaying() {
     SonosTrackInfo track;
     if (!sonosGetTrackInfo(g_settings.sonos_ip, track)) {
-        Serial.println("[Main] Sonos poll failed");
+        activityLog("Sonos poll failed");
         return;
     }
 
@@ -161,18 +215,19 @@ static void handlePlaying() {
         if (hash == g_lastTrackHash) return;
 
         g_state = STATE_VINYL;
-        Serial.println("[Main] Line-In detected → VINYL");
+        activityLog("Line-In detected → recording audio...");
         digitalWrite(LED_RED, HIGH);
 
         // Record audio
         uint8_t* audioBuf = (uint8_t*)heap_caps_malloc(AUDIO_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
         if (!audioBuf) {
-            Serial.println("[Main] Audio buffer alloc failed");
+            activityLog("Audio buffer alloc failed");
             showFallbackImage();
             return;
         }
 
         if (!audioInit()) {
+            activityLog("Audio init failed");
             heap_caps_free(audioBuf);
             showFallbackImage();
             return;
@@ -183,10 +238,13 @@ static void handlePlaying() {
         audioDeinit();
 
         if (!ok || recorded == 0) {
+            activityLog("Audio recording failed");
             heap_caps_free(audioBuf);
             showFallbackImage();
             return;
         }
+
+        activityLogf("Recorded %u bytes — identifying via ACRCloud...", (unsigned)recorded);
 
         // Identify via ACRCloud
         AcrResult acr;
@@ -199,10 +257,12 @@ static void handlePlaying() {
         heap_caps_free(audioBuf);
 
         if (!identified) {
-            Serial.println("[Main] ACRCloud — no match");
+            activityLog("ACRCloud — no match");
             showFallbackImage();
             return;
         }
+
+        activityLogf("Identified: %s — %s", acr.artist.c_str(), acr.title.c_str());
 
         g_currentArtist = acr.artist;
         g_currentTitle  = acr.title;
@@ -210,10 +270,15 @@ static void handlePlaying() {
         g_lastTrackHash = trackHash(acr.artist, acr.title);
 
         // Fetch album art via Spotify
+        activityLog("Fetching album art via Spotify...");
         String artUrl = spotifyGetAlbumArtUrl(acr.artist.c_str(), acr.title.c_str());
         if (artUrl.length() > 0) {
-            pipelineProcessUrl(artUrl.c_str());
+            const char* overlayArtist = g_settings.show_track_info ? acr.artist.c_str() : nullptr;
+            const char* overlayAlbum  = g_settings.show_track_info ? acr.album.c_str() : nullptr;
+            pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum);
+            activityLog("Display updated");
         } else {
+            activityLog("No album art found — showing fallback");
             showFallbackImage();
         }
 
@@ -230,18 +295,32 @@ static void handlePlaying() {
         g_currentAlbum  = track.album;
         g_lastTrackHash = hash;
 
-        Serial.printf("[Main] New track: %s — %s\n",
-                      track.artist.c_str(), track.title.c_str());
+        activityLogf("Track: %s — %s (%s)",
+                      track.artist.c_str(), track.title.c_str(), track.album.c_str());
 
         // Prefer Sonos-provided art URL, fall back to Spotify search
         String artUrl = track.artUrl;
         if (artUrl.length() == 0) {
+            activityLog("No Sonos art URL — searching Spotify...");
             artUrl = spotifyGetAlbumArtUrl(track.artist.c_str(), track.title.c_str());
         }
 
+        // Skip display refresh if the artwork hasn't changed (same album)
+        if (artUrl.length() > 0 && artUrl == g_lastArtUrl) {
+            activityLog("Same artwork — skipping refresh");
+            return;
+        }
+
         if (artUrl.length() > 0) {
-            pipelineProcessUrl(artUrl.c_str());
+            activityLog("Downloading artwork...");
+            const char* overlayArtist = g_settings.show_track_info ? track.artist.c_str() : nullptr;
+            const char* overlayAlbum  = g_settings.show_track_info ? track.album.c_str() : nullptr;
+            if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum)) {
+                g_lastArtUrl = artUrl;
+                activityLog("Display updated");
+            }
         } else {
+            activityLog("No album art found — showing fallback");
             showFallbackImage();
         }
     }
@@ -268,9 +347,81 @@ static void handleIdle() {
 static void showFallbackImage() {
     String path = sdRandomGalleryFile();
     if (path.length() > 0) {
-        Serial.printf("[Main] Showing gallery: %s\n", path.c_str());
+        activityLogf("Showing gallery: %s", path.c_str());
         pipelineProcessFile(path.c_str());
     } else {
         displayShowMessage("No images\nUpload at vinyl.local");
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+static void handleListen() {
+    activityLog("Listen: initializing microphone...");
+    g_state = STATE_VINYL;
+    digitalWrite(LED_RED, HIGH);
+
+    uint8_t* audioBuf = (uint8_t*)heap_caps_malloc(LISTEN_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+    if (!audioBuf) {
+        activityLog("Listen: audio buffer alloc failed");
+        digitalWrite(LED_RED, LOW);
+        return;
+    }
+
+    if (!audioInit()) {
+        activityLog("Listen: audio init failed — check hardware");
+        heap_caps_free(audioBuf);
+        digitalWrite(LED_RED, LOW);
+        return;
+    }
+
+    activityLogf("Listen: recording %ds of audio...", LISTEN_RECORD_SECS);
+    size_t recorded = 0;
+    bool ok = audioRecord(audioBuf, LISTEN_BUFFER_SIZE, recorded);
+    audioDeinit();
+
+    if (!ok || recorded == 0) {
+        activityLogf("Listen: recording failed (got %u bytes)", (unsigned)recorded);
+        heap_caps_free(audioBuf);
+        digitalWrite(LED_RED, LOW);
+        return;
+    }
+
+    activityLogf("Listen: recorded %uKB — sending to ACRCloud...", (unsigned)(recorded / 1024));
+
+    AcrResult acr;
+    bool identified = acrcloudIdentify(
+        g_settings.acrcloud_host,
+        g_settings.acrcloud_key,
+        g_settings.acrcloud_secret,
+        audioBuf, recorded, acr
+    );
+    heap_caps_free(audioBuf);
+
+    if (!identified) {
+        activityLog("Listen: ACRCloud — no match");
+        digitalWrite(LED_RED, LOW);
+        return;
+    }
+
+    activityLogf("Listen: %s — %s (%s)", acr.artist.c_str(), acr.title.c_str(), acr.album.c_str());
+
+    g_currentArtist = acr.artist;
+    g_currentTitle  = acr.title;
+    g_currentAlbum  = acr.album;
+    g_lastTrackHash = trackHash(acr.artist, acr.title);
+
+    activityLog("Listen: fetching album art...");
+    String artUrl = spotifyGetAlbumArtUrl(acr.artist.c_str(), acr.title.c_str());
+    if (artUrl.length() > 0) {
+        const char* overlayArtist = g_settings.show_track_info ? acr.artist.c_str() : nullptr;
+        const char* overlayAlbum  = g_settings.show_track_info ? acr.album.c_str() : nullptr;
+        if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum)) {
+            g_lastArtUrl = artUrl;
+            activityLog("Listen: display updated");
+        }
+    } else {
+        activityLog("Listen: no album art found");
+    }
+
+    digitalWrite(LED_RED, LOW);
 }

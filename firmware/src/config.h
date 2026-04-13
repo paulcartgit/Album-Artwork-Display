@@ -47,19 +47,23 @@
 // ─── Display (portrait orientation) ───
 #define EPD_WIDTH   480
 #define EPD_HEIGHT  800
-#define EPD_COLORS    7
+#define EPD_COLORS    6
 
 // ─── Audio Recording ───
 #define AUDIO_SAMPLE_RATE  44100
 #define AUDIO_BITS         16
 #define AUDIO_CHANNELS     1
 #define AUDIO_RECORD_SECS  12
+#define LISTEN_RECORD_SECS 6
 #define AUDIO_BUFFER_SIZE  (AUDIO_SAMPLE_RATE * (AUDIO_BITS / 8) * AUDIO_CHANNELS * AUDIO_RECORD_SECS)
+#define LISTEN_BUFFER_SIZE (AUDIO_SAMPLE_RATE * (AUDIO_BITS / 8) * AUDIO_CHANNELS * LISTEN_RECORD_SECS)
 
 // ─── Polling ───
 #define SONOS_POLL_INTERVAL_MS  45000
 
-// ─── 7-Color Palette (physical pigment values) ───
+// ─── 6-Color Palette (calibrated to GDEP073E01 actual pigment appearance) ───
+// These RGB values represent what the e-ink pigments LOOK LIKE, not ideal RGB.
+// Accurate values are critical for Floyd-Steinberg dithering quality.
 struct PaletteColor {
     uint8_t r, g, b;
     uint8_t index;
@@ -68,11 +72,10 @@ struct PaletteColor {
 static const PaletteColor PALETTE[EPD_COLORS] = {
     {0x00, 0x00, 0x00, 0}, // Black
     {0xFF, 0xFF, 0xFF, 1}, // White
-    {0x60, 0x80, 0x50, 2}, // Green
-    {0x50, 0x80, 0xB8, 3}, // Blue
-    {0xA0, 0x20, 0x20, 4}, // Red
-    {0xF0, 0xE0, 0x50, 5}, // Yellow
-    {0xE0, 0x80, 0x30, 6}, // Orange
+    {0x67, 0xA0, 0x62, 2}, // Green  (muted olive-green)
+    {0x3A, 0x6E, 0xB5, 3}, // Blue   (muted steel-blue)
+    {0xB0, 0x26, 0x28, 4}, // Red    (deep crimson)
+    {0xE8, 0xD0, 0x52, 5}, // Yellow (warm golden)
 };
 
 // ─── App State ───
