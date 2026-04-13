@@ -23,6 +23,12 @@ extern uint8_t* g_lastAudio;
 extern size_t   g_lastAudioLen;
 extern uint32_t g_lastAudioChannels;
 extern uint32_t g_lastAudioSampleRate;
+extern unsigned long g_lastPollTime;
+extern unsigned long g_lastNoMatchTime;
+extern unsigned long NO_MATCH_COOLDOWN;
+extern unsigned long VINYL_RECHECK_MS;
+extern int g_vinylNoMatchCount;
+extern unsigned long g_lastVinylMatchTime;
 
 static AsyncWebServer server(80);
 
@@ -35,12 +41,48 @@ void webServerInit() {
     // ─── Status API ───
     server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* req) {
         JsonDocument doc;
-        doc["state"]   = (int)g_state;
-        doc["artist"]  = g_currentArtist;
-        doc["title"]   = g_currentTitle;
-        doc["album"]   = g_currentAlbum;
-        doc["ip"]      = WiFi.localIP().toString();
-        doc["uptime"]  = millis() / 1000;
+        const char* stateNames[] = {"BOOT","IDLE","DIGITAL","VINYL","ERROR"};
+        int stateIdx = (int)g_state;
+        doc["state"]      = stateIdx;
+        doc["state_name"] = (stateIdx >= 0 && stateIdx < 5) ? stateNames[stateIdx] : "UNKNOWN";
+        doc["artist"]     = g_currentArtist;
+        doc["title"]      = g_currentTitle;
+        doc["album"]      = g_currentAlbum;
+        doc["ip"]         = WiFi.localIP().toString();
+        doc["uptime"]     = millis() / 1000;
+
+        // Timing: next Sonos poll
+        unsigned long now = millis();
+        unsigned long elapsed = now - g_lastPollTime;
+        unsigned long pollInterval = g_settings.poll_interval_ms;
+        if (elapsed < pollInterval)
+            doc["next_poll_sec"] = (pollInterval - elapsed) / 1000;
+        else
+            doc["next_poll_sec"] = 0;
+
+        // Timing: vinyl recheck
+        if (g_state == STATE_VINYL && g_lastVinylMatchTime != 0) {
+            unsigned long since = now - g_lastVinylMatchTime;
+            if (since < VINYL_RECHECK_MS)
+                doc["next_vinyl_check_sec"] = (VINYL_RECHECK_MS - since) / 1000;
+            else
+                doc["next_vinyl_check_sec"] = 0;
+            doc["vinyl_recheck_min"] = VINYL_RECHECK_MS / 60000;
+        }
+
+        // Timing: no-match retry / cooldown
+        if (g_lastNoMatchTime != 0) {
+            unsigned long since = now - g_lastNoMatchTime;
+            doc["no_match_retries"] = g_vinylNoMatchCount;
+            if (g_vinylNoMatchCount >= 3) {
+                if (since < NO_MATCH_COOLDOWN)
+                    doc["cooldown_remaining_sec"] = (NO_MATCH_COOLDOWN - since) / 1000;
+            } else {
+                unsigned long retryDelay = 15000;
+                if (since < retryDelay)
+                    doc["retry_in_sec"] = (retryDelay - since) / 1000;
+            }
+        }
 
         String out;
         serializeJson(doc, out);

@@ -66,6 +66,10 @@ button.danger:active{background:#722}
     <div class="status-value" id="sAlbum" style="font-size:.9rem;color:#999;margin-top:2px"></div>
   </div>
   <div class="status-card">
+    <div class="status-label">Schedule</div>
+    <div class="status-value" id="sSchedule" style="font-size:.9rem;color:#bbb">—</div>
+  </div>
+  <div class="status-card">
     <div class="status-label">IP Address</div>
     <div class="status-value" id="sIP">—</div>
   </div>
@@ -128,6 +132,12 @@ button.danger:active{background:#722}
 
 <script>
 const STATES = ['BOOT','IDLE','DIGITAL','VINYL','ERROR'];
+function fmtSec(s) {
+  if (s==null) return null;
+  if (s < 60) return s+'s';
+  const m = Math.floor(s/60), rs = s%60;
+  return m+'m '+rs+'s';
+}
 
 function showTab(name) {
   document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', t.textContent.toLowerCase()===name));
@@ -141,9 +151,16 @@ async function loadStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
-    document.getElementById('sState').textContent = STATES[d.state] || d.state;
+    document.getElementById('sState').textContent = d.state_name || STATES[d.state] || d.state;
     document.getElementById('sTrack').textContent = (d.artist && d.title) ? d.artist+' — '+d.title : 'Nothing';
     document.getElementById('sAlbum').textContent = d.album || '';
+    // Schedule info
+    let sched = [];
+    if (d.next_poll_sec != null) sched.push('Next Sonos poll: '+fmtSec(d.next_poll_sec));
+    if (d.next_vinyl_check_sec != null) sched.push('Next vinyl re-identify: '+fmtSec(d.next_vinyl_check_sec)+' (every '+d.vinyl_recheck_min+'m)');
+    if (d.retry_in_sec != null) sched.push('&#x1f504; Retry '+d.no_match_retries+'/3 — next attempt in '+fmtSec(d.retry_in_sec));
+    if (d.cooldown_remaining_sec != null) sched.push('&#x23f8; Cooldown (3 no-matches): '+fmtSec(d.cooldown_remaining_sec)+' remaining');
+    document.getElementById('sSchedule').innerHTML = sched.length ? sched.join('<br>') : 'No upcoming checks';
     document.getElementById('sIP').textContent = d.ip;
     const m = Math.floor(d.uptime/60), h = Math.floor(m/60);
     document.getElementById('sUptime').textContent = h+'h '+m%60+'m';

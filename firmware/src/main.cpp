@@ -46,6 +46,25 @@ uint32_t g_lastAudioSampleRate = AUDIO_SAMPLE_RATE;
 static unsigned long g_lastIdleSwap = 0;
 static const unsigned long IDLE_SWAP_INTERVAL = 5 * 60 * 1000; // 5 min
 
+// ─── Vinyl API-call protection ───
+unsigned long g_lastNoMatchTime = 0;
+unsigned long NO_MATCH_COOLDOWN = 5 * 60 * 1000; // 5 min after 3 consecutive no-matches
+static const unsigned long VINYL_RETRY_DELAY = 15 * 1000; // 15 sec between no-match retries
+static const int VINYL_MAX_RETRIES = 3;
+int g_vinylNoMatchCount = 0;
+static const float SILENCE_RMS_THRESHOLD = 150.0f; // 16-bit PCM; typical noise floor ~50-100
+unsigned long VINYL_RECHECK_MS = 10 * 60 * 1000; // 10 min (~half an LP side)
+unsigned long g_lastVinylMatchTime = 0; // when last successful vinyl identify happened
+
+// ─── Sonos poll timing (accessible from web_server) ───
+unsigned long g_lastPollTime = 0;
+
+// ─── Physical button for vinyl re-identify ───
+volatile bool g_buttonReIdentify = false;
+static void IRAM_ATTR onKeyPress() {
+    g_buttonReIdentify = true;
+}
+
 // ─── Forward declarations ───
 static void handlePlaying();
 static void handleIdle();
@@ -88,6 +107,10 @@ void setup() {
     pinMode(LED_GREEN, OUTPUT);
     digitalWrite(LED_RED, LOW);
     digitalWrite(LED_GREEN, LOW);
+
+    // Physical button (BTN_KEY on back of frame) — press to re-identify vinyl
+    pinMode(BTN_KEY, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(BTN_KEY), onKeyPress, FALLING);
 
     // ── SD Card ──
     if (!sdInit()) {
@@ -147,7 +170,6 @@ void loop() {
         return;
     }
 
-    static unsigned long lastPoll = 0;
     unsigned long now = millis();
 
     // Test color pattern (must run in main loop, not web handler)
@@ -171,15 +193,15 @@ void loop() {
         g_lastTrackHash = "";
         g_lastArtUrl    = "";
         g_lastIdleSwap  = 0;
-        lastPoll = 0; // force immediate poll
+        g_lastPollTime = 0; // force immediate poll
         activityLog("Force refresh — clearing caches");
     }
 
-    if (now - lastPoll < g_settings.poll_interval_ms) {
+    if (now - g_lastPollTime < g_settings.poll_interval_ms) {
         delay(100);
         return;
     }
-    lastPoll = now;
+    g_lastPollTime = now;
 
     // ── Check Sonos ──
     if (strlen(g_settings.sonos_ip) == 0) {
@@ -198,6 +220,9 @@ void loop() {
             g_currentAlbum  = "";
             g_lastTrackHash = "";
             g_lastArtUrl    = "";
+            g_lastVinylMatchTime = 0;
+            g_vinylNoMatchCount = 0;
+            g_lastNoMatchTime = 0;
         }
         handleIdle();
         return;
@@ -217,8 +242,37 @@ static void handlePlaying() {
 
     if (track.isLineIn) {
         // ── VINYL mode ──
-        String hash = trackHash("vinyl", String(millis() / 60000)); // re-identify every minute
-        if (hash == g_lastTrackHash) return;
+        // Check if button was pressed to force re-identification
+        bool buttonPressed = g_buttonReIdentify;
+        if (buttonPressed) {
+            g_buttonReIdentify = false;
+            g_lastTrackHash = "";    // clear so hash check passes
+            g_lastNoMatchTime = 0;   // clear cooldown
+            g_vinylNoMatchCount = 0; // clear retry counter
+            g_lastVinylMatchTime = 0; // allow immediate re-identify
+            activityLog("Button pressed → re-identifying vinyl");
+        }
+
+        // Skip if we identified recently and no retries pending
+        if (g_lastVinylMatchTime != 0 && g_vinylNoMatchCount == 0 &&
+            (millis() - g_lastVinylMatchTime) < VINYL_RECHECK_MS) {
+            return;
+        }
+
+        // Cool down after repeated no-matches to save API calls
+        if (g_lastNoMatchTime != 0) {
+            unsigned long sinceNoMatch = millis() - g_lastNoMatchTime;
+            if (g_vinylNoMatchCount >= VINYL_MAX_RETRIES) {
+                // 3 strikes — full cooldown
+                if (sinceNoMatch < NO_MATCH_COOLDOWN) return;
+                // Cooldown expired — reset and try again
+                g_vinylNoMatchCount = 0;
+                g_lastNoMatchTime = 0;
+            } else {
+                // Still retrying — wait 15s between attempts
+                if (sinceNoMatch < VINYL_RETRY_DELAY) return;
+            }
+        }
 
         g_state = STATE_VINYL;
         activityLog("Line-In detected → recording audio...");
@@ -250,28 +304,91 @@ static void handlePlaying() {
             return;
         }
 
-        activityLogf("Recorded %u bytes — identifying via Shazam...", (unsigned)recorded);
+        activityLogf("Recorded %u bytes", (unsigned)recorded);
+
+        // ── Silence detection: skip Shazam if audio is too quiet ──
+        {
+            size_t numSamples = recorded / 2; // 16-bit samples
+            const int16_t* samples = (const int16_t*)audioBuf;
+            double sumSq = 0;
+            for (size_t i = 0; i < numSamples; i++) {
+                double s = samples[i];
+                sumSq += s * s;
+            }
+            float rms = sqrtf((float)(sumSq / numSamples));
+            activityLogf("Audio RMS: %.0f (threshold: %.0f)", rms, SILENCE_RMS_THRESHOLD);
+            if (rms < SILENCE_RMS_THRESHOLD) {
+                activityLog("Audio too quiet — skipping Shazam (turntable silent?)");
+                heap_caps_free(audioBuf);
+                g_lastNoMatchTime = millis(); // cool down before retrying
+                digitalWrite(LED_RED, LOW);
+                return;
+            }
+        }
+
+        activityLog("Identifying via Shazam...");
+
+        // Wrap in WAV container for Shazam file upload
+        size_t wavLen = 44 + recorded;
+        uint8_t* wavBuf = (uint8_t*)heap_caps_malloc(wavLen, MALLOC_CAP_SPIRAM);
+        if (!wavBuf) {
+            activityLog("WAV buffer alloc failed");
+            heap_caps_free(audioBuf);
+            showFallbackImage();
+            return;
+        }
+        {
+            uint8_t* h = wavBuf;
+            uint16_t ch = AUDIO_CHANNELS;
+            uint32_t sr = AUDIO_SAMPLE_RATE;
+            uint16_t bps = 16;
+            uint32_t byteRate = sr * ch * bps / 8;
+            uint16_t blockAlign = ch * bps / 8;
+            uint32_t riffSize = wavLen - 8;
+            uint32_t fmtSize = 16;
+            uint16_t audioFmt = 1;
+            memcpy(h, "RIFF", 4);      memcpy(h+4, &riffSize, 4);
+            memcpy(h+8, "WAVEfmt ", 8); memcpy(h+16, &fmtSize, 4);
+            memcpy(h+20, &audioFmt, 2); memcpy(h+22, &ch, 2);
+            memcpy(h+24, &sr, 4);       memcpy(h+28, &byteRate, 4);
+            memcpy(h+32, &blockAlign, 2); memcpy(h+34, &bps, 2);
+            memcpy(h+36, "data", 4);    memcpy(h+40, &recorded, 4);
+            memcpy(h+44, audioBuf, recorded);
+        }
+        heap_caps_free(audioBuf);
 
         // Identify via Shazam
         ShazamResult shazam;
         bool identified = shazamIdentify(
             g_settings.shazam_api_key,
-            audioBuf, recorded, shazam
+            wavBuf, wavLen, shazam
         );
-        heap_caps_free(audioBuf);
+        heap_caps_free(wavBuf);
 
         if (!identified) {
-            activityLog("Shazam — no match");
-            showFallbackImage();
+            g_vinylNoMatchCount++;
+            g_lastNoMatchTime = millis();
+            if (g_vinylNoMatchCount >= VINYL_MAX_RETRIES) {
+                activityLogf("Shazam — no match (%d/%d) — cooling down %lum",
+                             g_vinylNoMatchCount, VINYL_MAX_RETRIES, NO_MATCH_COOLDOWN / 60000);
+            } else {
+                activityLogf("Shazam — no match (%d/%d) — retrying in %lus",
+                             g_vinylNoMatchCount, VINYL_MAX_RETRIES, VINYL_RETRY_DELAY / 1000);
+            }
+            digitalWrite(LED_RED, LOW);
             return;
         }
+
+        // Got a match — reset retry counter and cooldown, start recheck timer
+        g_vinylNoMatchCount = 0;
+        g_lastNoMatchTime = 0;
+        g_lastVinylMatchTime = millis();
 
         activityLogf("Identified: %s — %s", shazam.artist.c_str(), shazam.title.c_str());
 
         g_currentArtist = shazam.artist;
         g_currentTitle  = shazam.title;
         g_currentAlbum  = shazam.album;
-        g_lastTrackHash = trackHash(shazam.artist, shazam.title);
 
         // Fetch album art — prefer Shazam cover art, fall back to Spotify
         activityLog("Fetching album art...");
@@ -433,13 +550,41 @@ static void handleListen() {
         activityLogf("Listen: mono %uKB (gain %dx)", (unsigned)(monoBytes/1024), (int)gain);
     }
 
-    // Shazam wants raw PCM as base64 — send mono audio directly
+    // Wrap mono PCM in WAV container for Shazam file upload
+    size_t wavLen = 44 + monoBytes;
+    uint8_t* wavBuf = (uint8_t*)heap_caps_malloc(wavLen, MALLOC_CAP_SPIRAM);
+    if (!wavBuf) {
+        activityLog("Listen: WAV buffer alloc failed");
+        heap_caps_free(audioBuf);
+        digitalWrite(LED_RED, LOW);
+        return;
+    }
+    {
+        uint8_t* h = wavBuf;
+        uint16_t ch = 1;
+        uint32_t sr = AUDIO_SAMPLE_RATE;
+        uint16_t bps = 16;
+        uint32_t byteRate = sr * ch * bps / 8;
+        uint16_t blockAlign = ch * bps / 8;
+        uint32_t riffSize = wavLen - 8;
+        uint32_t fmtSize = 16;
+        uint16_t audioFmt = 1;
+        memcpy(h, "RIFF", 4);      memcpy(h+4, &riffSize, 4);
+        memcpy(h+8, "WAVEfmt ", 8); memcpy(h+16, &fmtSize, 4);
+        memcpy(h+20, &audioFmt, 2); memcpy(h+22, &ch, 2);
+        memcpy(h+24, &sr, 4);       memcpy(h+28, &byteRate, 4);
+        memcpy(h+32, &blockAlign, 2); memcpy(h+34, &bps, 2);
+        memcpy(h+36, "data", 4);    memcpy(h+40, &monoBytes, 4);
+        memcpy(h+44, audioBuf, monoBytes);
+    }
+    heap_caps_free(audioBuf);
+
     ShazamResult shazam;
     bool identified = shazamIdentify(
         g_settings.shazam_api_key,
-        audioBuf, monoBytes, shazam
+        wavBuf, wavLen, shazam
     );
-    heap_caps_free(audioBuf);
+    heap_caps_free(wavBuf);
 
     if (!identified) {
         activityLog("Listen: Shazam — no match");

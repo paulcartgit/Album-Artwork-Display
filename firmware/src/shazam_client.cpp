@@ -2,7 +2,6 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
-#include <mbedtls/base64.h>
 #include <esp_heap_caps.h>
 
 bool shazamIdentify(const char* rapidApiKey,
@@ -10,35 +9,39 @@ bool shazamIdentify(const char* rapidApiKey,
                     ShazamResult& result) {
     result.found = false;
 
-    // Base64-encode the audio data
-    size_t b64Len = 0;
-    mbedtls_base64_encode(nullptr, 0, &b64Len, audioData, audioLen);
+    Serial.printf("[Shazam] Sending %u bytes as multipart file upload\n", (unsigned)audioLen);
 
-    uint8_t* b64Buf = (uint8_t*)heap_caps_malloc(b64Len + 1, MALLOC_CAP_SPIRAM);
-    if (!b64Buf) {
-        Serial.println("[Shazam] Base64 alloc failed");
+    // Build multipart/form-data body in PSRAM
+    String boundary = "----ShazamBoundary9876543210";
+
+    // File part header
+    String partHeader = "--" + boundary + "\r\n"
+        "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
+        "Content-Type: audio/wav\r\n\r\n";
+    String partFooter = "\r\n--" + boundary + "--\r\n";
+
+    size_t totalLen = partHeader.length() + audioLen + partFooter.length();
+    uint8_t* body = (uint8_t*)heap_caps_malloc(totalLen, MALLOC_CAP_SPIRAM);
+    if (!body) {
+        Serial.println("[Shazam] Body alloc failed");
         return false;
     }
+    memcpy(body, partHeader.c_str(), partHeader.length());
+    memcpy(body + partHeader.length(), audioData, audioLen);
+    memcpy(body + partHeader.length() + audioLen, partFooter.c_str(), partFooter.length());
 
-    size_t written = 0;
-    mbedtls_base64_encode(b64Buf, b64Len + 1, &written, audioData, audioLen);
-    b64Buf[written] = 0;
-
-    Serial.printf("[Shazam] Audio %u bytes → base64 %u bytes\n",
-                  (unsigned)audioLen, (unsigned)written);
-
-    // HTTPS POST to Shazam detect endpoint
+    // HTTPS POST to Shazam Song Recognition API
     WiFiClientSecure client;
     client.setInsecure();
     HTTPClient http;
-    http.begin(client, "https://shazam.p.rapidapi.com/songs/detect");
+    http.begin(client, "https://shazam-song-recognition-api.p.rapidapi.com/recognize/file");
     http.setTimeout(20000);
-    http.addHeader("Content-Type", "text/plain");
+    http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
     http.addHeader("x-rapidapi-key", rapidApiKey);
-    http.addHeader("x-rapidapi-host", "shazam.p.rapidapi.com");
+    http.addHeader("x-rapidapi-host", "shazam-song-recognition-api.p.rapidapi.com");
 
-    int code = http.POST(b64Buf, written);
-    heap_caps_free(b64Buf);
+    int code = http.POST(body, totalLen);
+    heap_caps_free(body);
 
     if (code != HTTP_CODE_OK) {
         String body = http.getString();
