@@ -101,7 +101,7 @@ struct Settings {
     uint32_t idle_gallery_ms;
     // Display
     bool show_track_info;
-    bool blur_background;
+    uint8_t bg_mode;  // 0 = always solid, 1 = always blur, 2 = auto (default)
 };
 
 // ─── WiFi Config (stored in /config.json on SD) ───

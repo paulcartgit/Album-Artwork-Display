@@ -99,7 +99,7 @@ void webServerInit() {
         doc["no_match_cooldown_ms"]    = g_settings.no_match_cooldown_ms;
         doc["idle_gallery_ms"]         = g_settings.idle_gallery_ms;
         doc["show_track_info"]         = g_settings.show_track_info;
-        doc["blur_background"]         = g_settings.blur_background;
+        doc["bg_mode"]                 = g_settings.bg_mode;
 
         String out;
         serializeJson(doc, out);
@@ -137,8 +137,8 @@ void webServerInit() {
                     g_settings.idle_gallery_ms = doc["idle_gallery_ms"];
                 if (doc["show_track_info"].is<bool>())
                     g_settings.show_track_info = doc["show_track_info"];
-                if (doc["blur_background"].is<bool>())
-                    g_settings.blur_background = doc["blur_background"];
+                if (doc["bg_mode"].is<unsigned int>())
+                    g_settings.bg_mode = doc["bg_mode"];
 
                 sdWriteSettings(g_settings);
                 req->send(200, "application/json", "{\"ok\":true}");

@@ -127,9 +127,12 @@ button.danger:active{background:#722}
     <input type="checkbox" id="fShowTrackInfo" style="width:auto;margin:0">
     Show track info overlay on display
   </label>
-  <label style="margin-top:8px;display:flex;align-items:center;gap:8px">
-    <input type="checkbox" id="fBlurBg" style="width:auto;margin:0">
-    Blurred artwork background (instead of solid colour)
+  <label style="margin-top:8px">Background fill
+    <select id="fBgMode">
+      <option value="2">Auto (smart detection)</option>
+      <option value="1">Always blurred</option>
+      <option value="0">Always solid colour</option>
+    </select>
   </label>
 
   <button onclick="saveSettings()">Save Settings</button>
@@ -279,7 +282,7 @@ async function loadSettings() {
     const ig = document.getElementById('fIdleGallery');
     ig.value = Math.round((d.idle_gallery_ms||300000)/60000); ig.oninput();
     document.getElementById('fShowTrackInfo').checked = !!d.show_track_info;
-    document.getElementById('fBlurBg').checked = d.blur_background !== false;
+    document.getElementById('fBgMode').value = (d.bg_mode !== undefined) ? d.bg_mode : 2;
   } catch(e) { console.error(e); }
 }
 
@@ -291,7 +294,7 @@ async function saveSettings() {
     no_match_cooldown_ms: parseInt(document.getElementById('fCooldown').value)*60000,
     idle_gallery_ms: parseInt(document.getElementById('fIdleGallery').value)*60000,
     show_track_info: document.getElementById('fShowTrackInfo').checked,
-    blur_background: document.getElementById('fBlurBg').checked
+    bg_mode: parseInt(document.getElementById('fBgMode').value)
   };
   const shz = document.getElementById('fShazamKey').value;
   if (shz) body.shazam_api_key = shz;

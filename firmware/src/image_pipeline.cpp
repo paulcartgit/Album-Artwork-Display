@@ -84,6 +84,39 @@ static void averageEdgeColor(const uint8_t* src, int w, int h, uint8_t& rOut, ui
     bOut = constrain((int)(b + 0.5f), 0, 255);
 }
 
+// ─── Measure how "busy" the image edges are ───
+// Samples the outermost pixel border of the image.  If the edge is uniform
+// (low variance) a solid fill of that colour will look clean.  If it's
+// varied / photographic we need the blur treatment.
+static float edgeVariance(const uint8_t* src, int w, int h) {
+    float rSum = 0, gSum = 0, bSum = 0;
+    float r2Sum = 0, g2Sum = 0, b2Sum = 0;
+    int count = 0;
+
+    auto addPx = [&](int i) {
+        float r = src[i], g = src[i+1], b = src[i+2];
+        rSum += r; gSum += g; bSum += b;
+        r2Sum += r*r; g2Sum += g*g; b2Sum += b*b;
+        count++;
+    };
+
+    for (int x = 0; x < w; x++) {
+        addPx(x * 3);                    // top row
+        addPx(((h-1) * w + x) * 3);     // bottom row
+    }
+    for (int y = 1; y < h - 1; y++) {
+        addPx((y * w) * 3);             // left col
+        addPx((y * w + w - 1) * 3);     // right col
+    }
+
+    if (count == 0) return 0;
+    float n = (float)count;
+    float varR = r2Sum / n - (rSum / n) * (rSum / n);
+    float varG = g2Sum / n - (gSum / n) * (gSum / n);
+    float varB = b2Sum / n - (bSum / n) * (bSum / n);
+    return (varR + varG + varB) / 3.0f;
+}
+
 // ─── Render text into RGB888 buffer using Adafruit GFX ───
 static void renderText(uint8_t* rgb, int canvasW, int canvasH,
                        const char* artist, const char* album,
@@ -375,7 +408,22 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     uint8_t bgR, bgG, bgB;
     averageEdgeColor(g_decodeBuf, imgW, imgH, bgR, bgG, bgB);
 
-    if (g_settings.blur_background) {
+    // Background mode: 0 = always solid, 1 = always blur, 2 = auto-detect.
+    bool useBlur;
+    if (g_settings.bg_mode == 0) {
+        useBlur = false;
+        Serial.println("[Pipeline] Background: forced solid");
+    } else if (g_settings.bg_mode == 1) {
+        useBlur = true;
+        Serial.println("[Pipeline] Background: forced blur");
+    } else {
+        float var = edgeVariance(g_decodeBuf, imgW, imgH);
+        useBlur = var >= 800.0f;
+        Serial.printf("[Pipeline] Edge variance: %.0f → %s fill\n", var,
+                      useBlur ? "blur" : "solid");
+    }
+
+    if (useBlur) {
         // Blurred pillarbox: scale source to fill canvas, blur heavily, dim
         int fillH = showText ? artAreaH : EPD_HEIGHT;
         fillBlurredBackground(scaledBuf, EPD_WIDTH, EPD_HEIGHT,

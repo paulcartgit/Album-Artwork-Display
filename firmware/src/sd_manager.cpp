@@ -44,7 +44,7 @@ bool sdReadSettings(Settings& settings) {
     settings.no_match_cooldown_ms = NO_MATCH_COOLDOWN_MS;
     settings.idle_gallery_ms = IDLE_GALLERY_INTERVAL_MS;
     settings.show_track_info = true;
-    settings.blur_background = true;
+    settings.bg_mode = 2;  // auto
 
     File f = SD_MMC.open("/settings.json", FILE_READ);
     if (!f) return false;
@@ -63,7 +63,14 @@ bool sdReadSettings(Settings& settings) {
     settings.no_match_cooldown_ms = doc["no_match_cooldown_ms"] | NO_MATCH_COOLDOWN_MS;
     settings.idle_gallery_ms = doc["idle_gallery_ms"] | IDLE_GALLERY_INTERVAL_MS;
     settings.show_track_info = doc["show_track_info"] | true;
-    settings.blur_background = doc["blur_background"] | true;
+    // Migrate old bool blur_background → new bg_mode
+    if (doc["bg_mode"].is<unsigned int>()) {
+        settings.bg_mode = doc["bg_mode"] | 2;
+    } else if (doc["blur_background"].is<bool>()) {
+        settings.bg_mode = doc["blur_background"].as<bool>() ? 1 : 0;
+    } else {
+        settings.bg_mode = 2;
+    }
     return true;
 }
 
@@ -76,7 +83,7 @@ bool sdWriteSettings(const Settings& settings) {
     doc["no_match_cooldown_ms"] = settings.no_match_cooldown_ms;
     doc["idle_gallery_ms"] = settings.idle_gallery_ms;
     doc["show_track_info"] = settings.show_track_info;
-    doc["blur_background"] = settings.blur_background;
+    doc["bg_mode"] = settings.bg_mode;
 
     File f = SD_MMC.open("/settings.json", FILE_WRITE);
     if (!f) return false;
