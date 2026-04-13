@@ -36,6 +36,12 @@ volatile bool g_forceRefresh = false;
 volatile bool g_testColors = false;
 volatile bool g_forceListen = false;
 
+// ─── Last recorded audio (for web download/debug) ───
+uint8_t* g_lastAudio = nullptr;
+size_t   g_lastAudioLen = 0;
+uint32_t g_lastAudioChannels = AUDIO_CHANNELS;
+uint32_t g_lastAudioSampleRate = AUDIO_SAMPLE_RATE;
+
 // ─── Idle state helpers ───
 static unsigned long g_lastIdleSwap = 0;
 static const unsigned long IDLE_SWAP_INTERVAL = 5 * 60 * 1000; // 5 min
@@ -388,12 +394,51 @@ static void handleListen() {
 
     activityLogf("Listen: recorded %uKB — sending to ACRCloud...", (unsigned)(recorded / 1024));
 
+    // Stash a copy of raw stereo data for web download/debug
+    if (g_lastAudio) { heap_caps_free(g_lastAudio); g_lastAudio = nullptr; }
+    g_lastAudio = (uint8_t*)heap_caps_malloc(recorded, MALLOC_CAP_SPIRAM);
+    if (g_lastAudio) {
+        memcpy(g_lastAudio, audioBuf, recorded);
+        g_lastAudioLen = recorded;
+    }
+
+    // Convert stereo to mono (take L channel = every other sample)
+    // and apply software gain to boost quiet mic signal
+    size_t monoBytes = recorded;
+    if (AUDIO_CHANNELS > 1) {
+        int16_t* samples = (int16_t*)audioBuf;
+        size_t totalSamples = recorded / 2;
+        size_t monoSamples = totalSamples / AUDIO_CHANNELS;
+
+        // Find peak to calculate safe gain multiplier
+        int32_t peak = 0;
+        for (size_t i = 0; i < totalSamples; i += AUDIO_CHANNELS) {
+            int32_t a = abs((int32_t)samples[i]);
+            if (a > peak) peak = a;
+        }
+        // Auto-gain: normalize to ~80% of full scale, capped at 32x
+        int32_t gain = (peak > 0) ? (26000 / peak) : 1;
+        if (gain < 1) gain = 1;
+        if (gain > 32) gain = 32;
+        activityLogf("Listen: peak=%d gain=%dx", (int)peak, (int)gain);
+
+        for (size_t i = 0; i < monoSamples; i++) {
+            int32_t s = (int32_t)samples[i * AUDIO_CHANNELS] * gain;
+            // Clamp to 16-bit range
+            if (s > 32767) s = 32767;
+            if (s < -32768) s = -32768;
+            samples[i] = (int16_t)s;
+        }
+        monoBytes = monoSamples * 2;
+        activityLogf("Listen: mono %uKB (gain %dx)", (unsigned)(monoBytes/1024), (int)gain);
+    }
+
     AcrResult acr;
     bool identified = acrcloudIdentify(
         g_settings.acrcloud_host,
         g_settings.acrcloud_key,
         g_settings.acrcloud_secret,
-        audioBuf, recorded, acr
+        audioBuf, monoBytes, acr
     );
     heap_caps_free(audioBuf);
 

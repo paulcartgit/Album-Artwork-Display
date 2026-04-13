@@ -19,6 +19,10 @@ extern String     g_currentAlbum;
 extern volatile bool g_forceRefresh;
 extern volatile bool g_testColors;
 extern volatile bool g_forceListen;
+extern uint8_t* g_lastAudio;
+extern size_t   g_lastAudioLen;
+extern uint32_t g_lastAudioChannels;
+extern uint32_t g_lastAudioSampleRate;
 
 static AsyncWebServer server(80);
 
@@ -190,6 +194,79 @@ void webServerInit() {
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);
+    });
+
+    // ─── Download last audio recording as WAV ───
+    server.on("/api/last-audio", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!g_lastAudio || g_lastAudioLen == 0) {
+            req->send(404, "text/plain", "No audio recorded yet");
+            return;
+        }
+
+        uint32_t sampleRate = g_lastAudioSampleRate;
+        uint16_t channels = g_lastAudioChannels;
+        uint16_t bitsPerSample = 16;
+        uint32_t byteRate = sampleRate * channels * bitsPerSample / 8;
+        uint16_t blockAlign = channels * bitsPerSample / 8;
+        uint32_t dataLen = g_lastAudioLen;
+        uint32_t fileLen = 44 + dataLen;
+
+        // Build WAV header (44 bytes)
+        uint8_t hdr[44];
+        memcpy(hdr, "RIFF", 4);
+        uint32_t riffSize = fileLen - 8;
+        memcpy(hdr + 4, &riffSize, 4);
+        memcpy(hdr + 8, "WAVEfmt ", 8);
+        uint32_t fmtSize = 16;
+        memcpy(hdr + 16, &fmtSize, 4);
+        uint16_t audioFmt = 1; // PCM
+        memcpy(hdr + 20, &audioFmt, 2);
+        memcpy(hdr + 22, &channels, 2);
+        memcpy(hdr + 24, &sampleRate, 4);
+        memcpy(hdr + 28, &byteRate, 4);
+        memcpy(hdr + 32, &blockAlign, 2);
+        memcpy(hdr + 34, &bitsPerSample, 2);
+        memcpy(hdr + 36, "data", 4);
+        memcpy(hdr + 40, &dataLen, 4);
+
+        // Capture pointer/len at request time (audio won't change mid-serve)
+        uint8_t* audioPtr = g_lastAudio;
+        size_t audioLen = g_lastAudioLen;
+
+        AsyncWebServerResponse* response = req->beginChunkedResponse("audio/wav",
+            [hdr, audioPtr, audioLen](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+                size_t totalLen = 44 + audioLen;
+                if (index >= totalLen) return 0;
+
+                size_t remaining = totalLen - index;
+                size_t toSend = (remaining < maxLen) ? remaining : maxLen;
+                size_t sent = 0;
+
+                // Send from header (first 44 bytes)
+                if (index < 44) {
+                    size_t hdrBytes = 44 - index;
+                    if (hdrBytes > toSend) hdrBytes = toSend;
+                    memcpy(buffer, hdr + index, hdrBytes);
+                    sent += hdrBytes;
+                }
+
+                // Send from audio data
+                if (sent < toSend) {
+                    size_t audioOffset = (index > 44) ? index - 44 : 0;
+                    if (index < 44) audioOffset = 0;
+                    size_t dataStart = (index < 44) ? 0 : index - 44;
+                    size_t dataBytes = toSend - sent;
+                    if (dataStart + dataBytes > audioLen)
+                        dataBytes = audioLen - dataStart;
+                    memcpy(buffer + sent, audioPtr + dataStart, dataBytes);
+                    sent += dataBytes;
+                }
+
+                return sent;
+            }
+        );
+        response->addHeader("Content-Disposition", "attachment; filename=\"recording.wav\"");
+        req->send(response);
     });
 
     server.begin();

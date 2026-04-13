@@ -76,6 +76,7 @@ button.danger:active{background:#722}
   <button onclick="loadStatus()">Refresh Status</button>
   <button onclick="forceRefresh()" style="background:#e67e22;margin-left:8px">Force Display Refresh</button>
   <button onclick="forceListen()" style="background:#2980b9;margin-left:8px">&#127911; Listen</button>
+  <a href="/api/last-audio" download="recording.wav" style="margin-left:8px"><button type="button" style="background:#16a085">&#128266; Download Audio</button></a>
   <button onclick="testColors()" style="background:#8e44ad;margin-left:8px">Test Colors</button>
   <div class="status-card" style="margin-top:16px">
     <div class="status-label">Activity Log</div>

@@ -52,7 +52,7 @@
 // ─── Audio Recording ───
 #define AUDIO_SAMPLE_RATE  44100
 #define AUDIO_BITS         16
-#define AUDIO_CHANNELS     1
+#define AUDIO_CHANNELS     2       // stereo — ES7210 sends MIC1 on L, MIC2 on R
 #define AUDIO_RECORD_SECS  12
 #define LISTEN_RECORD_SECS 6
 #define AUDIO_BUFFER_SIZE  (AUDIO_SAMPLE_RATE * (AUDIO_BITS / 8) * AUDIO_CHANNELS * AUDIO_RECORD_SECS)

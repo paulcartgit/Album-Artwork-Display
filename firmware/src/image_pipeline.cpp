@@ -4,6 +4,7 @@
 #include "display.h"
 
 #include <HTTPClient.h>
+#include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <TJpg_Decoder.h>
 #include <SD_MMC.h>
