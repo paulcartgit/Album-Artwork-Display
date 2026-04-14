@@ -76,7 +76,8 @@ void webServerInit() {
             unsigned long since = now - g_lastNoMatchTime;
             doc["no_match_retries"] = g_vinylNoMatchCount;
             doc["cooldown_level"] = g_vinylCooldownLevel;
-            int maxRetries = (g_vinylCooldownLevel == 0) ? 3 : 1;
+            // Mirror the escalating cooldown logic from main loop
+            int maxRetries = (g_vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
             if (g_vinylNoMatchCount >= maxRetries) {
                 unsigned long cooldown = g_settings.no_match_cooldown_ms *
                                          (1 + (unsigned long)g_vinylCooldownLevel);
@@ -84,9 +85,8 @@ void webServerInit() {
                 if (since < cooldown)
                     doc["cooldown_remaining_sec"] = (cooldown - since) / 1000;
             } else {
-                unsigned long retryDelay = 15000;
-                if (since < retryDelay)
-                    doc["retry_in_sec"] = (retryDelay - since) / 1000;
+                if (since < VINYL_RETRY_DELAY_MS)
+                    doc["retry_in_sec"] = (VINYL_RETRY_DELAY_MS - since) / 1000;
             }
         }
 

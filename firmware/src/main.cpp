@@ -51,13 +51,24 @@ static unsigned long g_lastIdleSwap = 0;
 
 // ─── Vinyl API-call protection ───
 unsigned long g_lastNoMatchTime = 0;
-static const unsigned long VINYL_RETRY_DELAY = 15 * 1000; // 15 sec between no-match retries
-static const int VINYL_MAX_RETRIES = 3;
 int g_vinylNoMatchCount = 0;
 int g_vinylCooldownLevel = 0; // escalates after each full cooldown cycle
 static const float SILENCE_RMS_THRESHOLD = 150.0f; // 16-bit PCM; typical noise floor ~50-100
 unsigned long g_lastVinylMatchTime = 0; // when last successful vinyl identify happened
 static String g_lastVinylAlbumKey; // artist|album — skip re-display if same album
+
+// Calculate escalating cooldown duration based on current level
+static unsigned long vinylCooldownMs() {
+    unsigned long cooldown = g_settings.no_match_cooldown_ms *
+                             (1 + (unsigned long)g_vinylCooldownLevel);
+    if (cooldown > VINYL_MAX_COOLDOWN_MS) cooldown = VINYL_MAX_COOLDOWN_MS;
+    return cooldown;
+}
+
+// Number of retries before entering cooldown (fewer after first escalation)
+static int vinylMaxRetries() {
+    return (g_vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
+}
 
 // ─── Sonos poll timing (accessible from web_server) ───
 unsigned long g_lastPollTime = 0;
@@ -286,24 +297,18 @@ static void handlePlaying() {
         // Cool down after repeated no-matches to save API calls
         if (g_lastNoMatchTime != 0) {
             unsigned long sinceNoMatch = millis() - g_lastNoMatchTime;
-            int maxRetries = (g_vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
-            if (g_vinylNoMatchCount >= maxRetries) {
+            if (g_vinylNoMatchCount >= vinylMaxRetries()) {
                 // Escalating cooldown: base × (1 + level), capped at max
-                unsigned long cooldown = g_settings.no_match_cooldown_ms *
-                                         (1 + (unsigned long)g_vinylCooldownLevel);
-                if (cooldown > VINYL_MAX_COOLDOWN_MS) cooldown = VINYL_MAX_COOLDOWN_MS;
-                if (sinceNoMatch < cooldown) return;
+                if (sinceNoMatch < vinylCooldownMs()) return;
                 // Cooldown expired — escalate and try again
                 g_vinylCooldownLevel++;
                 g_vinylNoMatchCount = 0;
                 g_lastNoMatchTime = 0;
                 activityLogf("Cooldown expired — escalation level %d, next cooldown %lum",
-                             g_vinylCooldownLevel,
-                             min(g_settings.no_match_cooldown_ms * (1 + (unsigned long)g_vinylCooldownLevel),
-                                 (unsigned long)VINYL_MAX_COOLDOWN_MS) / 60000);
+                             g_vinylCooldownLevel, vinylCooldownMs() / 60000);
             } else {
                 // Still retrying — wait 15s between attempts
-                if (sinceNoMatch < VINYL_RETRY_DELAY) return;
+                if (sinceNoMatch < VINYL_RETRY_DELAY_MS) return;
             }
         }
 
@@ -401,17 +406,13 @@ static void handlePlaying() {
         if (!identified) {
             g_vinylNoMatchCount++;
             g_lastNoMatchTime = millis();
-            int maxRetries = (g_vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
-            if (g_vinylNoMatchCount >= maxRetries) {
-                unsigned long cooldown = g_settings.no_match_cooldown_ms *
-                                         (1 + (unsigned long)g_vinylCooldownLevel);
-                if (cooldown > VINYL_MAX_COOLDOWN_MS) cooldown = VINYL_MAX_COOLDOWN_MS;
+            if (g_vinylNoMatchCount >= vinylMaxRetries()) {
                 activityLogf("Shazam — no match (%d/%d) — cooling down %lum (level %d)",
-                             g_vinylNoMatchCount, maxRetries,
-                             cooldown / 60000, g_vinylCooldownLevel);
+                             g_vinylNoMatchCount, vinylMaxRetries(),
+                             vinylCooldownMs() / 60000, g_vinylCooldownLevel);
             } else {
                 activityLogf("Shazam — no match (%d/%d) — retrying in %lus",
-                             g_vinylNoMatchCount, maxRetries, VINYL_RETRY_DELAY / 1000);
+                             g_vinylNoMatchCount, vinylMaxRetries(), (unsigned long)VINYL_RETRY_DELAY_MS / 1000);
             }
             digitalWrite(LED_RED, LOW);
             return;
@@ -430,13 +431,18 @@ static void handlePlaying() {
         g_currentAlbum  = shazam.album;
 
         // Check if this is the same album already displayed — skip artwork refresh
-        String albumKey = shazam.artist + "|" + shazam.album;
-        if (albumKey == g_lastVinylAlbumKey) {
-            activityLog("Same album still playing — skipping display update");
-            digitalWrite(LED_RED, LOW);
-            return;
+        // Only deduplicate when album name is known; singles with no album are always shown
+        if (shazam.album.length() > 0) {
+            String albumKey = shazam.artist + "|" + shazam.album;
+            if (albumKey == g_lastVinylAlbumKey) {
+                activityLog("Same album still playing — skipping display update");
+                digitalWrite(LED_RED, LOW);
+                return;
+            }
+            g_lastVinylAlbumKey = albumKey;
+        } else {
+            g_lastVinylAlbumKey = "";
         }
-        g_lastVinylAlbumKey = albumKey;
 
         // Fetch album art from Shazam
         activityLog("Fetching album art...");
