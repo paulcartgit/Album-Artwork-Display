@@ -287,8 +287,8 @@ void loop() {
         g_sonosUnreachableCount++;
         activityLogf("Sonos unreachable (%d/%d)", g_sonosUnreachableCount, SONOS_UNREACHABLE_BEFORE_REDISCOVER);
 
-        if (g_sonosUnreachableCount >= SONOS_UNREACHABLE_BEFORE_REDISCOVER
-                && strlen(g_settings.sonos_name) > 0) {
+        if (g_sonosUnreachableCount >= SONOS_UNREACHABLE_BEFORE_REDISCOVER &&
+            strlen(g_settings.sonos_name) > 0) {
             activityLogf("Re-discovering '%s'...", g_settings.sonos_name);
             char newIp[40] = {};
             if (sonosResolveByName(g_settings.sonos_name, newIp, sizeof(newIp))) {

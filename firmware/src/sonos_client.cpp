@@ -84,8 +84,8 @@ bool sonosIsPlaying(const char* sonosIp, bool* reachable) {
     int code = http.POST(GETTRANS_ENVELOPE);
 
     // Negative codes are transport/connection errors — the device is unreachable.
-    // Non-negative codes mean we got an HTTP response (device is reachable).
-    if (code <= 0) {
+    // A zero or positive code means we got an HTTP response (device is reachable).
+    if (code < 0) {
         http.end();
         return false; // reachable stays false
     }
