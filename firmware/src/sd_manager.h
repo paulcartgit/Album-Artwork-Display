@@ -3,6 +3,7 @@
 
 bool sdInit();
 bool sdReadWifiConfig(WifiConfig& cfg);
+bool sdWriteWifiConfig(const WifiConfig& cfg);
 bool sdReadSettings(Settings& settings);
 bool sdWriteSettings(const Settings& settings);
 bool sdFileExists(const char* path);

@@ -17,6 +17,22 @@ bool sdInit() {
     return true;
 }
 
+bool sdWriteWifiConfig(const WifiConfig& cfg) {
+    JsonDocument doc;
+    doc["ssid"]     = cfg.ssid;
+    doc["password"] = cfg.password;
+
+    File f = SD_MMC.open("/config.json", FILE_WRITE);
+    if (!f) {
+        Serial.println("[SD] Failed to write config.json");
+        return false;
+    }
+    serializeJson(doc, f);
+    f.close();
+    Serial.println("[SD] config.json written");
+    return true;
+}
+
 bool sdReadWifiConfig(WifiConfig& cfg) {
     File f = SD_MMC.open("/config.json", FILE_READ);
     if (!f) {

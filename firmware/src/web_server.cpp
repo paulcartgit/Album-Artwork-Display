@@ -1,14 +1,97 @@
 #include "web_server.h"
 #include "web_portal.h"
+#include "captive_portal.h"
 #include "config.h"
 #include "sd_manager.h"
 #include "image_pipeline.h"
 #include "activity_log.h"
 
 #include <ESPAsyncWebServer.h>
+#include <DNSServer.h>
 #include <ArduinoJson.h>
 #include <SD_MMC.h>
 #include <WiFi.h>
+
+// ─── Captive portal (setup mode) ───────────────────────────
+
+static DNSServer       s_dns;
+static AsyncWebServer  s_setupServer(80);
+
+// Redirect every DNS query to us (192.168.4.1) so the OS pops the portal
+static const uint8_t DNS_PORT = 53;
+
+void captivePortalInit() {
+    // Redirect all DNS to the AP IP
+    s_dns.start(DNS_PORT, "*", WiFi.softAPIP());
+
+    // Serve the setup page for any path (handles OS captive-portal probes too)
+    s_setupServer.onNotFound([](AsyncWebServerRequest* req) {
+        req->send_P(200, "text/html", CAPTIVE_PORTAL_HTML);
+    });
+
+    s_setupServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send_P(200, "text/html", CAPTIVE_PORTAL_HTML);
+    });
+
+    // Wi-Fi scan endpoint
+    s_setupServer.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
+        int n = WiFi.scanNetworks(false, false);
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        for (int i = 0; i < n; i++) {
+            JsonObject obj = arr.add<JsonObject>();
+            obj["ssid"] = WiFi.SSID(i);
+            obj["rssi"] = WiFi.RSSI(i);
+            obj["open"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+        }
+        String out;
+        serializeJson(doc, out);
+        req->send(200, "application/json", out);
+    });
+
+    // Save credentials and reboot
+    s_setupServer.on("/api/wifi/save", HTTP_POST,
+        [](AsyncWebServerRequest* req) { /* handled in body callback */ },
+        nullptr,
+        [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
+            static String body;
+            if (index == 0) body = "";
+            body += String((char*)data, len);
+
+            if (index + len >= total) {
+                JsonDocument doc;
+                if (deserializeJson(doc, body)) {
+                    req->send(400, "application/json", "{\"error\":\"bad json\"}");
+                    return;
+                }
+                const char* ssid = doc["ssid"] | "";
+                const char* pwd  = doc["password"] | "";
+                if (!ssid || strlen(ssid) == 0) {
+                    req->send(400, "application/json", "{\"error\":\"ssid required\"}");
+                    return;
+                }
+                WifiConfig cfg;
+                strlcpy(cfg.ssid,     ssid, sizeof(cfg.ssid));
+                strlcpy(cfg.password, pwd,  sizeof(cfg.password));
+                if (!sdWriteWifiConfig(cfg)) {
+                    req->send(500, "application/json", "{\"error\":\"sd write failed\"}");
+                    return;
+                }
+                req->send(200, "application/json", "{\"ok\":true}");
+                // Brief delay so the response reaches the browser, then reboot
+                delay(800);
+                ESP.restart();
+            }
+        }
+    );
+
+    s_setupServer.begin();
+    Serial.println("[CaptivePortal] Setup server started");
+}
+
+void captivePortalLoop() {
+    s_dns.processNextRequest();
+}
 
 // Globals declared in main.cpp
 extern Settings   g_settings;
