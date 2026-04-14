@@ -159,16 +159,24 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
     f.write(jpegBuf, jpegSize);
     f.close();
 
-    // Prune oldest if at capacity
+    // Prune oldest non-pinned entry if at capacity
     while (arr.size() >= HISTORY_MAX) {
-        // Find oldest by timestamp
-        int oldest = 0;
+        // Find oldest non-pinned entry by timestamp
+        int oldest = -1;
         unsigned long oldestTs = ULONG_MAX;
         int i = 0;
         for (JsonObject obj : arr) {
-            unsigned long ts = obj["ts"] | 0UL;
-            if (ts < oldestTs) { oldestTs = ts; oldest = i; }
+            bool pinned = obj["pin"] | false;
+            if (!pinned) {
+                unsigned long ts = obj["ts"] | 0UL;
+                if (ts < oldestTs) { oldestTs = ts; oldest = i; }
+            }
             i++;
+        }
+        if (oldest < 0) {
+            // All entries are pinned — cannot prune
+            Serial.println("[History] All entries pinned, cannot prune");
+            break;
         }
         // Delete file and remove entry
         String delPath = String("/history/") + (arr[oldest]["f"] | "?.jpg");
@@ -215,27 +223,56 @@ bool sdHistorySetEnabled(const char* file, bool on) {
     return false;
 }
 
-String sdHistoryRandomFile() {
+bool sdHistorySetPinned(const char* file, bool pinned) {
     JsonDocument doc;
-    if (!readIndex(doc)) return "";
+    if (!readIndex(doc)) return false;
     JsonArray arr = doc.as<JsonArray>();
-
-    // Count enabled entries
-    int enabled = 0;
     for (JsonObject obj : arr) {
-        if (obj["on"] | true) enabled++;
-    }
-    if (enabled == 0) return "";
-
-    int pick = random(enabled);
-    int idx = 0;
-    for (JsonObject obj : arr) {
-        if (obj["on"] | true) {
-            if (idx == pick) {
-                return String("/history/") + (obj["f"] | "?.jpg");
-            }
-            idx++;
+        if (strcmp(obj["f"] | "", file) == 0) {
+            obj["pin"] = pinned;
+            writeIndex(doc);
+            return true;
         }
     }
-    return "";
+    return false;
+}
+
+// ─── Shuffle-bag state ───
+// Implements iPod-shuffle-style randomness: cycle through all enabled items in
+// a random order, then re-shuffle for the next cycle.  Avoids the clustering
+// and starvation that pure random produces.
+static char g_shuffleBag[HISTORY_MAX][20]; // each slot holds "XXXXXXXX.jpg\0"
+static int  g_shuffleCount = 0;
+static int  g_shufflePos   = 0;
+
+static void rebuildShuffleBag() {
+    JsonDocument doc;
+    if (!readIndex(doc)) { g_shuffleCount = 0; return; }
+    JsonArray arr = doc.as<JsonArray>();
+
+    g_shuffleCount = 0;
+    for (JsonObject obj : arr) {
+        if ((obj["on"] | true) && g_shuffleCount < HISTORY_MAX) {
+            strlcpy(g_shuffleBag[g_shuffleCount], obj["f"] | "", sizeof(g_shuffleBag[0]));
+            g_shuffleCount++;
+        }
+    }
+
+    // Fisher-Yates shuffle
+    for (int i = g_shuffleCount - 1; i > 0; i--) {
+        int j = random(i + 1);
+        char tmp[20];
+        strlcpy(tmp, g_shuffleBag[i], sizeof(tmp));
+        strlcpy(g_shuffleBag[i], g_shuffleBag[j], sizeof(g_shuffleBag[0]));
+        strlcpy(g_shuffleBag[j], tmp, sizeof(g_shuffleBag[0]));
+    }
+    g_shufflePos = 0;
+}
+
+String sdHistoryRandomFile() {
+    if (g_shufflePos >= g_shuffleCount) {
+        rebuildShuffleBag();
+    }
+    if (g_shuffleCount == 0) return "";
+    return String("/history/") + g_shuffleBag[g_shufflePos++];
 }

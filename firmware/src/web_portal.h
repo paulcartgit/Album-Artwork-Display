@@ -135,7 +135,7 @@ button.danger:active{background:#722}
 
 <!-- HISTORY -->
 <div id="history" class="panel">
-  <p style="font-size:.8rem;color:#888;margin-bottom:12px">Album covers are saved automatically as you play music. Toggle covers on/off to control what shows when idle.</p>
+  <p style="font-size:.8rem;color:#888;margin-bottom:12px">Album covers are saved automatically as you play music. Toggle covers on/off to control what shows when idle. Pin &#128204; a cover to keep it in rotation permanently — pinned covers are never removed when the history reaches 100 entries.</p>
   <div class="gallery-grid" id="historyGrid"></div>
   <div id="historyEmpty" style="text-align:center;color:#666;padding:32px;display:none">No album art yet — play some music!</div>
 </div>
@@ -312,6 +312,7 @@ async function loadHistory() {
       div.className = 'gallery-item';
       div.style.cssText = 'padding:0;overflow:hidden;position:relative;cursor:pointer';
       const on = h.on !== false;
+      const pin = !!h.pin;
       div.innerHTML =
         '<img src="/api/history/image?f='+h.f+'" style="width:100%;aspect-ratio:1;object-fit:cover;display:block;'+(on?'':'opacity:.35;')+'">'
         + '<div style="padding:6px 8px;font-size:.7rem;line-height:1.3;'+(on?'':'opacity:.5;')+'">'
@@ -320,8 +321,14 @@ async function loadHistory() {
         + '<div style="position:absolute;top:6px;right:6px;width:28px;height:28px;border-radius:50%;'
         + 'background:'+(on?'#2a6':'#444')+';display:flex;align-items:center;justify-content:center;'
         + 'font-size:.75rem;color:#fff;border:2px solid '+(on?'#2a6':'#666')+'">'
-        + (on?'&#10003;':'')+'</div>';
+        + (on?'&#10003;':'')+'</div>'
+        + '<div title="'+(pin?'Unpin':'Pin')+'" style="position:absolute;top:6px;left:6px;width:28px;height:28px;border-radius:50%;'
+        + 'background:'+(pin?'#c8860a':'#333')+';display:flex;align-items:center;justify-content:center;'
+        + 'font-size:.8rem;border:2px solid '+(pin?'#e6a020':'#555')+';cursor:pointer">'
+        + '&#128204;</div>';
       div.onclick = () => toggleHistory(h.f, !on);
+      // Pin button — stop propagation so card toggle isn't also triggered
+      div.lastElementChild.onclick = (e) => { e.stopPropagation(); pinHistory(h.f, !pin); };
       grid.appendChild(div);
     });
   } catch(e) { console.error(e); }
@@ -330,6 +337,11 @@ function esc(s) { const d=document.createElement('div');d.textContent=s||'';retu
 async function toggleHistory(f, on) {
   await fetch('/api/history/toggle', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:'f='+encodeURIComponent(f)+'&on='+(on?'1':'0')});
+  loadHistory();
+}
+async function pinHistory(f, pin) {
+  await fetch('/api/history/pin', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'f='+encodeURIComponent(f)+'&pin='+(pin?'1':'0')});
   loadHistory();
 }
 

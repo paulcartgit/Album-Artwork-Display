@@ -165,6 +165,25 @@ void webServerInit() {
         req->send(SD_MMC, path, "image/jpeg");
     });
 
+    // ─── Pin/unpin history entry ───
+    server.on("/api/history/pin", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!req->hasParam("f", true) || !req->hasParam("pin", true)) {
+            req->send(400, "application/json", "{\"error\":\"missing f or pin\"}");
+            return;
+        }
+        String file = req->getParam("f", true)->value();
+        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+            req->send(400, "application/json", "{\"error\":\"invalid name\"}");
+            return;
+        }
+        bool pin = req->getParam("pin", true)->value() == "1";
+        if (sdHistorySetPinned(file.c_str(), pin)) {
+            req->send(200, "application/json", "{\"ok\":true}");
+        } else {
+            req->send(404, "application/json", "{\"error\":\"not found\"}");
+        }
+    });
+
     // ─── Toggle history entry on/off ───
     server.on("/api/history/toggle", HTTP_POST, [](AsyncWebServerRequest* req) {
         if (!req->hasParam("f", true) || !req->hasParam("on", true)) {
