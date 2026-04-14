@@ -26,6 +26,7 @@ extern uint32_t g_lastAudioSampleRate;
 extern unsigned long g_lastPollTime;
 extern unsigned long g_lastNoMatchTime;
 extern int g_vinylNoMatchCount;
+extern int g_vinylCooldownLevel;
 extern unsigned long g_lastVinylMatchTime;
 extern String g_lastArtUrl;
 
@@ -74,9 +75,14 @@ void webServerInit() {
         if (g_lastNoMatchTime != 0) {
             unsigned long since = now - g_lastNoMatchTime;
             doc["no_match_retries"] = g_vinylNoMatchCount;
-            if (g_vinylNoMatchCount >= 3) {
-                if (since < g_settings.no_match_cooldown_ms)
-                    doc["cooldown_remaining_sec"] = (g_settings.no_match_cooldown_ms - since) / 1000;
+            doc["cooldown_level"] = g_vinylCooldownLevel;
+            int maxRetries = (g_vinylCooldownLevel == 0) ? 3 : 1;
+            if (g_vinylNoMatchCount >= maxRetries) {
+                unsigned long cooldown = g_settings.no_match_cooldown_ms *
+                                         (1 + (unsigned long)g_vinylCooldownLevel);
+                if (cooldown > VINYL_MAX_COOLDOWN_MS) cooldown = VINYL_MAX_COOLDOWN_MS;
+                if (since < cooldown)
+                    doc["cooldown_remaining_sec"] = (cooldown - since) / 1000;
             } else {
                 unsigned long retryDelay = 15000;
                 if (since < retryDelay)
