@@ -150,7 +150,7 @@ void setup() {
             return;
         }
         captivePortalInit();
-        g_state = STATE_ERROR; // keeps loop() in the captive-portal branch below
+        g_state = STATE_SETUP;
         return;
     }
 
@@ -174,12 +174,12 @@ void setup() {
 // ═══════════════════════════════════════════════════════════
 void loop() {
     if (g_state == STATE_ERROR) {
-        if (wifiIsAPMode()) {
-            captivePortalLoop();
-            delay(10);
-        } else {
-            delay(10000);
-        }
+        delay(10000);
+        return;
+    }
+    if (g_state == STATE_SETUP) {
+        captivePortalLoop();
+        delay(10);
         return;
     }
 

@@ -87,7 +87,8 @@ enum AppState {
     STATE_IDLE,
     STATE_DIGITAL,
     STATE_VINYL,
-    STATE_ERROR
+    STATE_ERROR,
+    STATE_SETUP   // captive-portal WiFi provisioning mode
 };
 
 // ─── Settings (stored in /settings.json on SD) ───

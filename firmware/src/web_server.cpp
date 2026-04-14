@@ -20,6 +20,9 @@ static AsyncWebServer  s_setupServer(80);
 // Redirect every DNS query to us (192.168.4.1) so the OS pops the portal
 static const uint8_t DNS_PORT = 53;
 
+// Delay long enough for the HTTP response to reach the browser before restart
+static const uint32_t REBOOT_RESPONSE_DELAY_MS = 800;
+
 void captivePortalInit() {
     // Redirect all DNS to the AP IP
     s_dns.start(DNS_PORT, "*", WiFi.softAPIP());
@@ -78,8 +81,8 @@ void captivePortalInit() {
                     return;
                 }
                 req->send(200, "application/json", "{\"ok\":true}");
-                // Brief delay so the response reaches the browser, then reboot
-                delay(800);
+                // Allow the HTTP response to reach the browser before rebooting
+                delay(REBOOT_RESPONSE_DELAY_MS);
                 ESP.restart();
             }
         }
@@ -123,10 +126,10 @@ void webServerInit() {
     // ─── Status API ───
     server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* req) {
         JsonDocument doc;
-        const char* stateNames[] = {"BOOT","IDLE","DIGITAL","VINYL","ERROR"};
+        const char* stateNames[] = {"BOOT","IDLE","DIGITAL","VINYL","ERROR","SETUP"};
         int stateIdx = (int)g_state;
         doc["state"]      = stateIdx;
-        doc["state_name"] = (stateIdx >= 0 && stateIdx < 5) ? stateNames[stateIdx] : "UNKNOWN";
+        doc["state_name"] = (stateIdx >= 0 && stateIdx < 6) ? stateNames[stateIdx] : "UNKNOWN";
         doc["artist"]     = g_currentArtist;
         doc["title"]      = g_currentTitle;
         doc["album"]      = g_currentAlbum;
