@@ -38,7 +38,9 @@ button.danger:active{background:#722}
 .debug-btn{padding:8px 14px;background:#333;border:1px solid #444;border-radius:6px;color:#aaa;
            font-size:.85rem;cursor:pointer;margin-right:8px;margin-top:8px}
 .debug-btn:active{background:#444}
-.gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-top:12px}
+.gallery-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-top:8px}
+.section-header{font-size:.75rem;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:.07em;padding:10px 0 4px;border-bottom:1px solid #333;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.section-header+.gallery-grid{margin-top:8px}
 .gallery-item{background:#1a1a1a;border:1px solid #333;border-radius:6px;
               text-align:center;font-size:.75rem;color:#aaa;word-break:break-all;position:relative;overflow:hidden}
 .msg{padding:8px 12px;border-radius:6px;margin-top:8px;font-size:.85rem;display:none}
@@ -136,7 +138,14 @@ button.danger:active{background:#722}
 <!-- HISTORY -->
 <div id="history" class="panel">
   <p style="font-size:.8rem;color:#888;margin-bottom:12px">Album covers are saved automatically as you play music. Toggle covers on/off to control what shows when idle. Pin &#128204; a cover to keep it in rotation permanently — pinned covers are never removed when the history reaches 100 entries.</p>
-  <div class="gallery-grid" id="historyGrid"></div>
+  <div id="pinnedSection" style="display:none">
+    <div class="section-header">&#128204; Pinned</div>
+    <div class="gallery-grid" id="pinnedGrid"></div>
+  </div>
+  <div id="historySection" style="display:none">
+    <div class="section-header" id="historyHeader">History</div>
+    <div class="gallery-grid" id="historyGrid"></div>
+  </div>
   <div id="historyEmpty" style="text-align:center;color:#666;padding:32px;display:none">No album art yet — play some music!</div>
 </div>
 
@@ -299,15 +308,22 @@ async function saveSettings() {
 }
 
 async function loadHistory() {
-  const grid = document.getElementById('historyGrid');
+  const pinnedSection = document.getElementById('pinnedSection');
+  const pinnedGrid = document.getElementById('pinnedGrid');
+  const historySection = document.getElementById('historySection');
+  const historyGrid = document.getElementById('historyGrid');
   const empty = document.getElementById('historyEmpty');
   try {
     const r = await fetch('/api/history');
     const items = await r.json();
-    grid.innerHTML = '';
-    if (!items.length) { empty.style.display=''; return; }
+    pinnedGrid.innerHTML = '';
+    historyGrid.innerHTML = '';
+    if (!items.length) { empty.style.display=''; pinnedSection.style.display='none'; historySection.style.display='none'; return; }
     empty.style.display='none';
-    items.slice().reverse().forEach(h => {
+    const reversed = items.slice().reverse();
+    const pinned = reversed.filter(h => !!h.pin);
+    const unpinned = reversed.filter(h => !h.pin);
+    function buildCard(h) {
       const div = document.createElement('div');
       div.className = 'gallery-item';
       div.style.cssText = 'padding:0;overflow:hidden;position:relative;cursor:pointer';
@@ -327,10 +343,13 @@ async function loadHistory() {
         + 'font-size:.8rem;border:2px solid '+(pin?'#e6a020':'#555')+';cursor:pointer">'
         + '&#128204;</div>';
       div.onclick = () => toggleHistory(h.f, !on);
-      // Pin button — stop propagation so card toggle isn't also triggered
       div.lastElementChild.onclick = (e) => { e.stopPropagation(); pinHistory(h.f, !pin); };
-      grid.appendChild(div);
-    });
+      return div;
+    }
+    if (pinned.length) { pinnedSection.style.display=''; pinned.forEach(h => pinnedGrid.appendChild(buildCard(h))); }
+    else { pinnedSection.style.display='none'; }
+    if (unpinned.length) { historySection.style.display=''; unpinned.forEach(h => historyGrid.appendChild(buildCard(h))); }
+    else { historySection.style.display='none'; }
   } catch(e) { console.error(e); }
 }
 function esc(s) { const d=document.createElement('div');d.textContent=s||'';return d.innerHTML; }
