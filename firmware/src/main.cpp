@@ -60,6 +60,10 @@ unsigned long g_lastVinylMatchTime = 0; // when last successful vinyl identify h
 // ─── Sonos poll timing (accessible from web_server) ───
 unsigned long g_lastPollTime = 0;
 
+// ─── Sonos re-discovery when IP changes ───
+static int g_sonosUnreachableCount = 0;
+static const int SONOS_UNREACHABLE_BEFORE_REDISCOVER = 3;
+
 // ─── Physical button for vinyl re-identify ───
 volatile bool g_buttonReIdentify = false;
 static void IRAM_ATTR onKeyPress() {
@@ -148,6 +152,30 @@ void setup() {
     // ── Load settings ──
     sdReadSettings(g_settings);
 
+    // ── Resolve Sonos speaker IP from room name ──
+    // Migration path: if a name is not yet stored but an IP is, fetch the name
+    // from the device and cache it so future re-discovery can use it.
+    if (strlen(g_settings.sonos_name) == 0 && strlen(g_settings.sonos_ip) > 0) {
+        char name[64] = {};
+        if (sonosGetDeviceName(g_settings.sonos_ip, name, sizeof(name))) {
+            strlcpy(g_settings.sonos_name, name, sizeof(g_settings.sonos_name));
+            sdWriteSettings(g_settings);
+            Serial.printf("[BOOT] Cached speaker name: %s\n", g_settings.sonos_name);
+        }
+    }
+    // If we have a name but the IP cache is empty, run discovery now.
+    if (strlen(g_settings.sonos_name) > 0 && strlen(g_settings.sonos_ip) == 0) {
+        Serial.printf("[BOOT] Resolving IP for speaker: %s\n", g_settings.sonos_name);
+        char ip[40] = {};
+        if (sonosResolveByName(g_settings.sonos_name, ip, sizeof(ip))) {
+            strlcpy(g_settings.sonos_ip, ip, sizeof(g_settings.sonos_ip));
+            sdWriteSettings(g_settings);
+            Serial.printf("[BOOT] Resolved IP: %s\n", g_settings.sonos_ip);
+        } else {
+            Serial.println("[BOOT] Speaker not found on network — will retry during polling");
+        }
+    }
+
     // ── Web server ──
     webServerInit();
 
@@ -230,13 +258,63 @@ void loop() {
     g_lastPollTime = now;
 
     // ── Check Sonos ──
-    if (strlen(g_settings.sonos_ip) == 0) {
+    if (strlen(g_settings.sonos_ip) == 0 && strlen(g_settings.sonos_name) == 0) {
         // No Sonos configured — stay idle
         handleIdle();
         return;
     }
 
-    bool playing = sonosIsPlaying(g_settings.sonos_ip);
+    // If we have a name but no cached IP (e.g. boot resolution failed), try to resolve now
+    if (strlen(g_settings.sonos_ip) == 0 && strlen(g_settings.sonos_name) > 0) {
+        activityLogf("Resolving speaker '%s'...", g_settings.sonos_name);
+        char ip[40] = {};
+        if (sonosResolveByName(g_settings.sonos_name, ip, sizeof(ip))) {
+            strlcpy(g_settings.sonos_ip, ip, sizeof(g_settings.sonos_ip));
+            sdWriteSettings(g_settings);
+            activityLogf("Sonos resolved: %s", ip);
+        } else {
+            activityLog("Sonos resolve failed — will retry");
+            handleIdle();
+            return;
+        }
+    }
+
+    bool reachable = false;
+    bool playing = sonosIsPlaying(g_settings.sonos_ip, &reachable);
+
+    if (!reachable) {
+        // Connection error — device may have changed IP
+        g_sonosUnreachableCount++;
+        activityLogf("Sonos unreachable (%d/%d)", g_sonosUnreachableCount, SONOS_UNREACHABLE_BEFORE_REDISCOVER);
+
+        if (g_sonosUnreachableCount >= SONOS_UNREACHABLE_BEFORE_REDISCOVER
+                && strlen(g_settings.sonos_name) > 0) {
+            activityLogf("Re-discovering '%s'...", g_settings.sonos_name);
+            char newIp[40] = {};
+            if (sonosResolveByName(g_settings.sonos_name, newIp, sizeof(newIp))) {
+                strlcpy(g_settings.sonos_ip, newIp, sizeof(g_settings.sonos_ip));
+                sdWriteSettings(g_settings);
+                activityLogf("Sonos re-discovered at %s", newIp);
+                g_sonosUnreachableCount = 0;
+                // Retry immediately with the new IP
+                playing = sonosIsPlaying(g_settings.sonos_ip, &reachable);
+                if (!reachable) {
+                    handleIdle();
+                    return;
+                }
+            } else {
+                activityLog("Re-discovery failed — will retry next poll");
+                handleIdle();
+                return;
+            }
+        } else {
+            handleIdle();
+            return;
+        }
+    } else {
+        g_sonosUnreachableCount = 0; // reset on any successful contact
+    }
+
     if (!playing) {
         if (g_state != STATE_IDLE) {
             activityLog("Sonos stopped → idle");

@@ -2,6 +2,7 @@
 #include "web_portal.h"
 #include "config.h"
 #include "sd_manager.h"
+#include "sonos_client.h"
 #include "image_pipeline.h"
 #include "activity_log.h"
 
@@ -93,6 +94,7 @@ void webServerInit() {
     server.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest* req) {
         JsonDocument doc;
         doc["sonos_ip"]                = g_settings.sonos_ip;
+        doc["sonos_name"]              = g_settings.sonos_name;
         doc["shazam_api_key_set"]      = strlen(g_settings.shazam_api_key) > 0;
         doc["sonos_poll_ms"]           = g_settings.sonos_poll_ms;
         doc["vinyl_recheck_ms"]        = g_settings.vinyl_recheck_ms;
@@ -125,6 +127,8 @@ void webServerInit() {
 
                 if (doc["sonos_ip"].is<const char*>())
                     strlcpy(g_settings.sonos_ip, doc["sonos_ip"], sizeof(g_settings.sonos_ip));
+                if (doc["sonos_name"].is<const char*>())
+                    strlcpy(g_settings.sonos_name, doc["sonos_name"], sizeof(g_settings.sonos_name));
                 if (doc["shazam_api_key"].is<const char*>())
                     strlcpy(g_settings.shazam_api_key, doc["shazam_api_key"], sizeof(g_settings.shazam_api_key));
                 if (doc["sonos_poll_ms"].is<unsigned int>())
@@ -298,6 +302,26 @@ void webServerInit() {
         );
         response->addHeader("Content-Disposition", "attachment; filename=\"recording.wav\"");
         req->send(response);
+    });
+
+    // ─── Scan LAN for Sonos speakers ───
+    // Returns a JSON array of {name, ip} objects.
+    // The scan takes up to ~3 seconds; call from an async context.
+    server.on("/api/sonos/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
+        SonosDevice devices[16];
+        int count = sonosDiscover(devices, 16, 3000);
+
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        for (int i = 0; i < count; i++) {
+            JsonObject obj = arr.add<JsonObject>();
+            obj["name"] = devices[i].name;
+            obj["ip"]   = devices[i].ip;
+        }
+
+        String out;
+        serializeJson(doc, out);
+        req->send(200, "application/json", out);
     });
 
     server.begin();

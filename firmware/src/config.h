@@ -92,7 +92,8 @@ enum AppState {
 
 // ─── Settings (stored in /settings.json on SD) ───
 struct Settings {
-    char sonos_ip[64];
+    char sonos_ip[64];    // cached resolved IP — updated automatically on re-discovery
+    char sonos_name[64];  // speaker room name — used to find it by name rather than IP
     char shazam_api_key[128];
     // Timing
     uint32_t sonos_poll_ms;

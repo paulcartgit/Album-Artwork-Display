@@ -56,7 +56,8 @@ bool sdReadSettings(Settings& settings) {
     }
     f.close();
 
-    strlcpy(settings.sonos_ip, doc["sonos_ip"] | "", sizeof(settings.sonos_ip));
+    strlcpy(settings.sonos_ip,   doc["sonos_ip"]   | "", sizeof(settings.sonos_ip));
+    strlcpy(settings.sonos_name, doc["sonos_name"] | "", sizeof(settings.sonos_name));
     strlcpy(settings.shazam_api_key, doc["shazam_api_key"] | "", sizeof(settings.shazam_api_key));
     settings.sonos_poll_ms = doc["sonos_poll_ms"] | SONOS_POLL_INTERVAL_MS;
     settings.vinyl_recheck_ms = doc["vinyl_recheck_ms"] | VINYL_RECHECK_INTERVAL_MS;
@@ -76,7 +77,8 @@ bool sdReadSettings(Settings& settings) {
 
 bool sdWriteSettings(const Settings& settings) {
     JsonDocument doc;
-    doc["sonos_ip"] = settings.sonos_ip;
+    doc["sonos_ip"]   = settings.sonos_ip;
+    doc["sonos_name"] = settings.sonos_name;
     doc["shazam_api_key"] = settings.shazam_api_key;
     doc["sonos_poll_ms"] = settings.sonos_poll_ms;
     doc["vinyl_recheck_ms"] = settings.vinyl_recheck_ms;

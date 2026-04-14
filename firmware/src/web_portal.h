@@ -23,9 +23,9 @@ h2{font-size:1.1rem;margin:16px 0 8px;color:#ccc}
 .status-label{font-size:.75rem;color:#888;text-transform:uppercase;letter-spacing:.05em}
 .status-value{font-size:1.1rem;margin-top:2px}
 label{display:block;font-size:.85rem;color:#aaa;margin-top:12px}
-input[type=text],input[type=number]{width:100%;padding:8px 10px;margin-top:4px;
+input[type=text],input[type=number],select{width:100%;padding:8px 10px;margin-top:4px;
      background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#eee;font-size:.9rem}
-input:focus{outline:none;border-color:#666}
+input:focus,select:focus{outline:none;border-color:#666}
 button{padding:10px 20px;background:#2a6;border:none;border-radius:6px;color:#fff;
        font-size:.9rem;cursor:pointer;margin-top:16px}
 button:active{background:#185}
@@ -85,7 +85,15 @@ button.danger:active{background:#722}
 <!-- SETTINGS -->
 <div id="settings" class="panel">
   <h2>Sonos</h2>
-  <label>Speaker IP<input type="text" id="fSonosIp" placeholder="192.168.1.x"></label>
+  <label>Speaker
+    <div style="display:flex;gap:8px;margin-top:4px;align-items:stretch">
+      <select id="fSonosName" style="flex:1;margin-top:0">
+        <option value="">-- select a speaker --</option>
+      </select>
+      <button type="button" id="scanBtn" onclick="scanSonos()" style="margin:0;padding:8px 14px;font-size:.85rem;white-space:nowrap">Scan</button>
+    </div>
+  </label>
+  <div id="sonosScanMsg" style="font-size:.75rem;color:#888;margin-top:4px"></div>
 
   <h2>Shazam (RapidAPI)</h2>
   <label>API Key<input type="text" id="fShazamKey" placeholder="your-rapidapi-key"></label>
@@ -260,7 +268,20 @@ async function loadSettings() {
   try {
     const r = await fetch('/api/settings');
     const d = await r.json();
-    document.getElementById('fSonosIp').value = d.sonos_ip||'';
+    // Populate the speaker dropdown with the currently saved name
+    const sel = document.getElementById('fSonosName');
+    sel.innerHTML = '<option value="">-- select a speaker --</option>';
+    const savedName = d.sonos_name || '';
+    if (savedName) {
+      const opt = document.createElement('option');
+      opt.value = savedName;
+      opt.dataset.ip = d.sonos_ip || '';
+      opt.textContent = savedName;
+      sel.appendChild(opt);
+      sel.value = savedName;
+      const ipHint = d.sonos_ip ? 'IP: ' + d.sonos_ip : 'IP unknown';
+      document.getElementById('sonosScanMsg').textContent = ipHint + ' — click Scan to refresh';
+    }
     document.getElementById('fShazamKey').value = '';
     document.getElementById('fShazamKey').placeholder = d.shazam_api_key_set ? '(set — leave blank to keep)' : '';
     // Timing sliders (API gives ms, sliders use seconds/minutes)
@@ -277,9 +298,43 @@ async function loadSettings() {
   } catch(e) { console.error(e); }
 }
 
+async function scanSonos() {
+  const btn = document.getElementById('scanBtn');
+  const msg = document.getElementById('sonosScanMsg');
+  const sel = document.getElementById('fSonosName');
+  btn.disabled = true;
+  msg.textContent = 'Scanning\u2026 (~3 seconds)';
+  try {
+    const r = await fetch('/api/sonos/scan');
+    const devices = await r.json();
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">-- select a speaker --</option>';
+    devices.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.name;
+      opt.dataset.ip = d.ip;
+      opt.textContent = d.name;
+      sel.appendChild(opt);
+    });
+    // Re-select previously chosen speaker if it was found again
+    if (prev) sel.value = prev;
+    if (devices.length === 0) {
+      msg.textContent = 'No Sonos speakers found. Check your network.';
+    } else {
+      msg.textContent = devices.length + ' speaker(s) found \u2014 choose one and save.';
+    }
+  } catch(e) {
+    msg.textContent = 'Scan failed: ' + e.message;
+  }
+  btn.disabled = false;
+}
+
 async function saveSettings() {
+  const sel = document.getElementById('fSonosName');
+  const selectedOpt = sel.options[sel.selectedIndex];
   const body = {
-    sonos_ip: document.getElementById('fSonosIp').value,
+    sonos_name: sel.value,
+    sonos_ip: (selectedOpt && selectedOpt.dataset.ip) ? selectedOpt.dataset.ip : '',
     sonos_poll_ms: parseInt(document.getElementById('fSonosPoll').value)*1000,
     vinyl_recheck_ms: parseInt(document.getElementById('fVinylRecheck').value)*60000,
     no_match_cooldown_ms: parseInt(document.getElementById('fCooldown').value)*60000,
