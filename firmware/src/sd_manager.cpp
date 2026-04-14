@@ -241,19 +241,19 @@ bool sdHistorySetPinned(const char* file, bool pinned) {
 // Implements iPod-shuffle-style randomness: cycle through all enabled items in
 // a random order, then re-shuffle for the next cycle.  Avoids the clustering
 // and starvation that pure random produces.
-static char g_shuffleBag[HISTORY_MAX][20]; // each slot holds "XXXXXXXX.jpg\0"
+static char g_shuffleBag[HISTORY_MAX][HISTORY_FNAME_LEN];
 static int  g_shuffleCount = 0;
 static int  g_shufflePos   = 0;
 
 static void rebuildShuffleBag() {
     JsonDocument doc;
-    if (!readIndex(doc)) { g_shuffleCount = 0; return; }
+    if (!readIndex(doc)) { g_shuffleCount = 0; g_shufflePos = 0; return; }
     JsonArray arr = doc.as<JsonArray>();
 
     g_shuffleCount = 0;
     for (JsonObject obj : arr) {
         if ((obj["on"] | true) && g_shuffleCount < HISTORY_MAX) {
-            strlcpy(g_shuffleBag[g_shuffleCount], obj["f"] | "", sizeof(g_shuffleBag[0]));
+            strlcpy(g_shuffleBag[g_shuffleCount], obj["f"] | "", HISTORY_FNAME_LEN);
             g_shuffleCount++;
         }
     }
@@ -261,10 +261,10 @@ static void rebuildShuffleBag() {
     // Fisher-Yates shuffle
     for (int i = g_shuffleCount - 1; i > 0; i--) {
         int j = random(i + 1);
-        char tmp[20];
-        strlcpy(tmp, g_shuffleBag[i], sizeof(tmp));
-        strlcpy(g_shuffleBag[i], g_shuffleBag[j], sizeof(g_shuffleBag[0]));
-        strlcpy(g_shuffleBag[j], tmp, sizeof(g_shuffleBag[0]));
+        char tmp[HISTORY_FNAME_LEN];
+        strlcpy(tmp, g_shuffleBag[i], HISTORY_FNAME_LEN);
+        strlcpy(g_shuffleBag[i], g_shuffleBag[j], HISTORY_FNAME_LEN);
+        strlcpy(g_shuffleBag[j], tmp, HISTORY_FNAME_LEN);
     }
     g_shufflePos = 0;
 }
@@ -272,7 +272,7 @@ static void rebuildShuffleBag() {
 String sdHistoryRandomFile() {
     if (g_shufflePos >= g_shuffleCount) {
         rebuildShuffleBag();
+        if (g_shuffleCount == 0) return "";
     }
-    if (g_shuffleCount == 0) return "";
     return String("/history/") + g_shuffleBag[g_shufflePos++];
 }
