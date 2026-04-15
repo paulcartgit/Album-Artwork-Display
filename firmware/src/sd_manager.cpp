@@ -101,6 +101,9 @@ bool sdFileExists(const char* path) {
 static const char* HISTORY_INDEX = "/history/index.json";
 static const int   HISTORY_MAX   = 100;
 
+// Forward declaration — defined with shuffle-bag state below
+static bool g_shuffleDirty = true;
+
 static uint32_t djb2(const char* s) {
     uint32_t h = 5381;
     while (*s) h = ((h << 5) + h) + (uint8_t)*s++;
@@ -217,6 +220,7 @@ bool sdHistorySetEnabled(const char* file, bool on) {
         if (strcmp(obj["f"] | "", file) == 0) {
             obj["on"] = on;
             writeIndex(doc);
+            g_shuffleDirty = true;
             return true;
         }
     }
@@ -231,6 +235,7 @@ bool sdHistorySetPinned(const char* file, bool pinned) {
         if (strcmp(obj["f"] | "", file) == 0) {
             obj["pin"] = pinned;
             writeIndex(doc);
+            g_shuffleDirty = true;
             return true;
         }
     }
@@ -244,6 +249,7 @@ bool sdHistorySetPinned(const char* file, bool pinned) {
 static char g_shuffleBag[HISTORY_MAX][HISTORY_FNAME_LEN];
 static int  g_shuffleCount = 0;
 static int  g_shufflePos   = 0;
+// g_shuffleDirty forward-declared above
 
 static void rebuildShuffleBag() {
     JsonDocument doc;
@@ -270,8 +276,9 @@ static void rebuildShuffleBag() {
 }
 
 String sdHistoryRandomFile() {
-    if (g_shufflePos >= g_shuffleCount) {
+    if (g_shuffleDirty || g_shufflePos >= g_shuffleCount) {
         rebuildShuffleBag();
+        g_shuffleDirty = false;
         if (g_shuffleCount == 0) return "";
     }
     return String("/history/") + g_shuffleBag[g_shufflePos++];
