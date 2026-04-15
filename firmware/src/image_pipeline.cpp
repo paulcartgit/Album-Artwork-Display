@@ -118,6 +118,84 @@ static float edgeVariance(const uint8_t* src, int w, int h) {
     return (varR + varG + varB) / 3.0f;
 }
 
+static inline int triWave(int v, int period) {
+    int m = v % period;
+    if (m < 0) m += period;
+    int half = period / 2;
+    return (m < half) ? m : (period - m);
+}
+
+static void extractKeyColors(const uint8_t* src, int w, int h, uint8_t colors[3][3]) {
+    uint8_t edgeR, edgeG, edgeB;
+    averageEdgeColor(src, w, h, edgeR, edgeG, edgeB);
+    for (int i = 0; i < 3; i++) {
+        colors[i][0] = edgeR;
+        colors[i][1] = edgeG;
+        colors[i][2] = edgeB;
+    }
+
+    static uint32_t wSum[256];
+    static uint32_t rSum[256];
+    static uint32_t gSum[256];
+    static uint32_t bSum[256];
+    memset(wSum, 0, sizeof(wSum));
+    memset(rSum, 0, sizeof(rSum));
+    memset(gSum, 0, sizeof(gSum));
+    memset(bSum, 0, sizeof(bSum));
+
+    const int stepX = max(1, w / 48);
+    const int stepY = max(1, h / 48);
+
+    for (int y = 0; y < h; y += stepY) {
+        for (int x = 0; x < w; x += stepX) {
+            int i = (y * w + x) * 3;
+            uint8_t r = src[i];
+            uint8_t g = src[i + 1];
+            uint8_t b = src[i + 2];
+            uint8_t mx = max(max(r, g), b);
+            uint8_t mn = min(min(r, g), b);
+            int sat = (mx > 0) ? ((mx - mn) * 255) / mx : 0;
+            uint32_t weight = 16u + (uint32_t)((sat * sat) / 255); // 16..271
+
+            int bin = (r & 0xE0) | ((g & 0xE0) >> 3) | (b >> 6); // RGB332
+            wSum[bin] += weight;
+            rSum[bin] += (uint32_t)r * weight;
+            gSum[bin] += (uint32_t)g * weight;
+            bSum[bin] += (uint32_t)b * weight;
+        }
+    }
+
+    bool used[256] = {false};
+    for (int c = 0; c < 3; c++) {
+        int bestBin = -1;
+        uint32_t bestWeight = 0;
+        for (int i = 0; i < 256; i++) {
+            if (used[i]) continue;
+            if (wSum[i] > bestWeight) {
+                bestWeight = wSum[i];
+                bestBin = i;
+            }
+        }
+        if (bestBin < 0 || bestWeight == 0) break;
+        used[bestBin] = true;
+        colors[c][0] = (uint8_t)(rSum[bestBin] / bestWeight);
+        colors[c][1] = (uint8_t)(gSum[bestBin] / bestWeight);
+        colors[c][2] = (uint8_t)(bSum[bestBin] / bestWeight);
+    }
+}
+
+static void applyBackgroundStyle(uint8_t* canvas, int pixelCount) {
+    if (g_settings.bg_style == 1) {
+        // Wash out: blend toward white
+        for (int i = 0; i < pixelCount * 3; i++)
+            canvas[i] = (uint8_t)(canvas[i] + (255 - canvas[i]) * 45 / 100);
+    } else {
+        // Darken: dim to 55%
+        for (int i = 0; i < pixelCount * 3; i++)
+            canvas[i] = (uint8_t)(canvas[i] * 55 / 100);
+    }
+}
+
 // ─── Render text into RGB888 buffer using Adafruit GFX ───
 // Render a single line of text centred in a horizontal band.
 // 2× supersampled for anti-aliased output on the 6-colour e-ink display.
@@ -584,18 +662,53 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
     }
     free(tmp);
 
-    // Darken or wash out depending on bg_style setting
-    if (g_settings.bg_style == 1) {
-        // Wash out: blend toward white
-        for (int i = 0; i < fillH * cW * 3; i++)
-            canvas[i] = (uint8_t)(canvas[i] + (255 - canvas[i]) * 45 / 100);
-    } else {
-        // Darken: dim to 55%
-        for (int i = 0; i < fillH * cW * 3; i++)
-            canvas[i] = (uint8_t)(canvas[i] * 55 / 100);
-    }
+    applyBackgroundStyle(canvas, fillH * cW);
 
     Serial.println("[Pipeline] Blurred background fill applied");
+}
+
+static void fillPatternedBackground(uint8_t* canvas, int cW, int cH,
+                                    const uint8_t* src, int sW, int sH,
+                                    int fillH) {
+    uint8_t colors[3][3];
+    extractKeyColors(src, sW, sH, colors);
+    float var = edgeVariance(src, sW, sH);
+
+    int style = 0;
+    if (var >= 1800.0f) style = 2;      // geometric ring style
+    else if (var >= 800.0f) style = 1;  // wave bands
+    else style = 0;                     // diagonal stripes
+
+    for (int y = 0; y < fillH; y++) {
+        for (int x = 0; x < cW; x++) {
+            int band = 0;
+            if (style == 0) {
+                band = ((x + (y / 2)) / 28) % 3;
+            } else if (style == 1) {
+                int wave = triWave(x + y * 3, 96) + triWave(x * 2 - y, 72);
+                band = (wave / 18) % 3;
+            } else {
+                int dx = abs(x - cW / 2);
+                int dy = abs(y - fillH / 2);
+                band = ((dx + dy) / 24) % 3;
+            }
+
+            int di = (y * cW + x) * 3;
+            uint8_t r = colors[band][0];
+            uint8_t g = colors[band][1];
+            uint8_t b = colors[band][2];
+
+            // Subtle paper-like texture to avoid flat digital bands
+            int noise = ((x * 13) ^ (y * 7)) & 0x1F;
+            int bias = noise - 16; // -16..15
+            canvas[di]     = constrain((int)r + bias, 0, 255);
+            canvas[di + 1] = constrain((int)g + bias, 0, 255);
+            canvas[di + 2] = constrain((int)b + bias, 0, 255);
+        }
+    }
+
+    applyBackgroundStyle(canvas, fillH * cW);
+    Serial.println("[Pipeline] Patterned background fill applied");
 }
 
 // ─── Core: decode JPEG buffer → scale → optional text → dither → display ───
@@ -654,14 +767,17 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     uint8_t bgR, bgG, bgB;
     averageEdgeColor(g_decodeBuf, imgW, imgH, bgR, bgG, bgB);
 
-    // Background mode: 0 = always solid, 1 = always blur, 2 = auto-detect.
-    bool useBlur;
+    // Background mode: 0 = always solid, 1 = always blur, 2 = auto-detect, 3 = patterned.
+    bool useBlur = false;
+    bool usePattern = false;
     if (g_settings.bg_mode == 0) {
-        useBlur = false;
         Serial.println("[Pipeline] Background: forced solid");
     } else if (g_settings.bg_mode == 1) {
         useBlur = true;
         Serial.println("[Pipeline] Background: forced blur");
+    } else if (g_settings.bg_mode == 3) {
+        usePattern = true;
+        Serial.println("[Pipeline] Background: forced patterned");
     } else {
         float var = edgeVariance(g_decodeBuf, imgW, imgH);
         useBlur = var >= 800.0f;
@@ -673,7 +789,10 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         // Blurred background: always fill entire canvas
         fillBlurredBackground(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
                               g_decodeBuf, imgW, imgH, EPD_HEIGHT);
-
+    } else if (usePattern) {
+        // Patterned background: palette-derived texture fill
+        fillPatternedBackground(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
+                                g_decodeBuf, imgW, imgH, EPD_HEIGHT);
     } else {
         // Solid colour fill
         for (int i = 0; i < EPD_WIDTH * EPD_HEIGHT; i++) {
@@ -683,8 +802,9 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         }
     }
 
-    // Scale artwork to fit art area, centred with shadow margin when blur is active.
-    const int shadowMarginV = useBlur ? 22 : 0;
+    // Scale artwork to fit art area, centred with shadow margin for decorated backgrounds.
+    bool useDecoratedBg = useBlur || usePattern;
+    const int shadowMarginV = useDecoratedBg ? 22 : 0;
     int fitW = artAreaW;
     int fitH = artAreaH - shadowMarginV * 2;
     float scaleX = (float)fitW / imgW;
@@ -701,8 +821,8 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         offsetY = (EPD_HEIGHT - scaledH) / 2; // centred on full canvas
     }
 
-    // Drop shadow — when blur background is active.
-    if (useBlur) {
+    // Drop shadow — when blur/pattern background is active.
+    if (useDecoratedBg) {
         const int shadowPad = 12;
         // Top shadow band
         for (int dy = 1; dy <= shadowPad; dy++) {

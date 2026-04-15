@@ -154,7 +154,7 @@ Go to the **Settings** tab and fill in:
 | **No-match cooldown** | Wait time after 3 failed Shazam attempts (default: 5 minutes) |
 | **Idle gallery rotation** | How often to rotate album art when idle (default: 5 minutes) |
 | **Show track info** | Toggle artist/album text overlay below artwork |
-| **Background fill** | Auto (smart detection), Always blurred, or Always solid colour |
+| **Background fill** | Auto (smart detection), Always blurred, Always patterned, or Always solid colour |
 
 Hit **Save Settings**. Settings are stored on the SD card and survive reboots.
 

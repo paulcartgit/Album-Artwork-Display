@@ -57,8 +57,9 @@ Album art goes through a multi-stage image processing pipeline optimised for the
 1. **JPEG decode** — Downloaded image decoded to RGB888 in PSRAM via TJpg_Decoder
 2. **Background fill** — Auto-detected per image:
    - **Blurred** — Source image scaled to fill, 4-pass box blur (radius 12), then darkened (55%) or washed out (45% toward white)
+   - **Patterned** — Palette-derived decorative backing pattern (stripes/waves/geometric bands) generated from dominant image colours, then darkened/washed out
    - **Solid colour** — Saturation-weighted average of edge pixels (vibrant pixels dominate, prevents muddy brown), slight saturation boost
-   - Configurable: always solid, always blur, or auto (smart edge-variance threshold)
+   - Configurable: always solid, always blur, always patterned, or auto (smart edge-variance threshold)
 3. **Scaling** — Fit to display with correct aspect ratio, centred with margin for drop shadow
 4. **Drop shadow** — Top and bottom gradient bands (20px, quadratic falloff) in full-art mode
 5. **Text overlay** — 2× supersampled anti-aliased rendering (FreeSansBold 24pt artist, FreeSans 18pt album), auto-scaling and ellipsis truncation for long names, contrast-adaptive text colour (white on dark, black on light), frosted overlay on blurred backgrounds for legibility
@@ -78,7 +79,7 @@ Current track info, artwork preview, and activity log. Buttons to force a Sonos 
 - **Sonos** — Scan and select a speaker by room name
 - **Shazam** — RapidAPI key for vinyl identification
 - **Timing** — Sonos poll interval (5–60s), vinyl re-identify interval (1–30 min), no-match cooldown (1–15 min), idle gallery rotation (1–30 min)
-- **Display** — Track info overlay toggle, background fill mode (auto/blur/solid), background style (darken/wash out)
+- **Display** — Track info overlay toggle, background fill mode (auto/blur/patterned/solid), background style (darken/wash out)
 
 ### History
 Gallery grid of all saved album covers (up to 100), split into **Pinned** and **History** sections:

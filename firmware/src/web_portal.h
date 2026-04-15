@@ -149,6 +149,7 @@ button.danger:active{background:#722}
     <select id="fBgMode">
       <option value="2">Auto (smart detection)</option>
       <option value="1">Always blurred</option>
+      <option value="3">Always patterned</option>
       <option value="0">Always solid colour</option>
     </select>
   </label>

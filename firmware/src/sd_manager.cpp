@@ -89,7 +89,9 @@ bool sdReadSettings(Settings& settings) {
     } else {
         settings.bg_mode = 2;
     }
+    if (settings.bg_mode > 3) settings.bg_mode = 2;
     settings.bg_style = doc["bg_style"] | 0;
+    if (settings.bg_style > 1) settings.bg_style = 0;
     return true;
 }
 
