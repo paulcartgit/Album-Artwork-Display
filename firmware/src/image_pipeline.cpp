@@ -290,9 +290,9 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
         }
     }
 
-    // Heavy box blur — 4 passes of radius-8 horizontal then vertical.
+    // Heavy box blur — 4 passes of radius-12 horizontal then vertical.
     // Uses a single row/col accumulator buffer (~1.5 KB).
-    const int radius = 8;
+    const int radius = 12;
     const int passes = 4;
     uint8_t* tmp = (uint8_t*)malloc(max(cW, fillH) * 3);
     if (!tmp) return; // degrade gracefully to unblurred
@@ -358,9 +358,9 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
     }
     free(tmp);
 
-    // Slight dim (70%) so sharp overlay pops
+    // Dim to 55% so sharp overlay pops against the background
     for (int i = 0; i < fillH * cW * 3; i++) {
-        canvas[i] = (uint8_t)(canvas[i] * 7 / 10);
+        canvas[i] = (uint8_t)(canvas[i] * 55 / 100);
     }
 
     Serial.println("[Pipeline] Blurred background fill applied");
@@ -438,15 +438,57 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         }
     }
 
-    // Scale artwork to fit art area (no crop)
-    float scaleX = (float)artAreaW / imgW;
-    float scaleY = (float)artAreaH / imgH;
+    // Scale artwork to fit art area. When using blur, add vertical margin so
+    // the drop shadow has room above/below (artwork fills full width).
+    const int shadowMarginV = useBlur ? 22 : 0;
+    int fitW = artAreaW;
+    int fitH = artAreaH - shadowMarginV * 2;
+    float scaleX = (float)fitW / imgW;
+    float scaleY = (float)fitH / imgH;
     float scale  = (scaleX < scaleY) ? scaleX : scaleY;
 
     int scaledW = (int)(imgW * scale);
     int scaledH = (int)(imgH * scale);
     int offsetX = (artAreaW - scaledW) / 2;
     int offsetY = showText ? (artAreaH - scaledH) / 2 : (EPD_HEIGHT - scaledH) / 2;
+
+    // Drop shadow: darken background pixels above and below the artwork
+    // to create a "floating card" effect. Artwork fills full width so no
+    // side shadows — only top and bottom bands over the blurred background.
+    if (useBlur) {
+        const int shadowPad = 20;
+        // Top shadow band: rows above artwork within shadowPad range
+        for (int dy = 1; dy <= shadowPad; dy++) {
+            int py = offsetY - dy;
+            if (py < 0) continue;
+            float t = (float)dy / shadowPad;
+            float alpha = 0.75f * (1.0f - t) * (1.0f - t);
+            for (int x = 0; x < scaledW; x++) {
+                int px = x + offsetX;
+                if (px < 0 || px >= EPD_WIDTH) continue;
+                int di = (py * EPD_WIDTH + px) * 3;
+                scaledBuf[di]     = (uint8_t)(scaledBuf[di]     * (1.0f - alpha));
+                scaledBuf[di + 1] = (uint8_t)(scaledBuf[di + 1] * (1.0f - alpha));
+                scaledBuf[di + 2] = (uint8_t)(scaledBuf[di + 2] * (1.0f - alpha));
+            }
+        }
+        // Bottom shadow band: rows below artwork within shadowPad range
+        for (int dy = 1; dy <= shadowPad; dy++) {
+            int py = offsetY + scaledH - 1 + dy;
+            if (py >= EPD_HEIGHT) continue;
+            float t = (float)dy / shadowPad;
+            float alpha = 0.75f * (1.0f - t) * (1.0f - t);
+            for (int x = 0; x < scaledW; x++) {
+                int px = x + offsetX;
+                if (px < 0 || px >= EPD_WIDTH) continue;
+                int di = (py * EPD_WIDTH + px) * 3;
+                scaledBuf[di]     = (uint8_t)(scaledBuf[di]     * (1.0f - alpha));
+                scaledBuf[di + 1] = (uint8_t)(scaledBuf[di + 1] * (1.0f - alpha));
+                scaledBuf[di + 2] = (uint8_t)(scaledBuf[di + 2] * (1.0f - alpha));
+            }
+        }
+        Serial.println("[Pipeline] Drop shadow applied (top/bottom)");
+    }
 
     for (int y = 0; y < scaledH; y++) {
         for (int x = 0; x < scaledW; x++) {

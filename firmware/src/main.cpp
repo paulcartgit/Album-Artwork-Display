@@ -48,6 +48,8 @@ uint32_t g_lastAudioSampleRate = AUDIO_SAMPLE_RATE;
 
 // ─── Idle state helpers ───
 static unsigned long g_lastIdleSwap = 0;
+static int g_consecutiveIdlePolls = 0;
+static const int IDLE_DEBOUNCE_COUNT = 2; // require N consecutive idle polls before transitioning
 
 // ─── Vinyl API-call protection ───
 unsigned long g_lastNoMatchTime = 0;
@@ -333,7 +335,13 @@ void loop() {
     }
 
     if (!playing) {
+        g_consecutiveIdlePolls++;
         if (g_state != STATE_IDLE) {
+            if (g_consecutiveIdlePolls < IDLE_DEBOUNCE_COUNT) {
+                activityLogf("Sonos idle (%d/%d) — waiting to confirm",
+                             g_consecutiveIdlePolls, IDLE_DEBOUNCE_COUNT);
+                return; // don't transition yet, could be a track change
+            }
             activityLog("Sonos stopped → idle");
             g_state = STATE_IDLE;
             g_currentArtist = "";
@@ -350,6 +358,9 @@ void loop() {
         handleIdle();
         return;
     }
+
+    // Sonos is playing — reset idle debounce counter
+    g_consecutiveIdlePolls = 0;
 
     // Sonos is playing — get track info
     handlePlaying();
