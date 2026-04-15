@@ -130,6 +130,17 @@ constexpr int NOISE_Y_MULTIPLIER = 7;
 constexpr int NOISE_MASK = 0x1F;
 constexpr int NOISE_BIAS_OFFSET = 16;
 constexpr uint32_t BASE_NEUTRAL_WEIGHT = 16u;
+constexpr int PATTERN_COLOR_COUNT = 3;
+constexpr int STRIPE_SLOPE_DIV = 2;
+constexpr int STRIPE_WIDTH = 28;
+constexpr int WAVE_A_X_SCALE = 1;
+constexpr int WAVE_A_Y_SCALE = 3;
+constexpr int WAVE_A_PERIOD = 96;
+constexpr int WAVE_B_X_SCALE = 2;
+constexpr int WAVE_B_Y_SCALE = 1;
+constexpr int WAVE_B_PERIOD = 72;
+constexpr int WAVE_BAND_DIV = 18;
+constexpr int RING_SPACING = 24;
 
 static void extractKeyColors(const uint8_t* src, int w, int h, uint8_t colors[3][3]) {
     uint8_t edgeR, edgeG, edgeB;
@@ -1079,14 +1090,3 @@ void pipelineShowTestPattern() {
     heap_caps_free(packedBuf);
     Serial.println("[Test] Color test pattern displayed");
 }
-    constexpr int PATTERN_COLOR_COUNT = 3;
-    constexpr int STRIPE_SLOPE_DIV = 2;
-    constexpr int STRIPE_WIDTH = 28;
-    constexpr int WAVE_A_X_SCALE = 1;
-    constexpr int WAVE_A_Y_SCALE = 3;
-    constexpr int WAVE_A_PERIOD = 96;
-    constexpr int WAVE_B_X_SCALE = 2;
-    constexpr int WAVE_B_Y_SCALE = 1;
-    constexpr int WAVE_B_PERIOD = 72;
-    constexpr int WAVE_BAND_DIV = 18;
-    constexpr int RING_SPACING = 24;
