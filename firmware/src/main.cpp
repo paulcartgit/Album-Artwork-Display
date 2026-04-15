@@ -198,7 +198,7 @@ void setup() {
     g_state = STATE_IDLE;
     digitalWrite(LED_GREEN, HIGH);
     Serial.println("[BOOT] Ready — entering main loop");
-    displayShowMessage("Ready\nvinyl.local");
+    displayShowMessage("Ready\nnowplaying.local");
     delay(3000);
 }
 

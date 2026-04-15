@@ -45,6 +45,7 @@ bool sdReadSettings(Settings& settings) {
     settings.idle_gallery_ms = IDLE_GALLERY_INTERVAL_MS;
     settings.show_track_info = true;
     settings.bg_mode = 2;  // auto
+    settings.bg_style = 0; // darken
 
     File f = SD_MMC.open("/settings.json", FILE_READ);
     if (!f) return false;
@@ -72,6 +73,7 @@ bool sdReadSettings(Settings& settings) {
     } else {
         settings.bg_mode = 2;
     }
+    settings.bg_style = doc["bg_style"] | 0;
     return true;
 }
 
@@ -86,6 +88,7 @@ bool sdWriteSettings(const Settings& settings) {
     doc["idle_gallery_ms"] = settings.idle_gallery_ms;
     doc["show_track_info"] = settings.show_track_info;
     doc["bg_mode"] = settings.bg_mode;
+    doc["bg_style"] = settings.bg_style;
 
     File f = SD_MMC.open("/settings.json", FILE_WRITE);
     if (!f) return false;

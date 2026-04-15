@@ -6,7 +6,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vinyl Display</title>
+<title>Now Playing</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -49,7 +49,7 @@ button.danger:active{background:#722}
 </style>
 </head>
 <body>
-<h1>&#127926; Vinyl Display</h1>
+<h1>&#127926; Now Playing</h1>
 
 <div class="tabs">
   <div class="tab active" onclick="showTab('status')">Now Playing</div>
@@ -138,6 +138,12 @@ button.danger:active{background:#722}
       <option value="0">Always solid colour</option>
     </select>
   </label>
+  <label style="margin-top:8px">Background style
+    <select id="fBgStyle">
+      <option value="0">Darken</option>
+      <option value="1">Wash out (lighten)</option>
+    </select>
+  </label>
 
   <button onclick="saveSettings()">Save Settings</button>
   <div id="settingsMsg" class="msg"></div>
@@ -203,7 +209,7 @@ async function loadStatus() {
     const d = await r.json();
     const state = d.state_name || STATES[d.state] || 'Unknown';
     const hasTrack = d.artist && d.title;
-    const labels = {IDLE:'Idle',VINYL:'Listening to Vinyl',DIGITAL:'Playing Digital',BOOT:'Starting up',ERROR:'Error'};
+    const labels = {IDLE:'Idle',VINYL:'Listening to Vinyl',DIGITAL:'Streaming',BOOT:'Starting up',ERROR:'Error'};
     document.getElementById('sStateLabel').textContent = labels[state] || state;
     document.getElementById('sTrack').textContent = hasTrack ? d.artist+' — '+d.title : 'Nothing playing';
     document.getElementById('sAlbum').textContent = d.album || '';
@@ -304,6 +310,7 @@ async function loadSettings() {
     ig.value = Math.round((d.idle_gallery_ms||300000)/60000); ig.oninput();
     document.getElementById('fShowTrackInfo').checked = !!d.show_track_info;
     document.getElementById('fBgMode').value = (d.bg_mode !== undefined) ? d.bg_mode : 2;
+    document.getElementById('fBgStyle').value = (d.bg_style !== undefined) ? d.bg_style : 0;
   } catch(e) { console.error(e); }
 }
 
@@ -349,7 +356,8 @@ async function saveSettings() {
     no_match_cooldown_ms: parseInt(document.getElementById('fCooldown').value)*60000,
     idle_gallery_ms: parseInt(document.getElementById('fIdleGallery').value)*60000,
     show_track_info: document.getElementById('fShowTrackInfo').checked,
-    bg_mode: parseInt(document.getElementById('fBgMode').value)
+    bg_mode: parseInt(document.getElementById('fBgMode').value),
+    bg_style: parseInt(document.getElementById('fBgStyle').value)
   };
   const shz = document.getElementById('fShazamKey').value;
   if (shz) body.shazam_api_key = shz;

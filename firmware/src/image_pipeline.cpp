@@ -358,9 +358,15 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
     }
     free(tmp);
 
-    // Dim to 55% so sharp overlay pops against the background
-    for (int i = 0; i < fillH * cW * 3; i++) {
-        canvas[i] = (uint8_t)(canvas[i] * 55 / 100);
+    // Darken or wash out depending on bg_style setting
+    if (g_settings.bg_style == 1) {
+        // Wash out: blend toward white
+        for (int i = 0; i < fillH * cW * 3; i++)
+            canvas[i] = (uint8_t)(canvas[i] + (255 - canvas[i]) * 45 / 100);
+    } else {
+        // Darken: dim to 55%
+        for (int i = 0; i < fillH * cW * 3; i++)
+            canvas[i] = (uint8_t)(canvas[i] * 55 / 100);
     }
 
     Serial.println("[Pipeline] Blurred background fill applied");

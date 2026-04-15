@@ -108,6 +108,7 @@ void webServerInit() {
         doc["idle_gallery_ms"]         = g_settings.idle_gallery_ms;
         doc["show_track_info"]         = g_settings.show_track_info;
         doc["bg_mode"]                 = g_settings.bg_mode;
+        doc["bg_style"]                = g_settings.bg_style;
 
         String out;
         serializeJson(doc, out);
@@ -149,6 +150,8 @@ void webServerInit() {
                     g_settings.show_track_info = doc["show_track_info"];
                 if (doc["bg_mode"].is<unsigned int>())
                     g_settings.bg_mode = doc["bg_mode"];
+                if (doc["bg_style"].is<unsigned int>())
+                    g_settings.bg_style = doc["bg_style"];
 
                 sdWriteSettings(g_settings);
                 req->send(200, "application/json", "{\"ok\":true}");

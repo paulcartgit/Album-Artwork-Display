@@ -22,11 +22,11 @@ bool wifiConnect(const WifiConfig& cfg) {
 
     Serial.printf("[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
 
-    if (!MDNS.begin("vinyl")) {
+    if (!MDNS.begin("nowplaying")) {
         Serial.println("[WiFi] mDNS init failed");
     } else {
         MDNS.addService("http", "tcp", 80);
-        Serial.println("[WiFi] mDNS: vinyl.local");
+        Serial.println("[WiFi] mDNS: nowplaying.local");
     }
 
     return true;
