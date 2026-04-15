@@ -62,6 +62,9 @@
 #define SONOS_POLL_INTERVAL_MS      10000       // 10s — how often to check Sonos
 #define VINYL_RECHECK_INTERVAL_MS   600000      // 10 min — re-identify vinyl (~half LP side)
 #define NO_MATCH_COOLDOWN_MS        300000      // 5 min — pause after 3 failed identifications
+#define VINYL_MAX_COOLDOWN_MS       1800000     // 30 min — max cooldown after repeated escalation
+#define VINYL_RETRY_DELAY_MS        15000       // 15s between no-match retries
+#define VINYL_MAX_RETRIES           3           // retries before entering cooldown (first cycle)
 #define IDLE_GALLERY_INTERVAL_MS    300000      // 5 min — rotate gallery images when idle
 
 // ─── 6-Color Palette (calibrated to GDEP073E01 actual pigment appearance) ───

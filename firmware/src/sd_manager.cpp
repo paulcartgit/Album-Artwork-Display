@@ -132,8 +132,15 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
 {
     if (!artist || !title || !artist[0] || !title[0]) return false;
 
-    // Deterministic filename from artist+title
-    String key = String(artist) + "|" + String(title);
+    // Deterministic filename from artist+album (not track title) so different
+    // tracks on the same album share one history entry and artwork file.
+    // Falls back to artist+title when album is empty (e.g. singles).
+    String key;
+    if (album && album[0]) {
+        key = String(artist) + "|" + String(album);
+    } else {
+        key = String(artist) + "|" + String(title);
+    }
     char fname[20];
     snprintf(fname, sizeof(fname), "%08x.jpg", djb2(key.c_str()));
     String fpath = String("/history/") + fname;
