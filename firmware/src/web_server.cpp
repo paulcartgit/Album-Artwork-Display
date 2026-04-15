@@ -2,6 +2,7 @@
 #include "web_portal.h"
 #include "config.h"
 #include "sd_manager.h"
+#include "sonos_client.h"
 #include "image_pipeline.h"
 #include "activity_log.h"
 
@@ -26,6 +27,7 @@ extern uint32_t g_lastAudioSampleRate;
 extern unsigned long g_lastPollTime;
 extern unsigned long g_lastNoMatchTime;
 extern int g_vinylNoMatchCount;
+extern int g_vinylCooldownLevel;
 extern unsigned long g_lastVinylMatchTime;
 extern String g_lastArtUrl;
 
@@ -74,13 +76,18 @@ void webServerInit() {
         if (g_lastNoMatchTime != 0) {
             unsigned long since = now - g_lastNoMatchTime;
             doc["no_match_retries"] = g_vinylNoMatchCount;
-            if (g_vinylNoMatchCount >= 3) {
-                if (since < g_settings.no_match_cooldown_ms)
-                    doc["cooldown_remaining_sec"] = (g_settings.no_match_cooldown_ms - since) / 1000;
+            doc["cooldown_level"] = g_vinylCooldownLevel;
+            // Mirror the escalating cooldown logic from main loop
+            int maxRetries = (g_vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
+            if (g_vinylNoMatchCount >= maxRetries) {
+                unsigned long cooldown = g_settings.no_match_cooldown_ms *
+                                         (1 + (unsigned long)g_vinylCooldownLevel);
+                if (cooldown > VINYL_MAX_COOLDOWN_MS) cooldown = VINYL_MAX_COOLDOWN_MS;
+                if (since < cooldown)
+                    doc["cooldown_remaining_sec"] = (cooldown - since) / 1000;
             } else {
-                unsigned long retryDelay = 15000;
-                if (since < retryDelay)
-                    doc["retry_in_sec"] = (retryDelay - since) / 1000;
+                if (since < VINYL_RETRY_DELAY_MS)
+                    doc["retry_in_sec"] = (VINYL_RETRY_DELAY_MS - since) / 1000;
             }
         }
 
@@ -93,6 +100,7 @@ void webServerInit() {
     server.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest* req) {
         JsonDocument doc;
         doc["sonos_ip"]                = g_settings.sonos_ip;
+        doc["sonos_name"]              = g_settings.sonos_name;
         doc["shazam_api_key_set"]      = strlen(g_settings.shazam_api_key) > 0;
         doc["sonos_poll_ms"]           = g_settings.sonos_poll_ms;
         doc["vinyl_recheck_ms"]        = g_settings.vinyl_recheck_ms;
@@ -125,6 +133,8 @@ void webServerInit() {
 
                 if (doc["sonos_ip"].is<const char*>())
                     strlcpy(g_settings.sonos_ip, doc["sonos_ip"], sizeof(g_settings.sonos_ip));
+                if (doc["sonos_name"].is<const char*>())
+                    strlcpy(g_settings.sonos_name, doc["sonos_name"], sizeof(g_settings.sonos_name));
                 if (doc["shazam_api_key"].is<const char*>())
                     strlcpy(g_settings.shazam_api_key, doc["shazam_api_key"], sizeof(g_settings.shazam_api_key));
                 if (doc["sonos_poll_ms"].is<unsigned int>())
@@ -165,6 +175,25 @@ void webServerInit() {
         req->send(SD_MMC, path, "image/jpeg");
     });
 
+    // ─── Pin/unpin history entry ───
+    server.on("/api/history/pin", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!req->hasParam("f", true) || !req->hasParam("pin", true)) {
+            req->send(400, "application/json", "{\"error\":\"missing f or pin\"}");
+            return;
+        }
+        String file = req->getParam("f", true)->value();
+        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+            req->send(400, "application/json", "{\"error\":\"invalid name\"}");
+            return;
+        }
+        bool pin = req->getParam("pin", true)->value() == "1";
+        if (sdHistorySetPinned(file.c_str(), pin)) {
+            req->send(200, "application/json", "{\"ok\":true}");
+        } else {
+            req->send(404, "application/json", "{\"error\":\"not found\"}");
+        }
+    });
+
     // ─── Toggle history entry on/off ───
     server.on("/api/history/toggle", HTTP_POST, [](AsyncWebServerRequest* req) {
         if (!req->hasParam("f", true) || !req->hasParam("on", true)) {
@@ -179,6 +208,24 @@ void webServerInit() {
         }
         bool on = req->getParam("on", true)->value() == "1";
         if (sdHistorySetEnabled(file.c_str(), on)) {
+            req->send(200, "application/json", "{\"ok\":true}");
+        } else {
+            req->send(404, "application/json", "{\"error\":\"not found\"}");
+        }
+    });
+
+    // ─── Delete history entry ───
+    server.on("/api/history/delete", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!req->hasParam("f", true)) {
+            req->send(400, "application/json", "{\"error\":\"missing f\"}");
+            return;
+        }
+        String file = req->getParam("f", true)->value();
+        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+            req->send(400, "application/json", "{\"error\":\"invalid name\"}");
+            return;
+        }
+        if (sdHistoryDelete(file.c_str())) {
             req->send(200, "application/json", "{\"ok\":true}");
         } else {
             req->send(404, "application/json", "{\"error\":\"not found\"}");
@@ -298,6 +345,26 @@ void webServerInit() {
         );
         response->addHeader("Content-Disposition", "attachment; filename=\"recording.wav\"");
         req->send(response);
+    });
+
+    // ─── Scan LAN for Sonos speakers ───
+    // Returns a JSON array of {name, ip} objects.
+    // The scan takes up to ~3 seconds; call from an async context.
+    server.on("/api/sonos/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
+        SonosDevice devices[16];
+        int count = sonosDiscover(devices, 16, 3000);
+
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        for (int i = 0; i < count; i++) {
+            JsonObject obj = arr.add<JsonObject>();
+            obj["name"] = devices[i].name;
+            obj["ip"]   = devices[i].ip;
+        }
+
+        String out;
+        serializeJson(doc, out);
+        req->send(200, "application/json", out);
     });
 
     server.begin();

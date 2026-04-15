@@ -51,14 +51,31 @@ static unsigned long g_lastIdleSwap = 0;
 
 // ─── Vinyl API-call protection ───
 unsigned long g_lastNoMatchTime = 0;
-static const unsigned long VINYL_RETRY_DELAY = 15 * 1000; // 15 sec between no-match retries
-static const int VINYL_MAX_RETRIES = 3;
 int g_vinylNoMatchCount = 0;
+int g_vinylCooldownLevel = 0; // escalates after each full cooldown cycle
 static const float SILENCE_RMS_THRESHOLD = 150.0f; // 16-bit PCM; typical noise floor ~50-100
 unsigned long g_lastVinylMatchTime = 0; // when last successful vinyl identify happened
+static String g_lastVinylAlbumKey; // artist|album — skip re-display if same album
+
+// Calculate escalating cooldown duration based on current level
+static unsigned long vinylCooldownMs() {
+    unsigned long cooldown = g_settings.no_match_cooldown_ms *
+                             (1 + (unsigned long)g_vinylCooldownLevel);
+    if (cooldown > VINYL_MAX_COOLDOWN_MS) cooldown = VINYL_MAX_COOLDOWN_MS;
+    return cooldown;
+}
+
+// Number of retries before entering cooldown (fewer after first escalation)
+static int vinylMaxRetries() {
+    return (g_vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
+}
 
 // ─── Sonos poll timing (accessible from web_server) ───
 unsigned long g_lastPollTime = 0;
+
+// ─── Sonos re-discovery when IP changes ───
+static int g_sonosUnreachableCount = 0;
+static const int SONOS_UNREACHABLE_BEFORE_REDISCOVER = 3;
 
 // ─── Physical button for vinyl re-identify ───
 volatile bool g_buttonReIdentify = false;
@@ -148,6 +165,30 @@ void setup() {
     // ── Load settings ──
     sdReadSettings(g_settings);
 
+    // ── Resolve Sonos speaker IP from room name ──
+    // Migration path: if a name is not yet stored but an IP is, fetch the name
+    // from the device and cache it so future re-discovery can use it.
+    if (strlen(g_settings.sonos_name) == 0 && strlen(g_settings.sonos_ip) > 0) {
+        char name[64] = {};
+        if (sonosGetDeviceName(g_settings.sonos_ip, name, sizeof(name))) {
+            strlcpy(g_settings.sonos_name, name, sizeof(g_settings.sonos_name));
+            sdWriteSettings(g_settings);
+            Serial.printf("[BOOT] Cached speaker name: %s\n", g_settings.sonos_name);
+        }
+    }
+    // If we have a name but the IP cache is empty, run discovery now.
+    if (strlen(g_settings.sonos_name) > 0 && strlen(g_settings.sonos_ip) == 0) {
+        Serial.printf("[BOOT] Resolving IP for speaker: %s\n", g_settings.sonos_name);
+        char ip[40] = {};
+        if (sonosResolveByName(g_settings.sonos_name, ip, sizeof(ip))) {
+            strlcpy(g_settings.sonos_ip, ip, sizeof(g_settings.sonos_ip));
+            sdWriteSettings(g_settings);
+            Serial.printf("[BOOT] Resolved IP: %s\n", g_settings.sonos_ip);
+        } else {
+            Serial.println("[BOOT] Speaker not found on network — will retry during polling");
+        }
+    }
+
     // ── Web server ──
     webServerInit();
 
@@ -209,6 +250,8 @@ void loop() {
         g_lastVinylMatchTime = 0;
         g_lastNoMatchTime = 0;
         g_vinylNoMatchCount = 0;
+        g_vinylCooldownLevel = 0;
+        g_lastVinylAlbumKey = "";
         g_lastPollTime = 0; // force immediate poll
         activityLog("Button pressed → re-identifying vinyl");
     }
@@ -220,6 +263,8 @@ void loop() {
         g_lastArtUrl    = "";
         g_lastIdleSwap  = 0;
         g_lastPollTime = 0; // force immediate poll
+        g_lastVinylAlbumKey = "";
+        g_vinylCooldownLevel = 0;
         activityLog("Force refresh — clearing caches");
     }
 
@@ -230,13 +275,63 @@ void loop() {
     g_lastPollTime = now;
 
     // ── Check Sonos ──
-    if (strlen(g_settings.sonos_ip) == 0) {
+    if (strlen(g_settings.sonos_ip) == 0 && strlen(g_settings.sonos_name) == 0) {
         // No Sonos configured — stay idle
         handleIdle();
         return;
     }
 
-    bool playing = sonosIsPlaying(g_settings.sonos_ip);
+    // If we have a name but no cached IP (e.g. boot resolution failed), try to resolve now
+    if (strlen(g_settings.sonos_ip) == 0 && strlen(g_settings.sonos_name) > 0) {
+        activityLogf("Resolving speaker '%s'...", g_settings.sonos_name);
+        char ip[40] = {};
+        if (sonosResolveByName(g_settings.sonos_name, ip, sizeof(ip))) {
+            strlcpy(g_settings.sonos_ip, ip, sizeof(g_settings.sonos_ip));
+            sdWriteSettings(g_settings);
+            activityLogf("Sonos resolved: %s", ip);
+        } else {
+            activityLog("Sonos resolve failed — will retry");
+            handleIdle();
+            return;
+        }
+    }
+
+    bool reachable = false;
+    bool playing = sonosIsPlaying(g_settings.sonos_ip, &reachable);
+
+    if (!reachable) {
+        // Connection error — device may have changed IP
+        g_sonosUnreachableCount++;
+        activityLogf("Sonos unreachable (%d/%d)", g_sonosUnreachableCount, SONOS_UNREACHABLE_BEFORE_REDISCOVER);
+
+        if (g_sonosUnreachableCount >= SONOS_UNREACHABLE_BEFORE_REDISCOVER &&
+            strlen(g_settings.sonos_name) > 0) {
+            activityLogf("Re-discovering '%s'...", g_settings.sonos_name);
+            char newIp[40] = {};
+            if (sonosResolveByName(g_settings.sonos_name, newIp, sizeof(newIp))) {
+                strlcpy(g_settings.sonos_ip, newIp, sizeof(g_settings.sonos_ip));
+                sdWriteSettings(g_settings);
+                activityLogf("Sonos re-discovered at %s", newIp);
+                g_sonosUnreachableCount = 0;
+                // Retry immediately with the new IP
+                playing = sonosIsPlaying(g_settings.sonos_ip, &reachable);
+                if (!reachable) {
+                    handleIdle();
+                    return;
+                }
+            } else {
+                activityLog("Re-discovery failed — will retry next poll");
+                handleIdle();
+                return;
+            }
+        } else {
+            handleIdle();
+            return;
+        }
+    } else {
+        g_sonosUnreachableCount = 0; // reset on any successful contact
+    }
+
     if (!playing) {
         if (g_state != STATE_IDLE) {
             activityLog("Sonos stopped → idle");
@@ -249,6 +344,8 @@ void loop() {
             g_lastVinylMatchTime = 0;
             g_vinylNoMatchCount = 0;
             g_lastNoMatchTime = 0;
+            g_vinylCooldownLevel = 0;
+            g_lastVinylAlbumKey = "";
         }
         handleIdle();
         return;
@@ -278,15 +375,18 @@ static void handlePlaying() {
         // Cool down after repeated no-matches to save API calls
         if (g_lastNoMatchTime != 0) {
             unsigned long sinceNoMatch = millis() - g_lastNoMatchTime;
-            if (g_vinylNoMatchCount >= VINYL_MAX_RETRIES) {
-                // 3 strikes — full cooldown
-                if (sinceNoMatch < g_settings.no_match_cooldown_ms) return;
-                // Cooldown expired — reset and try again
+            if (g_vinylNoMatchCount >= vinylMaxRetries()) {
+                // Escalating cooldown: base × (1 + level), capped at max
+                if (sinceNoMatch < vinylCooldownMs()) return;
+                // Cooldown expired — escalate and try again
+                g_vinylCooldownLevel++;
                 g_vinylNoMatchCount = 0;
                 g_lastNoMatchTime = 0;
+                activityLogf("Cooldown expired — escalation level %d, next cooldown %lum",
+                             g_vinylCooldownLevel, vinylCooldownMs() / 60000);
             } else {
                 // Still retrying — wait 15s between attempts
-                if (sinceNoMatch < VINYL_RETRY_DELAY) return;
+                if (sinceNoMatch < VINYL_RETRY_DELAY_MS) return;
             }
         }
 
@@ -384,12 +484,13 @@ static void handlePlaying() {
         if (!identified) {
             g_vinylNoMatchCount++;
             g_lastNoMatchTime = millis();
-            if (g_vinylNoMatchCount >= VINYL_MAX_RETRIES) {
-                activityLogf("Shazam — no match (%d/%d) — cooling down %lum",
-                             g_vinylNoMatchCount, VINYL_MAX_RETRIES, g_settings.no_match_cooldown_ms / 60000);
+            if (g_vinylNoMatchCount >= vinylMaxRetries()) {
+                activityLogf("Shazam — no match (%d/%d) — cooling down %lum (level %d)",
+                             g_vinylNoMatchCount, vinylMaxRetries(),
+                             vinylCooldownMs() / 60000, g_vinylCooldownLevel);
             } else {
                 activityLogf("Shazam — no match (%d/%d) — retrying in %lus",
-                             g_vinylNoMatchCount, VINYL_MAX_RETRIES, VINYL_RETRY_DELAY / 1000);
+                             g_vinylNoMatchCount, vinylMaxRetries(), (unsigned long)VINYL_RETRY_DELAY_MS / 1000);
             }
             digitalWrite(LED_RED, LOW);
             return;
@@ -398,6 +499,7 @@ static void handlePlaying() {
         // Got a match — reset retry counter and cooldown, start recheck timer
         g_vinylNoMatchCount = 0;
         g_lastNoMatchTime = 0;
+        g_vinylCooldownLevel = 0;
         g_lastVinylMatchTime = millis();
 
         activityLogf("Identified: %s — %s", shazam.artist.c_str(), shazam.title.c_str());
@@ -405,6 +507,20 @@ static void handlePlaying() {
         g_currentArtist = shazam.artist;
         g_currentTitle  = shazam.title;
         g_currentAlbum  = shazam.album;
+
+        // Check if this is the same album already displayed — skip artwork refresh
+        // Only deduplicate when album name is known; singles with no album are always shown
+        if (shazam.album.length() > 0) {
+            String albumKey = shazam.artist + "|" + shazam.album;
+            if (albumKey == g_lastVinylAlbumKey) {
+                activityLog("Same album still playing — skipping display update");
+                digitalWrite(LED_RED, LOW);
+                return;
+            }
+            g_lastVinylAlbumKey = albumKey;
+        } else {
+            g_lastVinylAlbumKey = "";
+        }
 
         // Fetch album art from Shazam
         activityLog("Fetching album art...");

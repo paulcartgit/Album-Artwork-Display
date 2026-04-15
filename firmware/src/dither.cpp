@@ -71,7 +71,11 @@ static void ensurePaletteLab() {
     g_palReady = true;
 }
 
-// Nearest palette colour — Euclidean distance in CIELAB
+// Nearest palette colour — weighted distance in CIELAB
+// Lightness gets 1.5× weight so that out-of-gamut hues (pink, magenta,
+// purple) prefer a lightness-correct match (e.g. White) over a
+// chrominance-correct but too-dark match (e.g. Blue).  Error diffusion
+// then mixes in the missing chrominance through neighbouring pixels.
 static uint8_t nearestLab(float L, float a, float b) {
     float best = 1e30f;
     uint8_t ci = 0;
@@ -79,7 +83,7 @@ static uint8_t nearestLab(float L, float a, float b) {
         float dL = L - g_palLab[i].L;
         float da = a - g_palLab[i].a;
         float db = b - g_palLab[i].b;
-        float d  = dL * dL + da * da + db * db;
+        float d  = dL * dL * 1.5f + da * da + db * db;
         if (d < best) { best = d; ci = i; }
     }
     return ci;
@@ -201,16 +205,21 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
                 eb *= chromaScale;
             }
 
-            // Boost error for poor palette matches on HIGH-CHROMA pixels only
-            // (e.g. purple → blue has large residual toward red). Low-chroma
-            // colours like brown/skin must NOT be boosted or they shift toward red.
-            float chroma = sqrtf(a * a + b * b);
-            float dist2 = eL * eL + ea * ea + eb * eb;
-            if (dist2 > 400.0f && chroma > 40.0f) {
-                float boost = 1.0f + 0.25f * fminf(sqrtf(dist2) / 50.0f, 1.0f);
-                eL *= boost;
-                ea *= boost;
-                eb *= boost;
+            // Out-of-gamut dampening: colours far from every palette entry
+            // (purple, magenta, pink) produce very large quantisation error.
+            // Diffusing 100 % of that error causes violent oscillation between
+            // distant palette entries (Red ↔ Blue for purple), producing a
+            // result that is far too dark.  Soft-cap the error magnitude so
+            // mild mismatches diffuse normally but extreme mismatches are
+            // dampened, keeping the dither pattern stable.
+            float errMag2 = eL * eL + ea * ea + eb * eb;
+            if (errMag2 > 2500.0f) {
+                float errMag = sqrtf(errMag2);
+                float cap = 50.0f + (errMag - 50.0f) * 0.6f;
+                float s = cap / errMag;
+                eL *= s;
+                ea *= s;
+                eb *= s;
             }
 
             // Edge-aware: attenuate error at source pixel when on/near an edge.
