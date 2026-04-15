@@ -125,6 +125,10 @@ static inline int triWave(int v, int period) {
     return (m < half) ? m : (period - m);
 }
 
+constexpr int NOISE_X_MULTIPLIER = 13;
+constexpr int NOISE_Y_MULTIPLIER = 7;
+constexpr int NOISE_MASK = 0x1F;
+
 static void extractKeyColors(const uint8_t* src, int w, int h, uint8_t colors[3][3]) {
     uint8_t edgeR, edgeG, edgeB;
     averageEdgeColor(src, w, h, edgeR, edgeG, edgeB);
@@ -156,9 +160,12 @@ static void extractKeyColors(const uint8_t* src, int w, int h, uint8_t colors[3]
             uint8_t mx = max(max(r, g), b);
             uint8_t mn = min(min(r, g), b);
             int sat = (mx > 0) ? ((mx - mn) * 255) / mx : 0;
-            uint32_t weight = 16u + (uint32_t)((sat * sat) / 255); // saturated colors weighted more heavily
+            // Base weight keeps neutrals represented; squared saturation strongly
+            // favors vivid tones so the pattern uses the artwork's key colors.
+            uint32_t weight = 16u + (uint32_t)((sat * sat) / 255);
 
-            int bin = (r & 0xE0) | ((g & 0xE0) >> 3) | (b >> 6); // RGB332
+            // RGB332 quantization: top 3 bits red, top 3 bits green, top 2 bits blue.
+            int bin = (r & 0xE0) | ((g & 0xE0) >> 3) | (b >> 6);
             wSum[bin] += weight;
             rSum[bin] += (uint32_t)r * weight;
             gSum[bin] += (uint32_t)g * weight;
@@ -1069,6 +1076,3 @@ void pipelineShowTestPattern() {
     heap_caps_free(packedBuf);
     Serial.println("[Test] Color test pattern displayed");
 }
-    constexpr int NOISE_X_MULTIPLIER = 13;
-    constexpr int NOISE_Y_MULTIPLIER = 7;
-    constexpr int NOISE_MASK = 0x1F;
