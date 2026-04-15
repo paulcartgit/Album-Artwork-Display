@@ -134,6 +134,7 @@ static void extractKeyColors(const uint8_t* src, int w, int h, uint8_t colors[3]
         colors[i][2] = edgeB;
     }
 
+    // Keep histogram buffers static to avoid large temporary stack usage.
     static uint32_t wSum[256];
     static uint32_t rSum[256];
     static uint32_t gSum[256];
@@ -155,7 +156,7 @@ static void extractKeyColors(const uint8_t* src, int w, int h, uint8_t colors[3]
             uint8_t mx = max(max(r, g), b);
             uint8_t mn = min(min(r, g), b);
             int sat = (mx > 0) ? ((mx - mn) * 255) / mx : 0;
-            uint32_t weight = 16u + (uint32_t)((sat * sat) / 255); // 16..271
+            uint32_t weight = 16u + (uint32_t)((sat * sat) / 255); // saturated colors weighted more heavily
 
             int bin = (r & 0xE0) | ((g & 0xE0) >> 3) | (b >> 6); // RGB332
             wSum[bin] += weight;
@@ -699,7 +700,7 @@ static void fillPatternedBackground(uint8_t* canvas, int cW, int cH,
             uint8_t b = colors[band][2];
 
             // Subtle paper-like texture to avoid flat digital bands
-            int noise = ((x * 13) ^ (y * 7)) & 0x1F;
+            int noise = ((x * NOISE_X_MULTIPLIER) ^ (y * NOISE_Y_MULTIPLIER)) & NOISE_MASK;
             int bias = noise - 16; // -16..15
             canvas[di]     = constrain((int)r + bias, 0, 255);
             canvas[di + 1] = constrain((int)g + bias, 0, 255);
@@ -1068,3 +1069,6 @@ void pipelineShowTestPattern() {
     heap_caps_free(packedBuf);
     Serial.println("[Test] Color test pattern displayed");
 }
+    constexpr int NOISE_X_MULTIPLIER = 13;
+    constexpr int NOISE_Y_MULTIPLIER = 7;
+    constexpr int NOISE_MASK = 0x1F;
