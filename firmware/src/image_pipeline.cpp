@@ -11,8 +11,8 @@
 #include <SD_MMC.h>
 #include <esp_heap_caps.h>
 #include <Adafruit_GFX.h>
-#include <Fonts/FreeSansBold12pt7b.h>
-#include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSansBold24pt7b.h>
+#include <Fonts/FreeSans18pt7b.h>
 
 extern Settings g_settings;
 
@@ -119,32 +119,89 @@ static float edgeVariance(const uint8_t* src, int w, int h) {
 }
 
 // ─── Render text into RGB888 buffer using Adafruit GFX ───
+// Uses 2× supersampling for anti-aliased text: renders at double resolution
+// on a 1-bit canvas, then downsamples with a 2×2 box filter to get smooth
+// 4-level alpha blending. setTextSize() scales the font up so it fills
+// the text area nicely after the 2× downsample.
 static void renderText(uint8_t* rgb, int canvasW, int canvasH,
                        const char* artist, const char* album,
                        int textAreaY, int textAreaH,
                        uint8_t bgR, uint8_t bgG, uint8_t bgB) {
-    // Use a 1-bit canvas for text, then composite into RGB buffer
-    GFXcanvas1 canvas(canvasW, textAreaH);
-    canvas.fillScreen(0); // black background
+    // 2× oversampled canvas
+    int ssW = canvasW * 2;
+    int ssH = textAreaH * 2;
+    GFXcanvas1 canvas(ssW, ssH);
+    canvas.fillScreen(0);
     canvas.setTextColor(1);
     canvas.setTextWrap(false);
 
-    // Artist name — larger font, centered
-    canvas.setFont(&FreeSansBold12pt7b);
+    // Artist name — bold 24pt, scaled 4× on 2× canvas = ~66px effective
+    canvas.setFont(&FreeSansBold24pt7b);
+    canvas.setTextSize(4);
     int16_t x1, y1; uint16_t tw, th;
-    canvas.getTextBounds(artist, 0, 0, &x1, &y1, &tw, &th);
-    int artistX = (canvasW - tw) / 2 - x1;
-    int artistY = 50 - y1; // ~50px from top of text area
-    canvas.setCursor(artistX, artistY);
-    canvas.print(artist);
 
-    // Album name — smaller font, centered below artist
-    canvas.setFont(&FreeSans9pt7b);
-    canvas.getTextBounds(album, 0, 0, &x1, &y1, &tw, &th);
-    int albumX = (canvasW - tw) / 2 - x1;
-    int albumY = artistY + th + 30 - y1; // 30px gap
+    // If artist name is too wide, try smaller scale, then truncate
+    String artistStr(artist);
+    int artistScale = 4;
+    canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    while (tw > (uint16_t)(ssW - 60) && artistScale > 2) {
+        artistScale--;
+        canvas.setTextSize(artistScale);
+        canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    }
+    // Still too wide? Truncate with ellipsis
+    while (tw > (uint16_t)(ssW - 60) && artistStr.length() > 4) {
+        artistStr = artistStr.substring(0, artistStr.length() - 2);
+        String test = artistStr + "...";
+        canvas.getTextBounds(test.c_str(), 0, 0, &x1, &y1, &tw, &th);
+        if (tw <= (uint16_t)(ssW - 60)) { artistStr = test; break; }
+    }
+    canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    int artistH = th;
+
+    // Album name — regular 18pt, scaled 3× on 2× canvas = ~36px effective
+    canvas.setFont(&FreeSans18pt7b);
+    canvas.setTextSize(3);
+    String albumStr(album);
+    int albumScale = 3;
+    int16_t ax1, ay1; uint16_t atw, ath;
+    canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
+    while (atw > (uint16_t)(ssW - 60) && albumScale > 2) {
+        albumScale--;
+        canvas.setTextSize(albumScale);
+        canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
+    }
+    while (atw > (uint16_t)(ssW - 60) && albumStr.length() > 4) {
+        albumStr = albumStr.substring(0, albumStr.length() - 2);
+        String test = albumStr + "...";
+        canvas.getTextBounds(test.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
+        if (atw <= (uint16_t)(ssW - 60)) { albumStr = test; break; }
+    }
+    canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
+    int albumH = ath;
+
+    // Centre both lines vertically in the text area (at 2× scale)
+    int gap = ssH / 8; // gap between artist and album
+    int totalH = artistH + gap + albumH;
+    int startY = (ssH - totalH) / 2;
+
+    // Draw artist
+    canvas.setFont(&FreeSansBold24pt7b);
+    canvas.setTextSize(artistScale);
+    canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    int artistX = (ssW - tw) / 2 - x1;
+    int artistY = startY - y1;
+    canvas.setCursor(artistX, artistY);
+    canvas.print(artistStr);
+
+    // Draw album
+    canvas.setFont(&FreeSans18pt7b);
+    canvas.setTextSize(albumScale);
+    canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
+    int albumX = (ssW - atw) / 2 - ax1;
+    int albumY = startY + artistH + gap - ay1;
     canvas.setCursor(albumX, albumY);
-    canvas.print(album);
+    canvas.print(albumStr);
 
     // Determine text color: white on dark bg, black on light bg
     int brightness = (bgR * 299 + bgG * 587 + bgB * 114) / 1000;
@@ -155,16 +212,27 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
         textR = 0; textG = 0; textB = 0;
     }
 
-    // Composite 1-bit text into RGB888 buffer
+    // Downsample 2×2 blocks → alpha (0..4) and blend text color with background
     for (int y = 0; y < textAreaH; y++) {
         for (int x = 0; x < canvasW; x++) {
+            int count = canvas.getPixel(x * 2,     y * 2)
+                      + canvas.getPixel(x * 2 + 1, y * 2)
+                      + canvas.getPixel(x * 2,     y * 2 + 1)
+                      + canvas.getPixel(x * 2 + 1, y * 2 + 1);
+            if (count == 0) continue; // leave background as-is
             int di = ((textAreaY + y) * canvasW + x) * 3;
-            if (canvas.getPixel(x, y)) {
+            if (count == 4) {
+                // Fully covered — write text color directly
                 rgb[di]     = textR;
                 rgb[di + 1] = textG;
                 rgb[di + 2] = textB;
+            } else {
+                // Partial coverage — blend with actual underlying pixel
+                float alpha = count * 0.25f;
+                rgb[di]     = (uint8_t)(rgb[di]     + (textR - rgb[di])     * alpha);
+                rgb[di + 1] = (uint8_t)(rgb[di + 1] + (textG - rgb[di + 1]) * alpha);
+                rgb[di + 2] = (uint8_t)(rgb[di + 2] + (textB - rgb[di + 2]) * alpha);
             }
-            // else: leave the background fill color as-is
         }
     }
 }
@@ -377,15 +445,26 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
                               const char* artist = nullptr, const char* album = nullptr) {
     // 1. Get dimensions
     uint16_t imgW, imgH;
-    TJpgDec.getJpgSize(&imgW, &imgH, jpegBuf, jpegSize);
-    Serial.printf("[Pipeline] JPEG %dx%d (%u bytes)\n", imgW, imgH, jpegSize);
+    JRESULT jr = TJpgDec.getJpgSize(&imgW, &imgH, jpegBuf, jpegSize);
+    Serial.printf("[Pipeline] JPEG %dx%d (%u bytes) jd_prepare=%d\n", imgW, imgH, jpegSize, jr);
+    Serial.printf("[Pipeline] Free PSRAM: %u, largest block: %u\n",
+                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                  heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+
+    if (imgW == 0 || imgH == 0) {
+        Serial.println("[Pipeline] JPEG parse failed — invalid dimensions");
+        heap_caps_free(jpegBuf);
+        return false;
+    }
 
     // 2. Decode to RGB888 in PSRAM
     g_decodeW = imgW;
     g_decodeH = imgH;
     g_decodeBuf = (uint8_t*)heap_caps_malloc((size_t)imgW * imgH * 3, MALLOC_CAP_SPIRAM);
     if (!g_decodeBuf) {
-        Serial.println("[Pipeline] Decode buffer alloc failed");
+        Serial.printf("[Pipeline] Decode buffer alloc failed (%dx%dx3 = %u bytes)\n",
+                      imgW, imgH, (unsigned)(imgW * imgH * 3));
+        heap_caps_free(jpegBuf);
         return false;
     }
 
@@ -431,10 +510,29 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     }
 
     if (useBlur) {
-        // Blurred pillarbox: scale source to fill canvas, blur heavily, dim
-        int fillH = showText ? artAreaH : EPD_HEIGHT;
+        // Blurred background: always fill entire canvas
         fillBlurredBackground(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
-                              g_decodeBuf, imgW, imgH, fillH);
+                              g_decodeBuf, imgW, imgH, EPD_HEIGHT);
+        // Frosted overlay on text area: blend toward white/black for legibility
+        if (showText) {
+            int brightness = (bgR * 299 + bgG * 587 + bgB * 114) / 1000;
+            // On dark backgrounds, lighten; on light backgrounds, darken
+            uint8_t tgtR, tgtG, tgtB;
+            float blend;
+            if (brightness < 128) {
+                tgtR = tgtG = tgtB = 0; blend = 0.55f; // darken 55%
+            } else {
+                tgtR = tgtG = tgtB = 255; blend = 0.55f; // lighten 55%
+            }
+            for (int y = artAreaH; y < EPD_HEIGHT; y++) {
+                for (int x = 0; x < EPD_WIDTH; x++) {
+                    int di = (y * EPD_WIDTH + x) * 3;
+                    scaledBuf[di]     = (uint8_t)(scaledBuf[di]     + (tgtR - scaledBuf[di])     * blend);
+                    scaledBuf[di + 1] = (uint8_t)(scaledBuf[di + 1] + (tgtG - scaledBuf[di + 1]) * blend);
+                    scaledBuf[di + 2] = (uint8_t)(scaledBuf[di + 2] + (tgtB - scaledBuf[di + 2]) * blend);
+                }
+            }
+        }
     } else {
         // Solid colour fill
         for (int i = 0; i < EPD_WIDTH * EPD_HEIGHT; i++) {
@@ -444,11 +542,12 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         }
     }
 
-    // Scale artwork to fit art area. When using blur, add vertical margin so
-    // the drop shadow has room above/below (artwork fills full width).
-    const int shadowMarginV = useBlur ? 22 : 0;
+    // Scale artwork to fit art area.
+    // Text mode: artwork pins to top edge, no shadow.
+    // Full mode: centred with top+bottom margin for shadow.
+    const int shadowMarginV = (useBlur && !showText) ? 22 : 0;
     int fitW = artAreaW;
-    int fitH = artAreaH - shadowMarginV * 2;
+    int fitH = artAreaH - (showText ? 0 : shadowMarginV * 2);
     float scaleX = (float)fitW / imgW;
     float scaleY = (float)fitH / imgH;
     float scale  = (scaleX < scaleY) ? scaleX : scaleY;
@@ -456,14 +555,17 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     int scaledW = (int)(imgW * scale);
     int scaledH = (int)(imgH * scale);
     int offsetX = (artAreaW - scaledW) / 2;
-    int offsetY = showText ? (artAreaH - scaledH) / 2 : (EPD_HEIGHT - scaledH) / 2;
+    int offsetY;
+    if (showText) {
+        offsetY = 0; // pin to top edge
+    } else {
+        offsetY = (EPD_HEIGHT - scaledH) / 2; // centred
+    }
 
-    // Drop shadow: darken background pixels above and below the artwork
-    // to create a "floating card" effect. Artwork fills full width so no
-    // side shadows — only top and bottom bands over the blurred background.
-    if (useBlur) {
+    // Drop shadow — only in full mode (no text), with blur background.
+    if (useBlur && !showText) {
         const int shadowPad = 20;
-        // Top shadow band: rows above artwork within shadowPad range
+        // Top shadow band
         for (int dy = 1; dy <= shadowPad; dy++) {
             int py = offsetY - dy;
             if (py < 0) continue;
@@ -478,7 +580,7 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
                 scaledBuf[di + 2] = (uint8_t)(scaledBuf[di + 2] * (1.0f - alpha));
             }
         }
-        // Bottom shadow band: rows below artwork within shadowPad range
+        // Bottom shadow band
         for (int dy = 1; dy <= shadowPad; dy++) {
             int py = offsetY + scaledH - 1 + dy;
             if (py >= EPD_HEIGHT) continue;
@@ -493,7 +595,7 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
                 scaledBuf[di + 2] = (uint8_t)(scaledBuf[di + 2] * (1.0f - alpha));
             }
         }
-        Serial.println("[Pipeline] Drop shadow applied (top/bottom)");
+        Serial.println("[Pipeline] Drop shadow applied");
     }
 
     for (int y = 0; y < scaledH; y++) {
@@ -537,6 +639,46 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     displayShowImage(packedBuf);
     heap_caps_free(packedBuf);
 
+    return true;
+}
+
+// ─── Placeholder display when artwork can't be decoded ───
+bool pipelineShowPlaceholder(const char* artist, const char* album) {
+    uint8_t* scaledBuf = (uint8_t*)heap_caps_malloc((size_t)EPD_WIDTH * EPD_HEIGHT * 3, MALLOC_CAP_SPIRAM);
+    if (!scaledBuf) {
+        Serial.println("[Pipeline] Placeholder alloc failed");
+        return false;
+    }
+
+    // Dark charcoal background
+    uint8_t bgR = 35, bgG = 35, bgB = 35;
+    for (int i = 0; i < EPD_WIDTH * EPD_HEIGHT; i++) {
+        scaledBuf[i * 3]     = bgR;
+        scaledBuf[i * 3 + 1] = bgG;
+        scaledBuf[i * 3 + 2] = bgB;
+    }
+
+    // Render text centred on entire display
+    renderText(scaledBuf, EPD_WIDTH, EPD_HEIGHT, artist, album,
+               0, EPD_HEIGHT, bgR, bgG, bgB);
+
+    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+
+    size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
+    uint8_t* packedBuf = (uint8_t*)heap_caps_calloc(packedSize, 1, MALLOC_CAP_SPIRAM);
+    if (!packedBuf) {
+        heap_caps_free(scaledBuf);
+        Serial.println("[Pipeline] Placeholder packed alloc failed");
+        return false;
+    }
+
+    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT);
+    heap_caps_free(scaledBuf);
+
+    displayShowImage(packedBuf);
+    heap_caps_free(packedBuf);
+
+    Serial.println("[Pipeline] Placeholder displayed");
     return true;
 }
 
@@ -605,7 +747,15 @@ bool pipelineProcessUrl(const char* url,
         sdHistorySave(artist, title, album, jpegBuf, jpegSize);
     }
 
-    return processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum); // takes ownership
+    if (processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum))
+        return true; // takes ownership of jpegBuf
+
+    // JPEG wasn't decodable — show placeholder with track info
+    Serial.println("[Pipeline] Artwork decode failed — showing placeholder");
+    if (artist && artist[0]) {
+        return pipelineShowPlaceholder(artist, album);
+    }
+    return false;
 }
 
 bool pipelineProcessFile(const char* path) {
