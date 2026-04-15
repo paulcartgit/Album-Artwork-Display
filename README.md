@@ -1,4 +1,4 @@
-# Album Artwork Display
+# Now Playing
 
 An ESP32-S3 powered e-ink display that shows the album art of whatever's currently playing on your Sonos system — including vinyl records identified via Shazam.
 
@@ -11,32 +11,118 @@ An ESP32-S3 powered e-ink display that shows the album art of whatever's current
 
 ## Hardware
 
-- **Board**: [Waveshare ESP32-S3-PhotoPainter](https://www.waveshare.com/wiki/ESP32-S3-PhotoPainter) (ESP32-S3-WROOM-1-N16R8)
-- **Display**: 7.3" GDEP073E01 e-ink (Spectra 6), 800×480 landscape
-- **Audio**: ES7210 quad-ADC for microphone input
+- **Board**: [Waveshare ESP32-S3-PhotoPainter](https://www.waveshare.com/wiki/ESP32-S3-PhotoPainter) (ESP32-S3-WROOM-1-N16R8, 16MB flash, 8MB PSRAM)
+- **Display**: 7.3" GDEP073E01 e-ink (Spectra 6), 800×480, driven in portrait mode (480×800)
+- **Audio**: ES7210 quad-ADC for microphone input (44.1 kHz, 16-bit stereo)
 - **Storage**: SD card (4-bit SDMMC) for settings, WiFi config, and art history
 - **Power**: AXP2101 PMIC with battery support
 
+## Getting Started
+
+### Prerequisites
+
+- [PlatformIO](https://platformio.org/install) (VS Code extension or CLI)
+- Waveshare ESP32-S3-PhotoPainter board
+- FAT32-formatted SD card inserted into the board
+
+### Build & Flash
+
+```bash
+cd firmware
+pio run -e esp32-s3-photopainter -t upload
+```
+
+Or use the convenience script:
+
+```bash
+./firmware/flash.sh
+```
+
+### First-Time Setup
+
+1. Power on the device — it will create a WiFi network called **NowPlaying-Setup**
+2. Connect to it from your phone or laptop
+3. A captive portal will appear — select your home WiFi network and enter the password
+4. The device reboots. Once connected, it's accessible at **http://nowplaying.local**
+5. Open the web portal → **Settings** tab → scan for Sonos speakers and select yours
+6. (Optional) Add a [Shazam RapidAPI](https://rapidapi.com/apidojo/api/shazam/) key for vinyl identification
+7. Save settings — the display will start showing album art automatically
+
+If the WiFi connection fails (e.g. wrong password), the device falls back to the captive portal automatically. The e-ink display shows "Wi-Fi Failed" so you know to reconnect to `NowPlaying-Setup` and try again.
+
 ## Rendering Pipeline
 
-Album art goes through a sophisticated image processing pipeline optimised for the 6-color e-ink panel:
+Album art goes through a multi-stage image processing pipeline optimised for the 6-color e-ink panel:
 
-1. **JPEG decode** — Downloaded image decoded to RGB888 in PSRAM
+1. **JPEG decode** — Downloaded image decoded to RGB888 in PSRAM via TJpg_Decoder
 2. **Background fill** — Auto-detected per image:
-   - **Blurred pillarbox** — for photographic covers (1.3× zoom, box blur, 70% dim)
-   - **Solid colour** — for clean/minimalist covers (saturation-weighted edge average)
-   - Configurable: always solid, always blur, or auto (smart edge-variance detection)
-3. **Scaling** — Fit to display with correct aspect ratio
-4. **Enhancement** — Unsharp mask sharpening, contrast boost, gamma correction with shadow protection
-5. **Dithering** — CIELAB color space conversion, Stucki error diffusion kernel, serpentine scanning, edge-aware error attenuation, shadow chroma suppression, chroma-gated error boost for saturated colours
+   - **Blurred** — Source image scaled to fill, 4-pass box blur (radius 12), then darkened (55%) or washed out (45% toward white)
+   - **Solid colour** — Saturation-weighted average of edge pixels (vibrant pixels dominate, prevents muddy brown), slight saturation boost
+   - Configurable: always solid, always blur, or auto (smart edge-variance threshold)
+3. **Scaling** — Fit to display with correct aspect ratio, centred with margin for drop shadow
+4. **Drop shadow** — Top and bottom gradient bands (20px, quadratic falloff) in full-art mode
+5. **Text overlay** — 2× supersampled anti-aliased rendering (FreeSansBold 24pt artist, FreeSans 18pt album), auto-scaling and ellipsis truncation for long names, contrast-adaptive text colour (white on dark, black on light), frosted overlay on blurred backgrounds for legibility
+6. **Enhancement** — Unsharp mask sharpening, contrast boost, gamma correction with shadow protection
+7. **Dithering** — CIELAB color space, Stucki error diffusion kernel, serpentine scanning, lightness-weighted matching, error cap with dampening for stability
+8. **Placeholder fallback** — When artwork can't be decoded (unsupported JPEG format), a text-only display shows artist and album name on a dark background
+
+## Web Portal
+
+Once connected, visit **http://nowplaying.local** (or the device IP):
+
+### Now Playing
+Current track info, artwork preview, and activity log. Buttons to force a Sonos check or trigger a manual listen (Shazam identify). Auto-refreshes every 3 seconds.
+
+### Settings
+- **Wi-Fi** — Scan for networks, change WiFi credentials (reboots to reconnect)
+- **Sonos** — Scan and select a speaker by room name
+- **Shazam** — RapidAPI key for vinyl identification
+- **Timing** — Sonos poll interval (5–60s), vinyl re-identify interval (1–30 min), no-match cooldown (1–15 min), idle gallery rotation (1–30 min)
+- **Display** — Track info overlay toggle, background fill mode (auto/blur/solid), background style (darken/wash out)
+
+### History
+Gallery grid of all saved album covers (up to 100), split into **Pinned** and **History** sections:
+- Toggle covers on/off for idle gallery rotation
+- **Pin** a cover to keep it permanently (exempt from the 100-entry cap)
+- **Delete** unwanted entries
+
+### Debug
+Device IP, uptime, force display refresh, test color pattern, download last audio recording.
 
 ## Album Art History
 
-Album covers are automatically saved to the SD card as they're displayed (up to 100). When idle, the device cycles through these saved covers. In the web portal's **History** tab you can:
+Album covers are automatically saved to the SD card as they're displayed. When idle, the device cycles through enabled covers using shuffle-bag randomisation. Pinned covers are never pruned. The oldest unpinned entries are automatically removed when the 100-entry limit is reached.
 
-- See thumbnails of all previously displayed covers
-- Toggle individual covers on/off (only enabled covers appear during idle rotation)
-- Oldest entries are automatically pruned when the 100-entry limit is reached
+## State Machine
+
+| State | Description |
+|-------|-------------|
+| **BOOT** | Hardware init, WiFi connect, setup |
+| **IDLE** | Nothing playing — rotates gallery covers |
+| **DIGITAL** | Sonos streaming — displays album art from Sonos metadata |
+| **VINYL** | Sonos line-in — records audio, identifies via Shazam |
+| **SETUP** | Captive portal for WiFi provisioning |
+| **ERROR** | Halted (e.g. SD card failure) |
+
+Additional behaviours:
+- **Idle debounce** — Requires 2 consecutive idle polls before transitioning from playing to idle (prevents false transitions during track changes)
+- **Escalating cooldown** — After Shazam retries are exhausted, cooldown duration escalates progressively, capped at 30 minutes
+- **Speaker rediscovery** — After 3 consecutive Sonos failures, re-discovers the speaker by room name via UPnP/SOAP topology API
+- **Display queue** — Artwork arriving while the e-ink is still refreshing (~15s) is queued and processed when the panel finishes
+- **Physical button** — BTN_KEY triggers immediate re-identification (resets all cooldowns)
+
+## 6-Color Palette
+
+The Spectra 6 e-ink display uses these calibrated pigment colors:
+
+| Index | Color | Calibrated RGB |
+|-------|-------|----------------|
+| 0 | Black | `#000000` |
+| 1 | White | `#FFFFFF` |
+| 2 | Green | `#3A6B35` (muted olive) |
+| 3 | Blue | `#4A6B8A` (muted steel) |
+| 4 | Red | `#8B2500` (deep crimson) |
+| 5 | Yellow | `#C8A000` (warm golden) |
 
 ## Project Structure
 
@@ -47,17 +133,18 @@ firmware/               ESP32-S3 PlatformIO firmware
 │   ├── config.h            Pin definitions, constants, settings struct
 │   ├── display.cpp/h       GxEPD2 6-color e-ink driver (non-blocking refresh)
 │   ├── image_pipeline.cpp/h    JPEG → scale → enhance → dither → display
-│   ├── dither.cpp/h        CIELAB + Stucki + serpentine + edge-aware dithering
-│   ├── web_server.cpp/h    HTTP API + settings portal
+│   ├── dither.cpp/h        CIELAB + Stucki + serpentine dithering
+│   ├── web_server.cpp/h    HTTP API + captive portal + settings portal
 │   ├── web_portal.h        Embedded HTML/CSS/JS (status, settings, history, debug)
-│   ├── sonos_client.cpp/h  UPnP/SOAP now-playing queries
+│   ├── captive_portal.h    Embedded HTML/CSS/JS for WiFi setup wizard
+│   ├── sonos_client.cpp/h  UPnP/SOAP topology discovery + now-playing queries
 │   ├── shazam_client.cpp/h Shazam audio fingerprinting (RapidAPI)
 │   ├── audio_capture.cpp/h I2S microphone recording (ES7210)
 │   ├── sd_manager.cpp/h    SD card: settings, wifi config, art history
-│   ├── wifi_manager.cpp/h  WiFi connection from SD config
+│   ├── wifi_manager.cpp/h  WiFi STA connection + AP mode for setup
 │   ├── activity_log.h      Circular activity log for web UI
 │   ├── url_utils.h         URL encoding helpers
-│   └── xml_utils.h         XML tag extraction (UPnP)
+│   └── xml_utils.h         XML tag extraction (UPnP/SOAP)
 ├── test/
 │   ├── test_native/test_main.cpp   Native unit tests
 │   └── mocks/          Arduino/ESP stubs for native tests
@@ -70,61 +157,13 @@ simulator/              Python simulator (runs without hardware)
 └── settings.example.json   Template for credentials
 ```
 
-## Firmware
-
-### Prerequisites
-
-- [PlatformIO](https://platformio.org/install) (VS Code extension or CLI)
-- Waveshare ESP32-S3-PhotoPainter board
-
-### Build & Flash
-
-```bash
-cd firmware
-pio run -e esp32-s3-photopainter -t upload
-```
-
-### SD Card Setup
-
-Create a JSON file on a FAT32 SD card:
-
-**config.json** (WiFi — required):
-```json
-{
-    "ssid": "YourNetwork",
-    "password": "YourPassword"
-}
-```
-
-Settings (Sonos IP, Shazam API key, timing, display options) are configured via the web portal and saved to `/settings.json` automatically.
-
-### Running Tests
+## Running Tests
 
 ```bash
 cd firmware
 pio test -e native
 ```
 
-## Web Portal
+## License
 
-Once running, visit `http://vinyl.local` (or the device IP) to:
-
-- **Now Playing** — View current track, artwork, and activity log. Buttons to force a Sonos check or listen to identify what's playing.
-- **Settings** — Configure Sonos IP, Shazam API key, timing intervals, display options (track info overlay, background fill mode).
-- **History** — Browse thumbnails of all saved album covers. Toggle covers on/off for idle rotation.
-- **Debug** — Device info, force display refresh, test color pattern, download last audio recording.
-
-## 6-Color Palette
-
-The Spectra 6 e-ink display supports these physical pigment colors:
-
-| Index | Color | RGB |
-|-------|-------|-----|
-| 0 | Black | `#000000` |
-| 1 | White | `#FFFFFF` |
-| 2 | Green | `#00A000` |
-| 3 | Blue | `#0000FF` |
-| 4 | Red | `#FF0000` |
-| 5 | Yellow | `#FFFF00` |
-
-The dithering pipeline operates in CIELAB color space with a Stucki error diffusion kernel for optimal color reproduction on this limited palette.
+See [LICENSE.md](LICENSE.md).
