@@ -13,5 +13,8 @@ bool pipelineProcessUrl(const char* url,
 // Process a local JPEG file from SD card
 bool pipelineProcessFile(const char* path);
 
+// Display a placeholder with artist/album text when artwork can't be decoded
+bool pipelineShowPlaceholder(const char* artist, const char* album);
+
 // Display a test pattern showing all 7 palette colors
 void pipelineShowTestPattern();

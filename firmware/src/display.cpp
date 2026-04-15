@@ -121,8 +121,35 @@ void displayShowMessage(const char* msg) {
         epd.fillScreen(GxEPD_WHITE);
         epd.setTextColor(GxEPD_BLACK);
         epd.setTextSize(3);
-        epd.setCursor(20, EPD_HEIGHT / 2);
-        epd.print(msg);
+
+        // Split message by newlines, centre each line
+        String text(msg);
+        int lineCount = 1;
+        for (int i = 0; i < (int)text.length(); i++)
+            if (text[i] == '\n') lineCount++;
+
+        int16_t x1, y1;
+        uint16_t tw, th;
+        // Measure a single line height
+        epd.getTextBounds("A", 0, 0, &x1, &y1, &tw, &th);
+        int lineH = th + 8; // line height with spacing
+        int totalH = lineH * lineCount;
+        int startY = (EPD_HEIGHT - totalH) / 2 + th; // baseline of first line
+
+        int lineIdx = 0;
+        int start = 0;
+        for (int i = 0; i <= (int)text.length(); i++) {
+            if (i == (int)text.length() || text[i] == '\n') {
+                String line = text.substring(start, i);
+                epd.getTextBounds(line.c_str(), 0, 0, &x1, &y1, &tw, &th);
+                int cx = (EPD_WIDTH - tw) / 2 - x1;
+                int cy = startY + lineIdx * lineH;
+                epd.setCursor(cx, cy);
+                epd.print(line);
+                lineIdx++;
+                start = i + 1;
+            }
+        }
     } while (epd.nextPage());
     Serial.printf("[Display] Message: %s\n", msg);
 }

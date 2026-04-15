@@ -48,6 +48,8 @@ uint32_t g_lastAudioSampleRate = AUDIO_SAMPLE_RATE;
 
 // ─── Idle state helpers ───
 static unsigned long g_lastIdleSwap = 0;
+static int g_consecutiveIdlePolls = 0;
+static const int IDLE_DEBOUNCE_COUNT = 2; // require N consecutive idle polls before transitioning
 
 // ─── Vinyl API-call protection ───
 unsigned long g_lastNoMatchTime = 0;
@@ -139,23 +141,36 @@ void setup() {
         return;
     }
 
-    // ── WiFi ──
-    WifiConfig wifiCfg;
-    if (!sdReadWifiConfig(wifiCfg)) {
-        Serial.println("[BOOT] No WiFi config on SD");
-        displayInit();
-        displayShowMessage("No WiFi config\nPut config.json on SD");
-        g_state = STATE_ERROR;
-        return;
-    }
-
     // ── Display ──
     displayInit();
-    displayShowMessage("Connecting...");
 
-    if (!wifiConnect(wifiCfg)) {
-        displayShowMessage("WiFi Failed\nCheck config.json");
-        g_state = STATE_ERROR;
+    // ── WiFi ──
+    WifiConfig wifiCfg;
+    bool hasConfig = sdReadWifiConfig(wifiCfg);
+    bool wifiOk = false;
+    if (hasConfig) {
+        displayShowMessage("Connecting...");
+        wifiOk = wifiConnect(wifiCfg);
+    }
+
+    if (!wifiOk) {
+        // No credentials on SD, or connection failed → start setup AP
+        const char* AP_NAME = "NowPlaying-Setup";
+        Serial.println("[BOOT] Entering setup mode (captive portal)");
+        if (!hasConfig) {
+            Serial.println("[BOOT] No WiFi config on SD");
+            displayShowMessage("Setup Mode\nJoin Wi-Fi:\nNowPlaying-Setup\nthen visit\n192.168.4.1");
+        } else {
+            Serial.println("[BOOT] WiFi connection failed");
+            displayShowMessage("Wi-Fi Failed\nJoin Wi-Fi:\nNowPlaying-Setup\nto reconfigure\n192.168.4.1");
+        }
+        if (!wifiStartAP(AP_NAME)) {
+            displayShowMessage("AP start failed");
+            g_state = STATE_ERROR;
+            return;
+        }
+        captivePortalInit();
+        g_state = STATE_SETUP;
         return;
     }
 
@@ -196,7 +211,7 @@ void setup() {
     g_state = STATE_IDLE;
     digitalWrite(LED_GREEN, HIGH);
     Serial.println("[BOOT] Ready — entering main loop");
-    displayShowMessage("Ready\nvinyl.local");
+    displayShowMessage("Ready\nnowplaying.local");
     delay(3000);
 }
 
@@ -204,6 +219,11 @@ void setup() {
 void loop() {
     if (g_state == STATE_ERROR) {
         delay(10000);
+        return;
+    }
+    if (g_state == STATE_SETUP) {
+        captivePortalLoop();
+        delay(10);
         return;
     }
 
@@ -333,7 +353,13 @@ void loop() {
     }
 
     if (!playing) {
+        g_consecutiveIdlePolls++;
         if (g_state != STATE_IDLE) {
+            if (g_consecutiveIdlePolls < IDLE_DEBOUNCE_COUNT) {
+                activityLogf("Sonos idle (%d/%d) — waiting to confirm",
+                             g_consecutiveIdlePolls, IDLE_DEBOUNCE_COUNT);
+                return; // don't transition yet, could be a track change
+            }
             activityLog("Sonos stopped → idle");
             g_state = STATE_IDLE;
             g_currentArtist = "";
@@ -350,6 +376,9 @@ void loop() {
         handleIdle();
         return;
     }
+
+    // Sonos is playing — reset idle debounce counter
+    g_consecutiveIdlePolls = 0;
 
     // Sonos is playing — get track info
     handlePlaying();

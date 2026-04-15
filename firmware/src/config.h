@@ -90,7 +90,8 @@ enum AppState {
     STATE_IDLE,
     STATE_DIGITAL,
     STATE_VINYL,
-    STATE_ERROR
+    STATE_ERROR,
+    STATE_SETUP   // captive-portal WiFi provisioning mode
 };
 
 // ─── Settings (stored in /settings.json on SD) ───
@@ -105,7 +106,8 @@ struct Settings {
     uint32_t idle_gallery_ms;
     // Display
     bool show_track_info;
-    uint8_t bg_mode;  // 0 = always solid, 1 = always blur, 2 = auto (default)
+    uint8_t bg_mode;   // 0 = always solid, 1 = always blur, 2 = auto (default)
+    uint8_t bg_style;  // 0 = darken background, 1 = wash out (lighten)
 };
 
 // ─── WiFi Config (stored in /config.json on SD) ───

@@ -6,7 +6,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vinyl Display</title>
+<title>Now Playing</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -23,7 +23,7 @@ h2{font-size:1.1rem;margin:16px 0 8px;color:#ccc}
 .status-label{font-size:.75rem;color:#888;text-transform:uppercase;letter-spacing:.05em}
 .status-value{font-size:1.1rem;margin-top:2px}
 label{display:block;font-size:.85rem;color:#aaa;margin-top:12px}
-input[type=text],input[type=number],select{width:100%;padding:8px 10px;margin-top:4px;
+input[type=text],input[type=password],input[type=number],select{width:100%;padding:8px 10px;margin-top:4px;
      background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#eee;font-size:.9rem}
 input:focus,select:focus{outline:none;border-color:#666}
 button{padding:10px 20px;background:#2a6;border:none;border-radius:6px;color:#fff;
@@ -49,7 +49,7 @@ button.danger:active{background:#722}
 </style>
 </head>
 <body>
-<h1>&#127926; Vinyl Display</h1>
+<h1>&#127926; Now Playing</h1>
 
 <div class="tabs">
   <div class="tab active" onclick="showTab('status')">Now Playing</div>
@@ -86,6 +86,20 @@ button.danger:active{background:#722}
 
 <!-- SETTINGS -->
 <div id="settings" class="panel">
+  <h2>Wi-Fi</h2>
+  <label>Network
+    <div style="display:flex;gap:8px;margin-top:4px;align-items:stretch">
+      <select id="fWifiSsid" style="flex:1;margin-top:0">
+        <option value="">-- current network --</option>
+      </select>
+      <button type="button" id="wifiScanBtn" onclick="scanWifi()" style="margin:0;padding:8px 14px;font-size:.85rem;white-space:nowrap">Scan</button>
+    </div>
+  </label>
+  <div id="wifiScanMsg" style="font-size:.75rem;color:#888;margin-top:4px"></div>
+  <label>Password<input type="password" id="fWifiPwd" placeholder="(leave blank to keep current)"></label>
+  <button onclick="saveWifi()">Update Wi-Fi</button>
+  <div id="wifiMsg" class="msg"></div>
+
   <h2>Sonos</h2>
   <label>Speaker
     <div style="display:flex;gap:8px;margin-top:4px;align-items:stretch">
@@ -136,6 +150,12 @@ button.danger:active{background:#722}
       <option value="2">Auto (smart detection)</option>
       <option value="1">Always blurred</option>
       <option value="0">Always solid colour</option>
+    </select>
+  </label>
+  <label style="margin-top:8px">Background style
+    <select id="fBgStyle">
+      <option value="0">Darken</option>
+      <option value="1">Wash out (lighten)</option>
     </select>
   </label>
 
@@ -203,7 +223,7 @@ async function loadStatus() {
     const d = await r.json();
     const state = d.state_name || STATES[d.state] || 'Unknown';
     const hasTrack = d.artist && d.title;
-    const labels = {IDLE:'Idle',VINYL:'Listening to Vinyl',DIGITAL:'Playing Digital',BOOT:'Starting up',ERROR:'Error'};
+    const labels = {IDLE:'Idle',VINYL:'Listening to Vinyl',DIGITAL:'Streaming',BOOT:'Starting up',ERROR:'Error'};
     document.getElementById('sStateLabel').textContent = labels[state] || state;
     document.getElementById('sTrack').textContent = hasTrack ? d.artist+' — '+d.title : 'Nothing playing';
     document.getElementById('sAlbum').textContent = d.album || '';
@@ -273,8 +293,59 @@ bindSlider('fVinylRecheck','fVinylRecheckVal',' min');
 bindSlider('fCooldown','fCooldownVal',' min');
 bindSlider('fIdleGallery','fIdleGalleryVal',' min');
 
+async function scanWifi() {
+  const btn = document.getElementById('wifiScanBtn');
+  const msg = document.getElementById('wifiScanMsg');
+  const sel = document.getElementById('fWifiSsid');
+  btn.disabled = true;
+  msg.textContent = 'Scanning\u2026';
+  try {
+    const r = await fetch('/api/wifi/scan');
+    const networks = await r.json();
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">-- select a network --</option>';
+    networks.forEach(n => {
+      const opt = document.createElement('option');
+      opt.value = n.ssid;
+      opt.textContent = n.ssid + (n.open ? ' (open)' : '');
+      sel.appendChild(opt);
+    });
+    if (prev) sel.value = prev;
+    msg.textContent = networks.length ? networks.length + ' network(s) found' : 'No networks found';
+  } catch(e) { msg.textContent = 'Scan failed: ' + e.message; }
+  btn.disabled = false;
+}
+
+async function saveWifi() {
+  const ssid = document.getElementById('fWifiSsid').value;
+  const pwd = document.getElementById('fWifiPwd').value;
+  const el = document.getElementById('wifiMsg');
+  if (!ssid) { el.className='msg err'; el.textContent='Select a network'; setTimeout(()=>el.style.display='none',3000); return; }
+  if (!pwd) { el.className='msg err'; el.textContent='Enter a password'; setTimeout(()=>el.style.display='none',3000); return; }
+  try {
+    const r = await fetch('/api/wifi', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ssid:ssid,password:pwd})});
+    el.className = r.ok ? 'msg ok' : 'msg err';
+    el.textContent = r.ok ? 'Saved! Rebooting\u2026' : 'Error saving';
+  } catch(e) { el.className='msg ok'; el.textContent='Saved! Rebooting\u2026'; }
+}
+
 async function loadSettings() {
   try {
+    // Load WiFi SSID into dropdown
+    try {
+      const wr = await fetch('/api/wifi');
+      const wd = await wr.json();
+      const wsel = document.getElementById('fWifiSsid');
+      wsel.innerHTML = '<option value="">-- select a network --</option>';
+      if (wd.ssid) {
+        const opt = document.createElement('option');
+        opt.value = wd.ssid;
+        opt.textContent = wd.ssid;
+        wsel.appendChild(opt);
+        wsel.value = wd.ssid;
+        document.getElementById('wifiScanMsg').textContent = 'Connected \u2014 click Scan to see other networks';
+      }
+    } catch(e) {}
     const r = await fetch('/api/settings');
     const d = await r.json();
     // Populate the speaker dropdown with the currently saved name
@@ -304,6 +375,7 @@ async function loadSettings() {
     ig.value = Math.round((d.idle_gallery_ms||300000)/60000); ig.oninput();
     document.getElementById('fShowTrackInfo').checked = !!d.show_track_info;
     document.getElementById('fBgMode').value = (d.bg_mode !== undefined) ? d.bg_mode : 2;
+    document.getElementById('fBgStyle').value = (d.bg_style !== undefined) ? d.bg_style : 0;
   } catch(e) { console.error(e); }
 }
 
@@ -349,7 +421,8 @@ async function saveSettings() {
     no_match_cooldown_ms: parseInt(document.getElementById('fCooldown').value)*60000,
     idle_gallery_ms: parseInt(document.getElementById('fIdleGallery').value)*60000,
     show_track_info: document.getElementById('fShowTrackInfo').checked,
-    bg_mode: parseInt(document.getElementById('fBgMode').value)
+    bg_mode: parseInt(document.getElementById('fBgMode').value),
+    bg_style: parseInt(document.getElementById('fBgStyle').value)
   };
   const shz = document.getElementById('fShazamKey').value;
   if (shz) body.shazam_api_key = shz;
