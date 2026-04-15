@@ -119,6 +119,164 @@ static float edgeVariance(const uint8_t* src, int w, int h) {
 }
 
 // ─── Render text into RGB888 buffer using Adafruit GFX ───
+// Render a single line of text centred in a horizontal band.
+// 2× supersampled for anti-aliased output on the 6-colour e-ink display.
+static void renderTextBand(uint8_t* rgb, int canvasW, int canvasH,
+                           const char* text,
+                           const GFXfont* font, int initScale, int minScale,
+                           int textAreaY, int textAreaH,
+                           uint8_t bgR, uint8_t bgG, uint8_t bgB) {
+    int ssW = canvasW * 2;
+    int ssH = textAreaH * 2;
+    GFXcanvas1 canvas(ssW, ssH);
+    canvas.fillScreen(0);
+    canvas.setTextColor(1);
+    canvas.setTextWrap(false);
+
+    canvas.setFont(font);
+    canvas.setTextSize(initScale);
+    int16_t x1, y1; uint16_t tw, th;
+
+    String str(text);
+    int scale = initScale;
+    canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    while (tw > (uint16_t)(ssW - 60) && scale > minScale) {
+        scale--;
+        canvas.setTextSize(scale);
+        canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    }
+    while (tw > (uint16_t)(ssW - 60) && str.length() > 4) {
+        str = str.substring(0, str.length() - 2);
+        String test = str + "...";
+        canvas.getTextBounds(test.c_str(), 0, 0, &x1, &y1, &tw, &th);
+        if (tw <= (uint16_t)(ssW - 60)) { str = test; break; }
+    }
+
+    canvas.setFont(font);
+    canvas.setTextSize(scale);
+    canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    int textX = (ssW - tw) / 2 - x1;
+    int textY = (ssH - th) / 2 - y1;
+    canvas.setCursor(textX, textY);
+    canvas.print(str);
+
+    // Sample actual background pixels in the band to pick text colour
+    long rSum = 0, gSum = 0, bSum = 0;
+    int samples = 0;
+    int step = 4; // sample every 4th pixel for speed
+    for (int y = 0; y < textAreaH; y += step) {
+        for (int x = 0; x < canvasW; x += step) {
+            int di = ((textAreaY + y) * canvasW + x) * 3;
+            rSum += rgb[di]; gSum += rgb[di + 1]; bSum += rgb[di + 2];
+            samples++;
+        }
+    }
+    int avgR = rSum / samples, avgG = gSum / samples, avgB = bSum / samples;
+    int brightness = (avgR * 299 + avgG * 587 + avgB * 114) / 1000;
+    uint8_t textR, textG, textB;
+    if (brightness < 128) {
+        textR = 255; textG = 255; textB = 255;
+    } else {
+        textR = 0; textG = 0; textB = 0;
+    }
+
+    for (int y = 0; y < textAreaH; y++) {
+        for (int x = 0; x < canvasW; x++) {
+            int count = canvas.getPixel(x * 2,     y * 2)
+                      + canvas.getPixel(x * 2 + 1, y * 2)
+                      + canvas.getPixel(x * 2,     y * 2 + 1)
+                      + canvas.getPixel(x * 2 + 1, y * 2 + 1);
+            if (count == 0) continue;
+            int di = ((textAreaY + y) * canvasW + x) * 3;
+            if (count == 4) {
+                rgb[di]     = textR;
+                rgb[di + 1] = textG;
+                rgb[di + 2] = textB;
+            } else {
+                float alpha = count * 0.25f;
+                rgb[di]     = (uint8_t)(rgb[di]     + (textR - rgb[di])     * alpha);
+                rgb[di + 1] = (uint8_t)(rgb[di + 1] + (textG - rgb[di + 1]) * alpha);
+                rgb[di + 2] = (uint8_t)(rgb[di + 2] + (textB - rgb[di + 2]) * alpha);
+            }
+        }
+    }
+}
+
+// Render text directly onto the packed (4-bit palette index) buffer,
+// bypassing dithering for crisp text. Uses 2× supersampling for anti-aliasing
+// mapped to palette indices: full coverage → text index, partial → threshold.
+static void renderTextBandPacked(uint8_t* packed, const uint8_t* rgb,
+                                 int canvasW, int canvasH,
+                                 const char* text,
+                                 const GFXfont* font, int initScale, int minScale,
+                                 int textAreaY, int textAreaH) {
+    int ssW = canvasW * 2;
+    int ssH = textAreaH * 2;
+    GFXcanvas1 canvas(ssW, ssH);
+    canvas.fillScreen(0);
+    canvas.setTextColor(1);
+    canvas.setTextWrap(false);
+
+    canvas.setFont(font);
+    canvas.setTextSize(initScale);
+    int16_t x1, y1; uint16_t tw, th;
+
+    String str(text);
+    int scale = initScale;
+    canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    while (tw > (uint16_t)(ssW - 60) && scale > minScale) {
+        scale--;
+        canvas.setTextSize(scale);
+        canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    }
+    while (tw > (uint16_t)(ssW - 60) && str.length() > 4) {
+        str = str.substring(0, str.length() - 2);
+        String test = str + "...";
+        canvas.getTextBounds(test.c_str(), 0, 0, &x1, &y1, &tw, &th);
+        if (tw <= (uint16_t)(ssW - 60)) { str = test; break; }
+    }
+
+    canvas.setFont(font);
+    canvas.setTextSize(scale);
+    canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
+    int textX = (ssW - tw) / 2 - x1;
+    int textY = (ssH - th) / 2 - y1;
+    canvas.setCursor(textX, textY);
+    canvas.print(str);
+
+    // Sample actual background pixels in the band to pick text colour
+    long rSum = 0, gSum = 0, bSum = 0;
+    int samples = 0;
+    int step = 4;
+    for (int y = 0; y < textAreaH; y += step) {
+        for (int x = 0; x < canvasW; x += step) {
+            int di = ((textAreaY + y) * canvasW + x) * 3;
+            rSum += rgb[di]; gSum += rgb[di + 1]; bSum += rgb[di + 2];
+            samples++;
+        }
+    }
+    int avgR = rSum / samples, avgG = gSum / samples, avgB = bSum / samples;
+    int brightness = (avgR * 299 + avgG * 587 + avgB * 114) / 1000;
+    uint8_t textIdx = (brightness < 128) ? 1 : 0; // White on dark, Black on light
+
+    for (int y = 0; y < textAreaH; y++) {
+        for (int x = 0; x < canvasW; x++) {
+            int count = canvas.getPixel(x * 2,     y * 2)
+                      + canvas.getPixel(x * 2 + 1, y * 2)
+                      + canvas.getPixel(x * 2,     y * 2 + 1)
+                      + canvas.getPixel(x * 2 + 1, y * 2 + 1);
+            if (count < 2) continue; // skip low-coverage pixels (≤25%)
+            int pi = (textAreaY + y) * canvasW + x;
+            int byteIdx = pi / 2;
+            if (pi & 1) {
+                packed[byteIdx] = (packed[byteIdx] & 0xF0) | (textIdx & 0x0F);
+            } else {
+                packed[byteIdx] = (packed[byteIdx] & 0x0F) | (textIdx << 4);
+            }
+        }
+    }
+}
+
 // Uses 2× supersampling for anti-aliased text: renders at double resolution
 // on a 1-bit canvas, then downsamples with a 2×2 box filter to get smooth
 // 4-level alpha blending. setTextSize() scales the font up so it fills
@@ -477,9 +635,11 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
 
     // 3. Scale to display size
     bool showText = (artist && artist[0] && album && album[0]);
-    // With text: artwork in top portion, text below
+    // With text: artist band (top) | artwork (centre) | album band (bottom)
     // Without text: artwork fills entire canvas
-    int artAreaH = showText ? EPD_WIDTH : EPD_HEIGHT; // 480 for text mode (square), 800 for full
+    const int ARTIST_BAND_H = 100;
+    const int ALBUM_BAND_H  = 80;
+    int artAreaH = showText ? (EPD_HEIGHT - ARTIST_BAND_H - ALBUM_BAND_H) : EPD_HEIGHT;
     int artAreaW = EPD_WIDTH; // always 480
 
     uint8_t* scaledBuf = (uint8_t*)heap_caps_malloc((size_t)EPD_WIDTH * EPD_HEIGHT * 3, MALLOC_CAP_SPIRAM);
@@ -513,26 +673,7 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         // Blurred background: always fill entire canvas
         fillBlurredBackground(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
                               g_decodeBuf, imgW, imgH, EPD_HEIGHT);
-        // Frosted overlay on text area: blend toward white/black for legibility
-        if (showText) {
-            int brightness = (bgR * 299 + bgG * 587 + bgB * 114) / 1000;
-            // On dark backgrounds, lighten; on light backgrounds, darken
-            uint8_t tgtR, tgtG, tgtB;
-            float blend;
-            if (brightness < 128) {
-                tgtR = tgtG = tgtB = 0; blend = 0.55f; // darken 55%
-            } else {
-                tgtR = tgtG = tgtB = 255; blend = 0.55f; // lighten 55%
-            }
-            for (int y = artAreaH; y < EPD_HEIGHT; y++) {
-                for (int x = 0; x < EPD_WIDTH; x++) {
-                    int di = (y * EPD_WIDTH + x) * 3;
-                    scaledBuf[di]     = (uint8_t)(scaledBuf[di]     + (tgtR - scaledBuf[di])     * blend);
-                    scaledBuf[di + 1] = (uint8_t)(scaledBuf[di + 1] + (tgtG - scaledBuf[di + 1]) * blend);
-                    scaledBuf[di + 2] = (uint8_t)(scaledBuf[di + 2] + (tgtB - scaledBuf[di + 2]) * blend);
-                }
-            }
-        }
+
     } else {
         // Solid colour fill
         for (int i = 0; i < EPD_WIDTH * EPD_HEIGHT; i++) {
@@ -542,12 +683,10 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         }
     }
 
-    // Scale artwork to fit art area.
-    // Text mode: artwork pins to top edge, no shadow.
-    // Full mode: centred with top+bottom margin for shadow.
-    const int shadowMarginV = (useBlur && !showText) ? 22 : 0;
+    // Scale artwork to fit art area, centred with shadow margin when blur is active.
+    const int shadowMarginV = useBlur ? 22 : 0;
     int fitW = artAreaW;
-    int fitH = artAreaH - (showText ? 0 : shadowMarginV * 2);
+    int fitH = artAreaH - shadowMarginV * 2;
     float scaleX = (float)fitW / imgW;
     float scaleY = (float)fitH / imgH;
     float scale  = (scaleX < scaleY) ? scaleX : scaleY;
@@ -557,20 +696,20 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     int offsetX = (artAreaW - scaledW) / 2;
     int offsetY;
     if (showText) {
-        offsetY = 0; // pin to top edge
+        offsetY = ARTIST_BAND_H + (artAreaH - scaledH) / 2; // centred in middle zone
     } else {
-        offsetY = (EPD_HEIGHT - scaledH) / 2; // centred
+        offsetY = (EPD_HEIGHT - scaledH) / 2; // centred on full canvas
     }
 
-    // Drop shadow — only in full mode (no text), with blur background.
-    if (useBlur && !showText) {
-        const int shadowPad = 20;
+    // Drop shadow — when blur background is active.
+    if (useBlur) {
+        const int shadowPad = 12;
         // Top shadow band
         for (int dy = 1; dy <= shadowPad; dy++) {
             int py = offsetY - dy;
             if (py < 0) continue;
             float t = (float)dy / shadowPad;
-            float alpha = 0.75f * (1.0f - t) * (1.0f - t);
+            float alpha = 0.35f * (1.0f - t) * (1.0f - t);
             for (int x = 0; x < scaledW; x++) {
                 int px = x + offsetX;
                 if (px < 0 || px >= EPD_WIDTH) continue;
@@ -585,7 +724,7 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
             int py = offsetY + scaledH - 1 + dy;
             if (py >= EPD_HEIGHT) continue;
             float t = (float)dy / shadowPad;
-            float alpha = 0.75f * (1.0f - t) * (1.0f - t);
+            float alpha = 0.35f * (1.0f - t) * (1.0f - t);
             for (int x = 0; x < scaledW; x++) {
                 int px = x + offsetX;
                 if (px < 0 || px >= EPD_WIDTH) continue;
@@ -612,14 +751,6 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     heap_caps_free(g_decodeBuf);
     g_decodeBuf = nullptr;
 
-    // Render text overlay if requested
-    if (showText) {
-        int textAreaY = artAreaH; // starts right below artwork area
-        int textAreaH = EPD_HEIGHT - artAreaH; // remaining 320px
-        renderText(scaledBuf, EPD_WIDTH, EPD_HEIGHT, artist, album,
-                   textAreaY, textAreaH, bgR, bgG, bgB);
-    }
-
     // 3.5. Pre-dither enhancement (sharpen + contrast + gamma)
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
 
@@ -633,6 +764,16 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     }
 
     ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT);
+
+    // Render text directly onto packed buffer (after dithering for crisp text)
+    if (showText) {
+        renderTextBandPacked(packedBuf, scaledBuf, EPD_WIDTH, EPD_HEIGHT, artist,
+                             &FreeSansBold24pt7b, 2, 1,
+                             0, ARTIST_BAND_H);
+        renderTextBandPacked(packedBuf, scaledBuf, EPD_WIDTH, EPD_HEIGHT, album,
+                             &FreeSans18pt7b, 2, 1,
+                             ARTIST_BAND_H + artAreaH, ALBUM_BAND_H);
+    }
     heap_caps_free(scaledBuf);
 
     // 5. Push to display

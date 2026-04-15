@@ -54,9 +54,9 @@ bool sonosGetTrackInfo(const char* sonosIp, SonosTrackInfo& info) {
     if (metaRaw.isEmpty()) return true; // valid but no track
 
     String meta = decodeXmlEntities(metaRaw);
-    info.title  = extractTag(meta, "dc:title");
-    info.artist = extractTag(meta, "dc:creator");
-    info.album  = extractTag(meta, "upnp:album");
+    info.title  = decodeXmlEntities(extractTag(meta, "dc:title"));
+    info.artist = decodeXmlEntities(extractTag(meta, "dc:creator"));
+    info.album  = decodeXmlEntities(extractTag(meta, "upnp:album"));
 
     String artPath = decodeXmlEntities(extractTag(meta, "upnp:albumArtURI"));
     if (artPath.length() > 0) {
