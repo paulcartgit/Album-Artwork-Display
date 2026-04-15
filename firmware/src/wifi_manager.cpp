@@ -2,6 +2,8 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 
+static bool s_apMode = false;
+
 bool wifiConnect(const WifiConfig& cfg) {
     WiFi.mode(WIFI_STA);
     WiFi.begin(cfg.ssid, cfg.password);
@@ -38,4 +40,30 @@ bool wifiIsConnected() {
 
 String wifiGetIP() {
     return WiFi.localIP().toString();
+}
+
+bool wifiStartAP(const char* apName) {
+    // WIFI_AP_STA allows scanning for nearby networks while the AP is active
+    WiFi.mode(WIFI_AP_STA);
+    if (!WiFi.softAP(apName)) {
+        Serial.println("[WiFi] AP start failed");
+        return false;
+    }
+    s_apMode = true;
+    Serial.printf("[WiFi] AP started — SSID: %s  IP: %s\n",
+                  apName, WiFi.softAPIP().toString().c_str());
+    return true;
+}
+
+void wifiStopAP() {
+    WiFi.softAPdisconnect(true);
+    s_apMode = false;
+}
+
+bool wifiIsAPMode() {
+    return s_apMode;
+}
+
+String wifiGetAPIP() {
+    return WiFi.softAPIP().toString();
 }

@@ -141,23 +141,35 @@ void setup() {
         return;
     }
 
-    // ── WiFi ──
-    WifiConfig wifiCfg;
-    if (!sdReadWifiConfig(wifiCfg)) {
-        Serial.println("[BOOT] No WiFi config on SD");
-        displayInit();
-        displayShowMessage("No WiFi config\nPut config.json on SD");
-        g_state = STATE_ERROR;
-        return;
-    }
-
     // ── Display ──
     displayInit();
-    displayShowMessage("Connecting...");
 
-    if (!wifiConnect(wifiCfg)) {
-        displayShowMessage("WiFi Failed\nCheck config.json");
-        g_state = STATE_ERROR;
+    // ── WiFi ──
+    WifiConfig wifiCfg;
+    bool hasConfig = sdReadWifiConfig(wifiCfg);
+    bool wifiOk = false;
+    if (hasConfig) {
+        displayShowMessage("Connecting...");
+        wifiOk = wifiConnect(wifiCfg);
+    }
+
+    if (!wifiOk) {
+        // No credentials on SD, or connection failed → start setup AP
+        const char* AP_NAME = "VinylDisplay-Setup";
+        Serial.println("[BOOT] Entering setup mode (captive portal)");
+        if (!hasConfig) {
+            Serial.println("[BOOT] No WiFi config on SD");
+        } else {
+            Serial.println("[BOOT] WiFi connection failed");
+        }
+        displayShowMessage("Setup Mode\nJoin Wi-Fi:\nVinylDisplay-Setup\nthen visit\n192.168.4.1");
+        if (!wifiStartAP(AP_NAME)) {
+            displayShowMessage("AP start failed");
+            g_state = STATE_ERROR;
+            return;
+        }
+        captivePortalInit();
+        g_state = STATE_SETUP;
         return;
     }
 
@@ -206,6 +218,11 @@ void setup() {
 void loop() {
     if (g_state == STATE_ERROR) {
         delay(10000);
+        return;
+    }
+    if (g_state == STATE_SETUP) {
+        captivePortalLoop();
+        delay(10);
         return;
     }
 
