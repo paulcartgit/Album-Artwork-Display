@@ -128,6 +128,8 @@ static inline int triWave(int v, int period) {
 constexpr int NOISE_X_MULTIPLIER = 13;
 constexpr int NOISE_Y_MULTIPLIER = 7;
 constexpr int NOISE_MASK = 0x1F;
+constexpr int NOISE_BIAS_OFFSET = 16;
+constexpr uint32_t BASE_NEUTRAL_WEIGHT = 16u;
 
 static void extractKeyColors(const uint8_t* src, int w, int h, uint8_t colors[3][3]) {
     uint8_t edgeR, edgeG, edgeB;
@@ -162,7 +164,7 @@ static void extractKeyColors(const uint8_t* src, int w, int h, uint8_t colors[3]
             int sat = (mx > 0) ? ((mx - mn) * 255) / mx : 0;
             // Base weight keeps neutrals represented; squared saturation strongly
             // favors vivid tones so the pattern uses the artwork's key colors.
-            uint32_t weight = 16u + (uint32_t)((sat * sat) / 255);
+            uint32_t weight = BASE_NEUTRAL_WEIGHT + (uint32_t)((sat * sat) / 255);
 
             // RGB332 quantization: top 3 bits red, top 3 bits green, top 2 bits blue.
             int bin = (r & 0xE0) | ((g & 0xE0) >> 3) | (b >> 6);
@@ -691,14 +693,15 @@ static void fillPatternedBackground(uint8_t* canvas, int cW, int cH,
         for (int x = 0; x < cW; x++) {
             int band = 0;
             if (style == 0) {
-                band = ((x + (y / 2)) / 28) % 3;
+                band = ((x + (y / STRIPE_SLOPE_DIV)) / STRIPE_WIDTH) % PATTERN_COLOR_COUNT;
             } else if (style == 1) {
-                int wave = triWave(x + y * 3, 96) + triWave(x * 2 - y, 72);
-                band = (wave / 18) % 3;
+                int wave = triWave(x * WAVE_A_X_SCALE + y * WAVE_A_Y_SCALE, WAVE_A_PERIOD)
+                         + triWave(x * WAVE_B_X_SCALE - y * WAVE_B_Y_SCALE, WAVE_B_PERIOD);
+                band = (wave / WAVE_BAND_DIV) % PATTERN_COLOR_COUNT;
             } else {
                 int dx = abs(x - cW / 2);
                 int dy = abs(y - fillH / 2);
-                band = ((dx + dy) / 24) % 3;
+                band = ((dx + dy) / RING_SPACING) % PATTERN_COLOR_COUNT;
             }
 
             int di = (y * cW + x) * 3;
@@ -708,7 +711,7 @@ static void fillPatternedBackground(uint8_t* canvas, int cW, int cH,
 
             // Subtle paper-like texture to avoid flat digital bands
             int noise = ((x * NOISE_X_MULTIPLIER) ^ (y * NOISE_Y_MULTIPLIER)) & NOISE_MASK;
-            int bias = noise - 16; // -16..15
+            int bias = noise - NOISE_BIAS_OFFSET; // -16..15
             canvas[di]     = constrain((int)r + bias, 0, 255);
             canvas[di + 1] = constrain((int)g + bias, 0, 255);
             canvas[di + 2] = constrain((int)b + bias, 0, 255);
@@ -1076,3 +1079,14 @@ void pipelineShowTestPattern() {
     heap_caps_free(packedBuf);
     Serial.println("[Test] Color test pattern displayed");
 }
+    constexpr int PATTERN_COLOR_COUNT = 3;
+    constexpr int STRIPE_SLOPE_DIV = 2;
+    constexpr int STRIPE_WIDTH = 28;
+    constexpr int WAVE_A_X_SCALE = 1;
+    constexpr int WAVE_A_Y_SCALE = 3;
+    constexpr int WAVE_A_PERIOD = 96;
+    constexpr int WAVE_B_X_SCALE = 2;
+    constexpr int WAVE_B_Y_SCALE = 1;
+    constexpr int WAVE_B_PERIOD = 72;
+    constexpr int WAVE_BAND_DIV = 18;
+    constexpr int RING_SPACING = 24;
