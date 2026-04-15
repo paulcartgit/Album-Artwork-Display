@@ -396,9 +396,17 @@ async function loadHistory() {
         + '<div title="'+(pin?'Unpin':'Pin')+'" style="position:absolute;top:6px;left:6px;width:28px;height:28px;border-radius:50%;'
         + 'background:'+(pin?'#c8860a':'#333')+';display:flex;align-items:center;justify-content:center;'
         + 'font-size:.8rem;border:2px solid '+(pin?'#e6a020':'#555')+';cursor:pointer">'
-        + '&#128204;</div>';
+        + '&#128204;</div>'
+        + '<div title="Delete" class="del-btn" style="position:absolute;bottom:38px;right:6px;width:28px;height:28px;border-radius:50%;'
+        + 'background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;'
+        + 'font-size:.8rem;border:2px solid #666;cursor:pointer;color:#d66">'
+        + '&#128465;</div>';
+      div.onmouseenter = () => div.querySelector('.del-btn').style.display='flex';
+      div.onmouseleave = () => div.querySelector('.del-btn').style.display='none';
+      const pinBtn = div.querySelector('[title^=Pin],[title=Unpin]');
       div.onclick = () => toggleHistory(h.f, !on);
-      div.lastElementChild.onclick = (e) => { e.stopPropagation(); pinHistory(h.f, !pin); };
+      div.querySelector('.del-btn').onclick = (e) => { e.stopPropagation(); deleteHistory(h.f, h.a, h.al||h.t); };
+      pinBtn.onclick = (e) => { e.stopPropagation(); pinHistory(h.f, !pin); };
       return div;
     }
     if (pinned.length) { pinnedSection.style.display=''; pinned.forEach(h => pinnedGrid.appendChild(buildCard(h))); }
@@ -416,6 +424,12 @@ async function toggleHistory(f, on) {
 async function pinHistory(f, pin) {
   await fetch('/api/history/pin', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:'f='+encodeURIComponent(f)+'&pin='+(pin?'1':'0')});
+  loadHistory();
+}
+async function deleteHistory(f, artist, album) {
+  if (!confirm('Delete "'+artist+' \u2014 '+album+'" from history?')) return;
+  await fetch('/api/history/delete', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'f='+encodeURIComponent(f)});
   loadHistory();
 }
 

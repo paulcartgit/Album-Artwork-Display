@@ -14,4 +14,5 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
 String sdHistoryList();                           // JSON array for web UI
 bool sdHistorySetEnabled(const char* file, bool on);
 bool sdHistorySetPinned(const char* file, bool pinned);
+bool sdHistoryDelete(const char* file);            // remove entry + JPEG from SD
 String sdHistoryRandomFile();                     // shuffle-bag enabled entry path

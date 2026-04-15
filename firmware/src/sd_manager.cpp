@@ -251,6 +251,28 @@ bool sdHistorySetPinned(const char* file, bool pinned) {
     return false;
 }
 
+bool sdHistoryDelete(const char* file) {
+    if (!file || !file[0]) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    JsonArray arr = doc.as<JsonArray>();
+    int found = -1;
+    int i = 0;
+    for (JsonObject obj : arr) {
+        if (strcmp(obj["f"] | "", file) == 0) { found = i; break; }
+        i++;
+    }
+    if (found < 0) return false;
+    // Delete JPEG file
+    String fpath = String("/history/") + file;
+    SD_MMC.remove(fpath);
+    arr.remove(found);
+    writeIndex(doc);
+    g_shuffleDirty = true;
+    Serial.printf("[History] Deleted: %s\n", file);
+    return true;
+}
+
 // ─── Shuffle-bag state ───
 // Implements iPod-shuffle-style randomness: cycle through all enabled items in
 // a random order, then re-shuffle for the next cycle.  Avoids the clustering

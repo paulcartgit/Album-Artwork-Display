@@ -214,6 +214,24 @@ void webServerInit() {
         }
     });
 
+    // ─── Delete history entry ───
+    server.on("/api/history/delete", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!req->hasParam("f", true)) {
+            req->send(400, "application/json", "{\"error\":\"missing f\"}");
+            return;
+        }
+        String file = req->getParam("f", true)->value();
+        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+            req->send(400, "application/json", "{\"error\":\"invalid name\"}");
+            return;
+        }
+        if (sdHistoryDelete(file.c_str())) {
+            req->send(200, "application/json", "{\"ok\":true}");
+        } else {
+            req->send(404, "application/json", "{\"error\":\"not found\"}");
+        }
+    });
+
     // ─── List album art history ───
     server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", sdHistoryList());
