@@ -19,6 +19,8 @@ bool wifiConnect(const WifiConfig& cfg) {
 
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[WiFi] Connection failed");
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
         return false;
     }
 

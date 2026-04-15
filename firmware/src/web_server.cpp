@@ -28,6 +28,9 @@ void captivePortalInit() {
     // Redirect all DNS to the AP IP
     s_dns.start(DNS_PORT, "*", WiFi.softAPIP());
 
+    // Kick off an async WiFi scan immediately so results are ready when page loads
+    WiFi.scanNetworks(true);
+
     // Serve the setup page for any path (handles OS captive-portal probes too)
     s_setupServer.onNotFound([](AsyncWebServerRequest* req) {
         req->send_P(200, "text/html", CAPTIVE_PORTAL_HTML);
@@ -37,17 +40,49 @@ void captivePortalInit() {
         req->send_P(200, "text/html", CAPTIVE_PORTAL_HTML);
     });
 
-    // Wi-Fi scan endpoint
+    // Wi-Fi scan endpoint — serves cached async results, then kicks off next scan
     s_setupServer.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
-        int n = WiFi.scanNetworks(false, false);
+        int n = WiFi.scanComplete();
+        if (n == WIFI_SCAN_RUNNING) {
+            // Still scanning — tell client to retry shortly
+            req->send(202, "application/json", "[]");
+            return;
+        }
+        if (n == WIFI_SCAN_FAILED || n == 0) {
+            // No results — start a new scan and return empty
+            WiFi.scanDelete();
+            WiFi.scanNetworks(true);
+            req->send(200, "application/json", "[]");
+            return;
+        }
+        // Deduplicate by SSID — keep strongest signal for each
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
         for (int i = 0; i < n; i++) {
-            JsonObject obj = arr.add<JsonObject>();
-            obj["ssid"] = WiFi.SSID(i);
-            obj["rssi"] = WiFi.RSSI(i);
-            obj["open"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+            String ssid = WiFi.SSID(i);
+            if (ssid.isEmpty()) continue;
+            int rssi = WiFi.RSSI(i);
+            bool isOpen = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+            bool found = false;
+            for (JsonObject obj : arr) {
+                if (obj["ssid"].as<String>() == ssid) {
+                    if (rssi > obj["rssi"].as<int>()) {
+                        obj["rssi"] = rssi;
+                        obj["open"] = isOpen;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                JsonObject obj = arr.add<JsonObject>();
+                obj["ssid"] = ssid;
+                obj["rssi"] = rssi;
+                obj["open"] = isOpen;
+            }
         }
+        WiFi.scanDelete();
+        WiFi.scanNetworks(true); // start next scan for future requests
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);
@@ -241,6 +276,88 @@ void webServerInit() {
 
                 sdWriteSettings(g_settings);
                 req->send(200, "application/json", "{\"ok\":true}");
+            }
+        }
+    );
+
+    // ─── Scan WiFi networks ───
+    server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
+        int n = WiFi.scanNetworks(false, false);
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        for (int i = 0; i < n; i++) {
+            String ssid = WiFi.SSID(i);
+            if (ssid.isEmpty()) continue;
+            int rssi = WiFi.RSSI(i);
+            bool isOpen = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+            bool found = false;
+            for (JsonObject obj : arr) {
+                if (obj["ssid"].as<String>() == ssid) {
+                    if (rssi > obj["rssi"].as<int>()) {
+                        obj["rssi"] = rssi;
+                        obj["open"] = isOpen;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                JsonObject obj = arr.add<JsonObject>();
+                obj["ssid"] = ssid;
+                obj["rssi"] = rssi;
+                obj["open"] = isOpen;
+            }
+        }
+        String out;
+        serializeJson(doc, out);
+        req->send(200, "application/json", out);
+    });
+
+    // ─── Get current WiFi SSID ───
+    server.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest* req) {
+        WifiConfig cfg;
+        JsonDocument doc;
+        if (sdReadWifiConfig(cfg)) {
+            doc["ssid"] = cfg.ssid;
+        } else {
+            doc["ssid"] = "";
+        }
+        String out;
+        serializeJson(doc, out);
+        req->send(200, "application/json", out);
+    });
+
+    // ─── Update WiFi credentials ───
+    server.on("/api/wifi", HTTP_POST,
+        [](AsyncWebServerRequest* req) { /* handled in body callback */ },
+        nullptr,
+        [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
+            static String body;
+            if (index == 0) body = "";
+            body += String((char*)data, len);
+
+            if (index + len >= total) {
+                JsonDocument doc;
+                if (deserializeJson(doc, body)) {
+                    req->send(400, "application/json", "{\"error\":\"bad json\"}");
+                    return;
+                }
+                const char* ssid = doc["ssid"] | "";
+                const char* pwd  = doc["password"] | "";
+                if (!ssid || strlen(ssid) == 0) {
+                    req->send(400, "application/json", "{\"error\":\"ssid required\"}");
+                    return;
+                }
+                WifiConfig cfg;
+                strlcpy(cfg.ssid,     ssid, sizeof(cfg.ssid));
+                strlcpy(cfg.password, pwd,  sizeof(cfg.password));
+                if (!sdWriteWifiConfig(cfg)) {
+                    req->send(500, "application/json", "{\"error\":\"sd write failed\"}");
+                    return;
+                }
+                req->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+                delay(500);
+                ESP.restart();
             }
         }
     );

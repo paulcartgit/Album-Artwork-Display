@@ -155,14 +155,15 @@ void setup() {
 
     if (!wifiOk) {
         // No credentials on SD, or connection failed → start setup AP
-        const char* AP_NAME = "VinylDisplay-Setup";
+        const char* AP_NAME = "NowPlaying-Setup";
         Serial.println("[BOOT] Entering setup mode (captive portal)");
         if (!hasConfig) {
             Serial.println("[BOOT] No WiFi config on SD");
+            displayShowMessage("Setup Mode\nJoin Wi-Fi:\nNowPlaying-Setup\nthen visit\n192.168.4.1");
         } else {
             Serial.println("[BOOT] WiFi connection failed");
+            displayShowMessage("Wi-Fi Failed\nJoin Wi-Fi:\nNowPlaying-Setup\nto reconfigure\n192.168.4.1");
         }
-        displayShowMessage("Setup Mode\nJoin Wi-Fi:\nVinylDisplay-Setup\nthen visit\n192.168.4.1");
         if (!wifiStartAP(AP_NAME)) {
             displayShowMessage("AP start failed");
             g_state = STATE_ERROR;

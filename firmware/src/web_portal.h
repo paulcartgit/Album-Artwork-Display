@@ -23,7 +23,7 @@ h2{font-size:1.1rem;margin:16px 0 8px;color:#ccc}
 .status-label{font-size:.75rem;color:#888;text-transform:uppercase;letter-spacing:.05em}
 .status-value{font-size:1.1rem;margin-top:2px}
 label{display:block;font-size:.85rem;color:#aaa;margin-top:12px}
-input[type=text],input[type=number],select{width:100%;padding:8px 10px;margin-top:4px;
+input[type=text],input[type=password],input[type=number],select{width:100%;padding:8px 10px;margin-top:4px;
      background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#eee;font-size:.9rem}
 input:focus,select:focus{outline:none;border-color:#666}
 button{padding:10px 20px;background:#2a6;border:none;border-radius:6px;color:#fff;
@@ -86,6 +86,20 @@ button.danger:active{background:#722}
 
 <!-- SETTINGS -->
 <div id="settings" class="panel">
+  <h2>Wi-Fi</h2>
+  <label>Network
+    <div style="display:flex;gap:8px;margin-top:4px;align-items:stretch">
+      <select id="fWifiSsid" style="flex:1;margin-top:0">
+        <option value="">-- current network --</option>
+      </select>
+      <button type="button" id="wifiScanBtn" onclick="scanWifi()" style="margin:0;padding:8px 14px;font-size:.85rem;white-space:nowrap">Scan</button>
+    </div>
+  </label>
+  <div id="wifiScanMsg" style="font-size:.75rem;color:#888;margin-top:4px"></div>
+  <label>Password<input type="password" id="fWifiPwd" placeholder="(leave blank to keep current)"></label>
+  <button onclick="saveWifi()">Update Wi-Fi</button>
+  <div id="wifiMsg" class="msg"></div>
+
   <h2>Sonos</h2>
   <label>Speaker
     <div style="display:flex;gap:8px;margin-top:4px;align-items:stretch">
@@ -279,8 +293,59 @@ bindSlider('fVinylRecheck','fVinylRecheckVal',' min');
 bindSlider('fCooldown','fCooldownVal',' min');
 bindSlider('fIdleGallery','fIdleGalleryVal',' min');
 
+async function scanWifi() {
+  const btn = document.getElementById('wifiScanBtn');
+  const msg = document.getElementById('wifiScanMsg');
+  const sel = document.getElementById('fWifiSsid');
+  btn.disabled = true;
+  msg.textContent = 'Scanning\u2026';
+  try {
+    const r = await fetch('/api/wifi/scan');
+    const networks = await r.json();
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">-- select a network --</option>';
+    networks.forEach(n => {
+      const opt = document.createElement('option');
+      opt.value = n.ssid;
+      opt.textContent = n.ssid + (n.open ? ' (open)' : '');
+      sel.appendChild(opt);
+    });
+    if (prev) sel.value = prev;
+    msg.textContent = networks.length ? networks.length + ' network(s) found' : 'No networks found';
+  } catch(e) { msg.textContent = 'Scan failed: ' + e.message; }
+  btn.disabled = false;
+}
+
+async function saveWifi() {
+  const ssid = document.getElementById('fWifiSsid').value;
+  const pwd = document.getElementById('fWifiPwd').value;
+  const el = document.getElementById('wifiMsg');
+  if (!ssid) { el.className='msg err'; el.textContent='Select a network'; setTimeout(()=>el.style.display='none',3000); return; }
+  if (!pwd) { el.className='msg err'; el.textContent='Enter a password'; setTimeout(()=>el.style.display='none',3000); return; }
+  try {
+    const r = await fetch('/api/wifi', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ssid:ssid,password:pwd})});
+    el.className = r.ok ? 'msg ok' : 'msg err';
+    el.textContent = r.ok ? 'Saved! Rebooting\u2026' : 'Error saving';
+  } catch(e) { el.className='msg ok'; el.textContent='Saved! Rebooting\u2026'; }
+}
+
 async function loadSettings() {
   try {
+    // Load WiFi SSID into dropdown
+    try {
+      const wr = await fetch('/api/wifi');
+      const wd = await wr.json();
+      const wsel = document.getElementById('fWifiSsid');
+      wsel.innerHTML = '<option value="">-- select a network --</option>';
+      if (wd.ssid) {
+        const opt = document.createElement('option');
+        opt.value = wd.ssid;
+        opt.textContent = wd.ssid;
+        wsel.appendChild(opt);
+        wsel.value = wd.ssid;
+        document.getElementById('wifiScanMsg').textContent = 'Connected \u2014 click Scan to see other networks';
+      }
+    } catch(e) {}
     const r = await fetch('/api/settings');
     const d = await r.json();
     // Populate the speaker dropdown with the currently saved name

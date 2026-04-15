@@ -6,7 +6,7 @@ static const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vinyl Display — Wi-Fi Setup</title>
+<title>Now Playing — Wi-Fi Setup</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -31,7 +31,7 @@ button:disabled{background:#333;color:#666;cursor:default}
 </style>
 </head>
 <body>
-<h1>&#127926; Vinyl Display Setup</h1>
+<h1>&#127926; Now Playing Setup</h1>
 <p class="sub">Connect to your home Wi-Fi network to get started.</p>
 
 <label>Wi-Fi Network
@@ -53,17 +53,25 @@ button:disabled{background:#333;color:#666;cursor:default}
 
 <script>
 let networks = [];
+let scanRetries = 0;
 
 async function scanNetworks() {
   try {
     const r = await fetch('/api/wifi/scan');
     networks = await r.json();
+    if (networks.length === 0 && scanRetries < 5) {
+      // Scan still running or no results yet — retry after a short delay
+      scanRetries++;
+      document.getElementById('ssidSel').innerHTML = '<option value="">— scanning\u2026 (' + scanRetries + ') —</option>';
+      setTimeout(scanNetworks, 2000);
+      return;
+    }
     const sel = document.getElementById('ssidSel');
     sel.innerHTML = '<option value="">— select a network —</option>'
       + networks.map(n =>
           '<option value="'+esc(n.ssid)+'">'
           + esc(n.ssid)
-          + '<span class="rssi"> ('+n.rssi+'dBm'+(n.open?' · open':'')+') </span>'
+          + (n.open?'<span class="rssi"> (open)</span>':'')
           + '</option>'
         ).join('')
       + '<option value="__manual__">Other (enter manually)…</option>';
