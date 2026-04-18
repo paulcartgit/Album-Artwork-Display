@@ -933,12 +933,14 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
     bool hasEoi = false;
     if (total >= 2) {
         size_t eoiStart = (total > 64) ? total - 64 : 0;
-        for (size_t i = total - 2;; i--) {
+        size_t i = total - 2;
+        while (true) {
             if (buf[i] == 0xFF && buf[i + 1] == 0xD9) {
                 hasEoi = true;
                 break;
             }
             if (i == eoiStart) break;
+            --i;
         }
     }
     if (!hasEoi) {
