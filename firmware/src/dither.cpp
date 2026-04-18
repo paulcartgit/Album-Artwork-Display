@@ -169,8 +169,8 @@ static void ensureLabPalette() {
 // don't absorb the colour signal.  Without this, light purple
 // (Lab L*=57, C*=48) always matches White (L*=100) because the
 // lightness gap is smaller than the a* gap to Magenta.
-static constexpr float CHROMA_PENALTY_K     = 2.0f;
-static constexpr float CHROMA_PENALTY_ONSET = 15.0f;
+static constexpr float CHROMA_PENALTY_K     = 5.0f;
+static constexpr float CHROMA_PENALTY_ONSET = 12.0f;
 
 static uint8_t nearestLab(float r, float g, float b) {
     Lab px = rgbToLabF(r, g, b);
@@ -299,12 +299,18 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
                 displayIdx = ((x + y) & 1) ? 4 : 3;
             }
 
-            // Error in RGB against error reference
-            // Real colours: error vs idealized value
-            // Virtual colours: error vs average of alternating pair
-            float er = cr - ERROR_REF[ci][0];
-            float eg = cg - ERROR_REF[ci][1];
-            float eb = cb - ERROR_REF[ci][2];
+            // Error in RGB against the ACTUAL placed colour.
+            // For virtual colours, error is computed vs the real colour
+            // that was physically placed (Red or Blue for Magenta, etc).
+            // This causes error to naturally oscillate: after placing Red,
+            // the residual blue pushes the next pixel toward Blue/Magenta,
+            // creating the interleaved pattern that reads as purple.
+            float refR = MATCH_PAL[displayIdx][0];
+            float refG = MATCH_PAL[displayIdx][1];
+            float refB = MATCH_PAL[displayIdx][2];
+            float er = cr - refR;
+            float eg = cg - refG;
+            float eb = cb - refB;
 
             // Shadow chroma suppression: in very dark regions, humans can't
             // perceive colour, but error diffusion accumulates chrominance

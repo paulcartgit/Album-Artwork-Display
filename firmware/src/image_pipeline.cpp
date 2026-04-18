@@ -632,13 +632,13 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
 
     TJpgDec.setCallback(tjpgCallback);
     TJpgDec.setJpgScale(1);
-    bool decodeOk = TJpgDec.drawJpg(0, 0, jpegBuf, jpegSize);
+    JRESULT decodeResult = TJpgDec.drawJpg(0, 0, jpegBuf, jpegSize);
 
     // JPEG buffer no longer needed
     heap_caps_free(jpegBuf);
-    if (!decodeOk) {
-        Serial.println("[Pipeline] JPEG decode failed");
-        activityLog("Artwork decode failed: unsupported JPEG format");
+    if (decodeResult != JDR_OK) {
+        Serial.printf("[Pipeline] JPEG decode failed (jr=%d)\n", (int)decodeResult);
+        activityLogf("Artwork decode failed: unsupported JPEG format (jr=%d)", (int)decodeResult);
         heap_caps_free(g_decodeBuf);
         g_decodeBuf = nullptr;
         return false;
@@ -842,6 +842,7 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
     const char* hdrKeys[] = {"Content-Type"};
     http.collectHeaders(hdrKeys, 1);
 
+    WiFiClient plainClient;
     WiFiClientSecure secureClient;
     if (strncmp(url, "https", 5) == 0) {
         secureClient.setInsecure(); // album art — no cert verification needed
