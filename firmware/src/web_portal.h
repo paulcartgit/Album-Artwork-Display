@@ -187,10 +187,12 @@ button.danger:active{background:#722}
   </div>
   <button class="debug-btn" onclick="forceRefresh()">Force Display Refresh</button>
   <button class="debug-btn" onclick="testColors()">Test Color Pattern</button>
+  <button class="debug-btn" onclick="testDither()">Dither Test Pattern</button>
   <a href="/api/last-audio" download="recording.wav"><button type="button" class="debug-btn">Download Last Audio</button></a>
   <p style="color:#666;font-size:.75rem;margin-top:16px">
     <b>Force Display Refresh</b> — re-fetches artwork and redraws the e-ink display.<br>
     <b>Test Color Pattern</b> — shows 6 color bands to verify all e-ink pigments.<br>
+    <b>Dither Test Pattern</b> — shows dithered color mixes: purples, pinks, greys, etc.<br>
     <b>Download Last Audio</b> — saves the most recent recording as a WAV file.
   </p>
 </div>
@@ -280,6 +282,13 @@ async function testColors() {
   try {
     await fetch('/api/test-colors', {method:'POST'});
     alert('Test pattern sent — 6 bands: Black, White, Green, Blue, Red, Yellow');
+  } catch(e) { alert('Failed: '+e.message); }
+}
+
+async function testDither() {
+  try {
+    await fetch('/api/test-dither', {method:'POST'});
+    alert('Dither test pattern sent — 8 rows of color swatches through F-S dithering');
   } catch(e) { alert('Failed: '+e.message); }
 }
 

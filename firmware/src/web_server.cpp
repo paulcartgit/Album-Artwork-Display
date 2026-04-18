@@ -140,6 +140,7 @@ extern String     g_currentTitle;
 extern String     g_currentAlbum;
 extern volatile bool g_forceRefresh;
 extern volatile bool g_testColors;
+extern volatile bool g_testDither;
 extern volatile bool g_forceListen;
 extern uint8_t* g_lastAudio;
 extern size_t   g_lastAudioLen;
@@ -453,6 +454,12 @@ void webServerInit() {
     // ─── Test color pattern ───
     server.on("/api/test-colors", HTTP_POST, [](AsyncWebServerRequest* req) {
         g_testColors = true;
+        req->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // ─── Dither test pattern ───
+    server.on("/api/test-dither", HTTP_POST, [](AsyncWebServerRequest* req) {
+        g_testDither = true;
         req->send(200, "application/json", "{\"ok\":true}");
     });
 

@@ -827,11 +827,11 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
 static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
     outSize = 0;
     HTTPClient http;
+    WiFiClientSecure secureClient; // stack-allocated — destructor frees TLS buffers
 
     if (strncmp(url, "https", 5) == 0) {
-        WiFiClientSecure* client = new WiFiClientSecure;
-        client->setInsecure(); // album art — no cert verification needed
-        http.begin(*client, url);
+        secureClient.setInsecure(); // album art — no cert verification needed
+        http.begin(secureClient, url);
     } else {
         http.begin(url);
     }
@@ -947,4 +947,128 @@ void pipelineShowTestPattern() {
     displayShowImage(packedBuf);
     heap_caps_free(packedBuf);
     Serial.println("[Test] Color test pattern displayed");
+}
+
+void pipelineShowDitherTest() {
+    // Generate an RGB888 image with color swatches, then run it through
+    // the actual dither pipeline. This reveals exactly how the dithering
+    // algorithm handles various colors including out-of-gamut ones.
+    //
+    // Layout (480 wide × 800 tall):
+    //   Row 0 (0-99):     6 pure palette colors (undithered reference)
+    //   Row 1 (100-199):  Dithered mixes: R+B, R+W, B+W, R+Y, G+W, B+R dark
+    //   Row 2 (200-299):  Purple gradient (light → dark)
+    //   Row 3 (300-399):  Pink/skin gradient (light → dark)
+    //   Row 4 (400-499):  Violet/magenta shades
+    //   Row 5 (500-599):  Grey gradient (tests luminance dithering)
+    //   Row 6 (600-699):  Orange / brown / warm tones
+    //   Row 7 (700-799):  Teal / cyan / cool tones
+
+    const int W = EPD_WIDTH;   // 480
+    const int H = EPD_HEIGHT;  // 800
+    const int ROW_H = 100;
+    const int COLS = 6;
+    const int COL_W = W / COLS; // 80
+
+    size_t rgbSize = (size_t)W * H * 3;
+    uint8_t* rgb = (uint8_t*)heap_caps_malloc(rgbSize, MALLOC_CAP_SPIRAM);
+    if (!rgb) {
+        Serial.println("[DitherTest] RGB alloc failed");
+        return;
+    }
+
+    // Helper to fill a rectangular swatch
+    auto fillRect = [&](int x0, int y0, int w, int h, uint8_t r, uint8_t g, uint8_t b) {
+        for (int y = y0; y < y0 + h && y < H; y++) {
+            for (int x = x0; x < x0 + w && x < W; x++) {
+                int i = (y * W + x) * 3;
+                rgb[i] = r; rgb[i+1] = g; rgb[i+2] = b;
+            }
+        }
+    };
+
+    // Clear to white
+    memset(rgb, 0xD8, rgbSize);
+
+    // ── Row 0: Pure palette colors (flat RGB matching palette values) ──
+    fillRect(0*COL_W, 0, COL_W, ROW_H, 0x10, 0x10, 0x12); // Black
+    fillRect(1*COL_W, 0, COL_W, ROW_H, 0xD8, 0xDA, 0xD4); // White
+    fillRect(2*COL_W, 0, COL_W, ROW_H, 0x30, 0x66, 0x58); // Green
+    fillRect(3*COL_W, 0, COL_W, ROW_H, 0x38, 0x68, 0xC0); // Blue
+    fillRect(4*COL_W, 0, COL_W, ROW_H, 0x9C, 0x30, 0x2C); // Red
+    fillRect(5*COL_W, 0, COL_W, ROW_H, 0xC8, 0xB8, 0x30); // Yellow
+
+    // ── Row 1: Dithered 50/50 mixes (target RGB = average of two palette colors) ──
+    fillRect(0*COL_W, 100, COL_W, ROW_H, 0x6A, 0x4C, 0x76); // Red+Blue avg (purple)
+    fillRect(1*COL_W, 100, COL_W, ROW_H, 0xBA, 0x85, 0x80); // Red+White avg (pink)
+    fillRect(2*COL_W, 100, COL_W, ROW_H, 0x88, 0xA1, 0xCA); // Blue+White avg (light blue)
+    fillRect(3*COL_W, 100, COL_W, ROW_H, 0xB2, 0x74, 0x2E); // Red+Yellow avg (orange)
+    fillRect(4*COL_W, 100, COL_W, ROW_H, 0x84, 0xA0, 0x96); // Green+White avg
+    fillRect(5*COL_W, 100, COL_W, ROW_H, 0x34, 0x67, 0x8C); // Blue+Green avg (teal)
+
+    // ── Row 2: Purple gradient (light purple → deep purple → dark purple) ──
+    for (int c = 0; c < COLS; c++) {
+        // Vary from light lavender to deep purple
+        uint8_t r = 200 - c * 25;  // 200 → 75
+        uint8_t g = 180 - c * 30;  // 180 → 30
+        uint8_t b = 220 - c * 15;  // 220 → 145
+        fillRect(c * COL_W, 200, COL_W, ROW_H, r, g, b);
+    }
+
+    // ── Row 3: Pink/skin gradient ──
+    for (int c = 0; c < COLS; c++) {
+        uint8_t r = 240 - c * 20;  // 240 → 140
+        uint8_t g = 200 - c * 25;  // 200 → 75
+        uint8_t b = 190 - c * 20;  // 190 → 90
+        fillRect(c * COL_W, 300, COL_W, ROW_H, r, g, b);
+    }
+
+    // ── Row 4: Violet/magenta shades ──
+    fillRect(0*COL_W, 400, COL_W, ROW_H, 180,  80, 180); // Magenta
+    fillRect(1*COL_W, 400, COL_W, ROW_H, 140,  60, 160); // Deep violet
+    fillRect(2*COL_W, 400, COL_W, ROW_H, 160, 100, 200); // Lavender
+    fillRect(3*COL_W, 400, COL_W, ROW_H, 120,  40, 140); // Dark purple
+    fillRect(4*COL_W, 400, COL_W, ROW_H, 200, 100, 180); // Light magenta
+    fillRect(5*COL_W, 400, COL_W, ROW_H, 100,  20, 120); // Very dark purple
+
+    // ── Row 5: Grey gradient (tests luminance dithering) ──
+    for (int c = 0; c < COLS; c++) {
+        uint8_t v = 30 + c * 40;  // 30 → 230
+        fillRect(c * COL_W, 500, COL_W, ROW_H, v, v, v);
+    }
+
+    // ── Row 6: Orange / brown / warm tones ──
+    fillRect(0*COL_W, 600, COL_W, ROW_H, 220, 160,  60); // Warm orange
+    fillRect(1*COL_W, 600, COL_W, ROW_H, 180, 120,  40); // Brown
+    fillRect(2*COL_W, 600, COL_W, ROW_H, 240, 200, 140); // Cream
+    fillRect(3*COL_W, 600, COL_W, ROW_H, 160,  80,  30); // Dark brown
+    fillRect(4*COL_W, 600, COL_W, ROW_H, 240, 120,  60); // Bright orange
+    fillRect(5*COL_W, 600, COL_W, ROW_H, 200, 180, 160); // Beige/skin
+
+    // ── Row 7: Teal / cyan / cool tones ──
+    fillRect(0*COL_W, 700, COL_W, ROW_H,  60, 180, 180); // Cyan
+    fillRect(1*COL_W, 700, COL_W, ROW_H,  40, 120, 140); // Dark teal
+    fillRect(2*COL_W, 700, COL_W, ROW_H, 140, 200, 220); // Light sky
+    fillRect(3*COL_W, 700, COL_W, ROW_H,  80, 140, 100); // Sage green
+    fillRect(4*COL_W, 700, COL_W, ROW_H,  40,  80, 120); // Navy
+    fillRect(5*COL_W, 700, COL_W, ROW_H, 100, 160, 200); // Steel blue
+
+    Serial.println("[DitherTest] RGB test image generated, dithering...");
+
+    // Dither through the actual pipeline
+    size_t packedSize = (size_t)(W * H) / 2;
+    uint8_t* packed = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
+    if (!packed) {
+        Serial.println("[DitherTest] Packed alloc failed");
+        heap_caps_free(rgb);
+        return;
+    }
+    memset(packed, 0, packedSize);
+
+    ditherFloydSteinberg(rgb, packed, W, H);
+    heap_caps_free(rgb);
+
+    displayShowImage(packed);
+    heap_caps_free(packed);
+    Serial.println("[DitherTest] Dither test pattern displayed");
 }

@@ -57,33 +57,135 @@ static Lab rgbToLab(uint8_t R, uint8_t G, uint8_t B) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Palette in Lab space (computed once)
+// Palette helpers
 // ═══════════════════════════════════════════════════════════
 
-static Lab  g_palLab[EPD_COLORS];
 static bool g_palReady = false;
 
-static void ensurePaletteLab() {
+static void ensurePalette() {
     if (g_palReady) return;
     ensureLUT();
-    for (int i = 0; i < EPD_COLORS; i++)
-        g_palLab[i] = rgbToLab(PALETTE[i].r, PALETTE[i].g, PALETTE[i].b);
     g_palReady = true;
 }
 
-// Nearest palette colour — weighted distance in CIELAB
-// Lightness gets 1.5× weight so that out-of-gamut hues (pink, magenta,
-// purple) prefer a lightness-correct match (e.g. White) over a
-// chrominance-correct but too-dark match (e.g. Blue).  Error diffusion
-// then mixes in the missing chrominance through neighbouring pixels.
-static uint8_t nearestLab(float L, float a, float b) {
+// ═══════════════════════════════════════════════════════════
+// Extended matching palette: 6 real + 2 virtual RGB cube corners
+//
+// Our 6-colour palette is 6 of the 8 RGB cube corners, missing
+// only Cyan(0,255,255) and Magenta(255,0,255).  For purple,
+// the display MUST interleave Red and Blue pixels.  But in any
+// perceptual colour space (Lab, YCbCr), Red is ~89° away from
+// purple on the hue wheel — standard error diffusion can never
+// naturally alternate Red↔Blue.
+//
+// Solution (caca.zoy.org §6.1–6.2, Reddit/Spectra-6 community):
+// Add virtual Magenta + Cyan to the matching palette.  Purple
+// pixels match Magenta, which gets mapped to alternating Red/Blue
+// in a checkerboard — producing the interleaved pattern that the
+// eye perceives as purple.
+//
+// Chroma-aware penalty prevents White/Black from absorbing
+// chromatic pixels: if a pixel has significant chroma, achromatic
+// palette entries get a distance penalty proportional to (chroma)².
+// Without this, lavender(Lab L*=57, C*=48) is closer to White
+// (L*=100) than to Magenta (a*=98) — White steals the purple.
+// ═══════════════════════════════════════════════════════════
+static constexpr int MATCH_COLORS = 8;
+
+// Full matching palette (Lab matching searches all 8)
+static const float MATCH_PAL[MATCH_COLORS][3] = {
+    {   0.0f,   0.0f,   0.0f }, // 0  Black
+    { 255.0f, 255.0f, 255.0f }, // 1  White
+    {   0.0f, 255.0f,   0.0f }, // 2  Green
+    {   0.0f,   0.0f, 255.0f }, // 3  Blue
+    { 255.0f,   0.0f,   0.0f }, // 4  Red
+    { 255.0f, 255.0f,   0.0f }, // 5  Yellow
+    {   0.0f, 255.0f, 255.0f }, // 6  Cyan    (virtual)
+    { 255.0f,   0.0f, 255.0f }, // 7  Magenta (virtual)
+};
+
+// Error reference: for real colours [0–5] = idealized value.
+// For virtual colours [6–7] = average of the two alternating
+// real colours.  This ensures correct total error accumulation
+// (true error sums are identical to per-pixel true error sums)
+// while avoiding the violent oscillation of per-pixel true error.
+static const float ERROR_REF[MATCH_COLORS][3] = {
+    {   0.0f,   0.0f,   0.0f }, // 0  Black
+    { 255.0f, 255.0f, 255.0f }, // 1  White
+    {   0.0f, 255.0f,   0.0f }, // 2  Green
+    {   0.0f,   0.0f, 255.0f }, // 3  Blue
+    { 255.0f,   0.0f,   0.0f }, // 4  Red
+    { 255.0f, 255.0f,   0.0f }, // 5  Yellow
+    {   0.0f, 127.5f, 127.5f }, // 6  Cyan    → avg(Green, Blue)
+    { 127.5f,   0.0f, 127.5f }, // 7  Magenta → avg(Red, Blue)
+};
+
+// Float-accepting Lab conversion (pixels carry accumulated error)
+static Lab rgbToLabF(float r, float g, float b) {
+    // Clamp to [0,255] then gamma-decode
+    r = fmaxf(0.0f, fminf(255.0f, r)) / 255.0f;
+    g = fmaxf(0.0f, fminf(255.0f, g)) / 255.0f;
+    b = fmaxf(0.0f, fminf(255.0f, b)) / 255.0f;
+    auto decode = [](float v) -> float {
+        return (v <= 0.04045f) ? v / 12.92f
+                               : powf((v + 0.055f) / 1.055f, 2.4f);
+    };
+    float lr = decode(r), lg = decode(g), lb = decode(b);
+
+    float x = lr * 0.4124564f + lg * 0.3575761f + lb * 0.1804375f;
+    float y = lr * 0.2126729f + lg * 0.7151522f + lb * 0.0721750f;
+    float z = lr * 0.0193339f + lg * 0.1191920f + lb * 0.9503041f;
+    x /= 0.95047f;
+    z /= 1.08883f;
+
+    auto labf = [](float t) -> float {
+        return (t > 0.008856f) ? cbrtf(t) : (7.787f * t + 16.0f / 116.0f);
+    };
+    float fx = labf(x), fy = labf(y), fz = labf(z);
+    return { 116.0f * fy - 16.0f,
+             500.0f * (fx - fy),
+             200.0f * (fy - fz) };
+}
+
+// Pre-computed CIELAB values and chroma for matching palette
+static Lab   MATCH_PAL_LAB[MATCH_COLORS];
+static float MATCH_PAL_CHROMA[MATCH_COLORS];
+static bool  g_labReady = false;
+
+static void ensureLabPalette() {
+    if (g_labReady) return;
+    for (int i = 0; i < MATCH_COLORS; i++) {
+        MATCH_PAL_LAB[i] = rgbToLabF(
+            MATCH_PAL[i][0], MATCH_PAL[i][1], MATCH_PAL[i][2]);
+        MATCH_PAL_CHROMA[i] = sqrtf(
+            MATCH_PAL_LAB[i].a * MATCH_PAL_LAB[i].a +
+            MATCH_PAL_LAB[i].b * MATCH_PAL_LAB[i].b);
+    }
+    g_labReady = true;
+}
+
+// Chroma-aware penalty: when pixel has significant chroma,
+// penalize achromatic palette entries (White, Black) so they
+// don't absorb the colour signal.  Without this, light purple
+// (Lab L*=57, C*=48) always matches White (L*=100) because the
+// lightness gap is smaller than the a* gap to Magenta.
+static constexpr float CHROMA_PENALTY_K     = 2.0f;
+static constexpr float CHROMA_PENALTY_ONSET = 15.0f;
+
+static uint8_t nearestLab(float r, float g, float b) {
+    Lab px = rgbToLabF(r, g, b);
+    float pxChroma = sqrtf(px.a * px.a + px.b * px.b);
+    float excess   = fmaxf(0.0f, pxChroma - CHROMA_PENALTY_ONSET);
+    float penalty  = excess * excess * CHROMA_PENALTY_K;
+
     float best = 1e30f;
     uint8_t ci = 0;
-    for (uint8_t i = 0; i < EPD_COLORS; i++) {
-        float dL = L - g_palLab[i].L;
-        float da = a - g_palLab[i].a;
-        float db = b - g_palLab[i].b;
-        float d  = dL * dL * 1.5f + da * da + db * db;
+    for (uint8_t i = 0; i < MATCH_COLORS; i++) {
+        float dL = px.L - MATCH_PAL_LAB[i].L;
+        float da = px.a - MATCH_PAL_LAB[i].a;
+        float db = px.b - MATCH_PAL_LAB[i].b;
+        float d  = dL * dL + da * da + db * db;
+        if (MATCH_PAL_CHROMA[i] < 5.0f) d += penalty;
         if (d < best) { best = d; ci = i; }
     }
     return ci;
@@ -104,12 +206,12 @@ static uint8_t nearestPaletteColor(int16_t r, int16_t g, int16_t b) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Perceptual dithering
-//   • sRGB → CIELAB (perceptually uniform error diffusion)
-//   • Stucki kernel (12 neighbours, 3 rows — smoother than F-S)
+// Lab-match + RGB-error dithering  ("Lab errRGB")
+//   • Nearest colour found in CIELAB (perceptual distance)
+//   • Error computed & diffused in RGB (channel independence)
+//   • Floyd-Steinberg kernel (4 neighbours, tight error spread)
 //   • Serpentine scan (eliminates directional streak artefacts)
 //   • Edge-aware: suppresses error diffusion across hard edges
-//   • 3-row rolling buffer (~17 KB for w=480)
 // ═══════════════════════════════════════════════════════════
 
 // Compute per-pixel edge strength map from source RGB.
@@ -141,17 +243,17 @@ static float* buildEdgeMap(const uint8_t* rgb, int w, int h) {
 }
 
 void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int h) {
-    ensurePaletteLab();
+    ensurePalette();
+    ensureLabPalette();
 
     // Build edge map for edge-aware error diffusion
     float* edgeMap = buildEdgeMap(rgb888, w, h);
-    // If alloc fails, proceed without edge awareness (graceful degradation)
 
-    // 3 rolling rows of Lab error accumulation
+    // 2 rolling rows of RGB error accumulation (sRGB 0-255 scale)
     const size_t rowFloats = (size_t)w * 3;
     const size_t rowBytes  = rowFloats * sizeof(float);
-    float* row[3];
-    for (int i = 0; i < 3; i++) {
+    float* row[2];
+    for (int i = 0; i < 2; i++) {
         row[i] = (float*)heap_caps_malloc(rowBytes, MALLOC_CAP_SPIRAM);
         if (!row[i]) {
             Serial.println("[Dither] row alloc failed");
@@ -163,14 +265,13 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
     }
 
     for (int y = 0; y < h; y++) {
-        // Convert this row from sRGB → Lab, adding accumulated error
+        // Load this row as sRGB (0-255), adding accumulated error
         for (int x = 0; x < w; x++) {
             int si = (y * w + x) * 3;
-            Lab c  = rgbToLab(rgb888[si], rgb888[si + 1], rgb888[si + 2]);
             int ri = x * 3;
-            row[0][ri]     += c.L;
-            row[0][ri + 1] += c.a;
-            row[0][ri + 2] += c.b;
+            row[0][ri]     += (float)rgb888[si];
+            row[0][ri + 1] += (float)rgb888[si + 1];
+            row[0][ri + 2] += (float)rgb888[si + 2];
         }
 
         // Serpentine: even rows L→R, odd rows R→L
@@ -182,102 +283,93 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
         for (int x = xs; x != xe; x += xd) {
             int ri = x * 3;
 
-            // Clamp to valid Lab range
-            float L = fmaxf(0.0f,    fminf(100.0f, row[0][ri]));
-            float a = fmaxf(-128.0f, fminf(127.0f, row[0][ri + 1]));
-            float b = fmaxf(-128.0f, fminf(127.0f, row[0][ri + 2]));
+            // Clamp to valid sRGB range [0, 255]
+            float cr = fmaxf(0.0f, fminf(255.0f, row[0][ri]));
+            float cg = fmaxf(0.0f, fminf(255.0f, row[0][ri + 1]));
+            float cb = fmaxf(0.0f, fminf(255.0f, row[0][ri + 2]));
 
-            uint8_t ci = nearestLab(L, a, b);
+            // Match in CIELAB space (8-colour palette with chroma penalty)
+            uint8_t ci = nearestLab(cr, cg, cb);
 
-            // Quantisation error in Lab space
-            float eL = L - g_palLab[ci].L;
-            float ea = a - g_palLab[ci].a;
-            float eb = b - g_palLab[ci].b;
-
-            // Shadow chroma suppression: in very dark regions (low L), humans
-            // can't perceive colour, but error diffusion accumulates chrominance
-            // error across many black pixels until it flips one to blue/red.
-            // Dampen chroma error proportionally to darkness.
-            if (L < 25.0f) {
-                float chromaScale = L / 25.0f;           // 0 at black → 1 at L=25
-                chromaScale = chromaScale * chromaScale;  // steeper falloff
-                ea *= chromaScale;
-                eb *= chromaScale;
+            // Map virtual colours to alternating real display colours
+            uint8_t displayIdx = ci;
+            if (ci == 6) {        // Cyan → alternate Green/Blue
+                displayIdx = ((x + y) & 1) ? 2 : 3;
+            } else if (ci == 7) { // Magenta → alternate Red/Blue
+                displayIdx = ((x + y) & 1) ? 4 : 3;
             }
 
-            // Out-of-gamut dampening: colours far from every palette entry
-            // (purple, magenta, pink) produce very large quantisation error.
-            // Diffusing 100 % of that error causes violent oscillation between
-            // distant palette entries (Red ↔ Blue for purple), producing a
-            // result that is far too dark.  Soft-cap the error magnitude so
-            // mild mismatches diffuse normally but extreme mismatches are
-            // dampened, keeping the dither pattern stable.
-            float errMag2 = eL * eL + ea * ea + eb * eb;
-            if (errMag2 > 2500.0f) {
-                float errMag = sqrtf(errMag2);
-                float cap = 50.0f + (errMag - 50.0f) * 0.6f;
-                float s = cap / errMag;
-                eL *= s;
-                ea *= s;
-                eb *= s;
+            // Error in RGB against error reference
+            // Real colours: error vs idealized value
+            // Virtual colours: error vs average of alternating pair
+            float er = cr - ERROR_REF[ci][0];
+            float eg = cg - ERROR_REF[ci][1];
+            float eb = cb - ERROR_REF[ci][2];
+
+            // Shadow chroma suppression: in very dark regions, humans can't
+            // perceive colour, but error diffusion accumulates chrominance
+            // error across black pixels until it flips one to blue/red.
+            float lum = 0.299f * cr + 0.587f * cg + 0.114f * cb;
+            if (lum < 8.0f) {
+                float chromaScale = lum / 8.0f;
+                chromaScale *= chromaScale;
+                float eLum = 0.299f * er + 0.587f * eg + 0.114f * eb;
+                er = eLum + (er - eLum) * chromaScale;
+                eg = eLum + (eg - eLum) * chromaScale;
+                eb = eLum + (eb - eLum) * chromaScale;
             }
 
-            // Edge-aware: attenuate error at source pixel when on/near an edge.
-            // This prevents error from bleeding across sharp boundaries.
+            // Edge-aware: attenuate error at source pixel when on/near an edge
             if (edgeMap) {
                 float srcEdge = edgeMap[y * w + x];
-                float atten = 1.0f - srcEdge * 0.85f;  // up to 85% reduction at hard edges
-                eL *= atten;
-                ea *= atten;
+                float atten = 1.0f - srcEdge * 0.85f;
+                er *= atten;
+                eg *= atten;
                 eb *= atten;
             }
 
-            // Stucki kernel (/42) — dx mirrored for R→L scan
-            // Edge-aware: also attenuate by target pixel's edge strength
-            //            *    8/42  4/42
-            //  2/42  4/42  8/42  4/42  2/42
-            //  1/42  2/42  4/42  2/42  1/42
-            #define SP(dx, dy, wt) do { \
+            // Floyd-Steinberg kernel (/16)
+            //        *   7/16
+            //  3/16  5/16  1/16
+            #define FS(dx, dy, wt) do { \
                 int nx = x + (ltr ? (dx) : -(dx)); \
                 if (nx >= 0 && nx < w) { \
                     int ni = nx * 3; \
-                    float f = (wt) / 42.0f; \
+                    float f = (wt) / 16.0f; \
                     if (edgeMap && (y + (dy)) < h) { \
                         float tgtEdge = edgeMap[(y + (dy)) * w + nx]; \
                         f *= (1.0f - tgtEdge * 0.85f); \
                     } \
-                    row[dy][ni]     += eL * f; \
-                    row[dy][ni + 1] += ea * f; \
+                    row[dy][ni]     += er * f; \
+                    row[dy][ni + 1] += eg * f; \
                     row[dy][ni + 2] += eb * f; \
                 } \
             } while(0)
 
-            SP(1, 0, 8); SP(2, 0, 4);
-            if (y + 1 < h) { SP(-2,1,2); SP(-1,1,4); SP(0,1,8); SP(1,1,4); SP(2,1,2); }
-            if (y + 2 < h) { SP(-2,2,1); SP(-1,2,2); SP(0,2,4); SP(1,2,2); SP(2,2,1); }
+            FS(1, 0, 7);
+            if (y + 1 < h) { FS(-1,1,3); FS(0,1,5); FS(1,1,1); }
 
-            #undef SP
+            #undef FS
 
-            // Pack 4-bit colour index (preserve other nibble for serpentine)
+            // Pack 4-bit colour index (displayIdx maps virtual→real)
             int pi = y * w + x;
             int bi = pi / 2;
             if (pi % 2 == 0)
-                packedOut[bi] = (packedOut[bi] & 0x0F) | (ci << 4);
+                packedOut[bi] = (packedOut[bi] & 0x0F) | (displayIdx << 4);
             else
-                packedOut[bi] = (packedOut[bi] & 0xF0) | (ci & 0x0F);
+                packedOut[bi] = (packedOut[bi] & 0xF0) | (displayIdx & 0x0F);
         }
 
-        // Roll rows: 0←1, 1←2, 2←cleared
+        // Roll rows: 0←1, 1←cleared
         float* tmp = row[0];
         row[0] = row[1];
-        row[1] = row[2];
-        row[2] = tmp;
-        memset(row[2], 0, rowBytes);
+        row[1] = tmp;
+        memset(row[1], 0, rowBytes);
     }
 
-    for (int i = 0; i < 3; i++) heap_caps_free(row[i]);
+    for (int i = 0; i < 2; i++) heap_caps_free(row[i]);
     if (edgeMap) heap_caps_free(edgeMap);
-    Serial.printf("[Dither] Lab+Stucki serpentine edge-aware — %dx%d → %d bytes\n", w, h, (w * h) / 2);
+    Serial.printf("[Dither] Lab+chroma-penalty+virtual-Mag/Cyn F-S — %dx%d → %d bytes\n", w, h, (w * h) / 2);
 }
 
 void quantizeNearest(const uint8_t* rgb888, uint8_t* packedOut, int w, int h) {
