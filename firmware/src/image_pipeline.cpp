@@ -839,8 +839,8 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
     outSize = 0;
     HTTPClient http;
     activityLogf("Artwork fetch: %s", url);
-    const char* hdrKeys[] = {"Content-Type", "Content-Length"};
-    http.collectHeaders(hdrKeys, 2);
+    const char* hdrKeys[] = {"Content-Type"};
+    http.collectHeaders(hdrKeys, 1);
 
     WiFiClient plainClient;
     WiFiClientSecure secureClient;
@@ -866,6 +866,7 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
     activityLogf("Artwork HTTP 200 (%s)", contentType.c_str());
 
     int contentLen = http.getSize();
+    if (contentLen < 0) contentLen = 0; // unknown length (chunked/no header)
     if (contentLen > 0 && (size_t)contentLen > JPEG_MAX_DOWNLOAD) {
         activityLogf("Artwork too large: %d bytes", contentLen);
         http.end();
@@ -886,13 +887,14 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
     while ((http.connected() || stream->available()) && millis() < deadline) {
         size_t avail = stream->available();
         if (avail) {
-            if (total + avail > allocSize) {
+            size_t required = total + avail;
+            if (required > allocSize) {
                 size_t newSize = allocSize;
-                while (newSize < total + avail && newSize < JPEG_MAX_DOWNLOAD) {
+                while (newSize < required && newSize < JPEG_MAX_DOWNLOAD) {
                     newSize *= 2;
                 }
                 if (newSize > JPEG_MAX_DOWNLOAD) newSize = JPEG_MAX_DOWNLOAD;
-                if (newSize <= allocSize || newSize < total + avail) {
+                if (newSize <= allocSize || newSize < required) {
                     activityLogf("Artwork fetch failed: exceeds %u bytes", (unsigned)JPEG_MAX_DOWNLOAD);
                     heap_caps_free(buf);
                     http.end();
@@ -931,11 +933,12 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
     bool hasEoi = false;
     if (total >= 2) {
         size_t eoiStart = (total > 64) ? total - 64 : 0;
-        for (int i = (int)total - 2; i >= (int)eoiStart; i--) {
+        for (size_t i = total - 2;; i--) {
             if (buf[i] == 0xFF && buf[i + 1] == 0xD9) {
                 hasEoi = true;
                 break;
             }
+            if (i == eoiStart) break;
         }
     }
     if (!hasEoi) {
