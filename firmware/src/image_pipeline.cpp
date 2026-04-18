@@ -862,6 +862,7 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
         http.end();
         return nullptr;
     }
+    if (contentType.length() == 0) contentType = "unknown";
     activityLogf("Artwork HTTP 200 (%s)", contentType.c_str());
 
     int contentLen = http.getSize();
@@ -928,11 +929,13 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
         return nullptr;
     }
     bool hasEoi = false;
-    size_t eoiStart = (total > 64) ? total - 64 : 0;
-    for (int i = (int)total - 2; i >= (int)eoiStart; i--) {
-        if (buf[i] == 0xFF && buf[i + 1] == 0xD9) {
-            hasEoi = true;
-            break;
+    if (total >= 2) {
+        size_t eoiStart = (total > 64) ? total - 64 : 0;
+        for (int i = (int)total - 2; i >= (int)eoiStart; i--) {
+            if (buf[i] == 0xFF && buf[i + 1] == 0xD9) {
+                hasEoi = true;
+                break;
+            }
         }
     }
     if (!hasEoi) {
