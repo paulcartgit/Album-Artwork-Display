@@ -379,7 +379,9 @@ void webServerInit() {
             req->send(404, "text/plain", "not found");
             return;
         }
-        req->send(SD_MMC, path, "image/jpeg");
+        AsyncWebServerResponse *response = req->beginResponse(SD_MMC, path, "image/jpeg");
+        response->addHeader("Cache-Control", "public, max-age=604800, immutable");
+        req->send(response);
     });
 
     // ─── Pin/unpin history entry ───

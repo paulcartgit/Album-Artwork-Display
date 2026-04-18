@@ -467,7 +467,7 @@ async function loadHistory() {
       const on = h.on !== false;
       const pin = !!h.pin;
       div.innerHTML =
-        '<img src="/api/history/image?f='+h.f+'" style="width:100%;aspect-ratio:1;object-fit:cover;display:block;'+(on?'':'opacity:.35;')+'">'
+        '<img data-src="/api/history/image?f='+h.f+'" style="width:100%;aspect-ratio:1;object-fit:cover;display:block;background:#222;'+(on?'':'opacity:.35;')+'">'
         + '<div style="padding:6px 8px;font-size:.7rem;line-height:1.3;'+(on?'':'opacity:.5;')+'">'
         + '<div style="color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(h.a)+'</div>'
         + '<div style="color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(h.al||h.t)+'</div></div>'
@@ -495,9 +495,39 @@ async function loadHistory() {
     else { pinnedSection.style.display='none'; }
     if (unpinned.length) { historySection.style.display=''; unpinned.forEach(h => historyGrid.appendChild(buildCard(h))); }
     else { historySection.style.display='none'; }
+    queueImages();
   } catch(e) { console.error(e); }
 }
 function esc(s) { const d=document.createElement('div');d.textContent=s||'';return d.innerHTML; }
+
+// Concurrency-limited image loader — max 2 fetches at a time to avoid overwhelming the ESP32
+const IMG_CONCURRENCY = 2;
+let imgQueue = [], imgActive = 0;
+function queueImages() {
+  imgQueue = []; imgActive = 0;
+  const imgs = document.querySelectorAll('img[data-src]');
+  const io = new IntersectionObserver((entries, obs) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        obs.unobserve(e.target);
+        imgQueue.push(e.target);
+        drainImgQueue();
+      }
+    });
+  }, {rootMargin: '200px'});
+  imgs.forEach(img => io.observe(img));
+}
+function drainImgQueue() {
+  while (imgActive < IMG_CONCURRENCY && imgQueue.length) {
+    const img = imgQueue.shift();
+    if (!img.dataset.src) continue;
+    imgActive++;
+    const src = img.dataset.src;
+    delete img.dataset.src;
+    img.onload = img.onerror = () => { imgActive--; drainImgQueue(); };
+    img.src = src;
+  }
+}
 async function toggleHistory(f, on) {
   await fetch('/api/history/toggle', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:'f='+encodeURIComponent(f)+'&on='+(on?'1':'0')});
