@@ -76,12 +76,12 @@ struct PaletteColor {
 };
 
 static const PaletteColor PALETTE[EPD_COLORS] = {
-    {0x00, 0x00, 0x00, 0}, // Black
-    {0xFF, 0xFF, 0xFF, 1}, // White
-    {0x67, 0xA0, 0x62, 2}, // Green  (muted olive-green)
-    {0x3A, 0x6E, 0xB5, 3}, // Blue   (muted steel-blue)
-    {0xB0, 0x26, 0x28, 4}, // Red    (deep crimson)
-    {0xE8, 0xD0, 0x52, 5}, // Yellow (warm golden)
+    {0x10, 0x10, 0x12, 0}, // Black  (near-black charcoal)
+    {0xD8, 0xDA, 0xD4, 1}, // White  (light grey, slight cool tint)
+    {0x30, 0x66, 0x58, 2}, // Green  (dark teal-green)
+    {0x38, 0x68, 0xC0, 3}, // Blue   (medium-bright, saturated)
+    {0x9C, 0x30, 0x2C, 4}, // Red    (dark brick-crimson)
+    {0xC8, 0xB8, 0x30, 5}, // Yellow (warm golden)
 };
 
 // ─── App State ───

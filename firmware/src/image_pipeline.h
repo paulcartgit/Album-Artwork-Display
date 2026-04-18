@@ -18,3 +18,6 @@ bool pipelineShowPlaceholder(const char* artist, const char* album);
 
 // Display a test pattern showing all 7 palette colors
 void pipelineShowTestPattern();
+
+// Display a dither-mix test pattern (pure colors + dithered blends)
+void pipelineShowDitherTest();

@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <esp_heap_caps.h>
 #include <XPowersLib.h>
+#include <WiFi.h>
 
 #include "config.h"
 #include "sd_manager.h"
@@ -38,6 +39,7 @@ static String trackHash(const String& artist, const String& title) {
 // ─── Flags set from web API, handled in main loop ───
 volatile bool g_forceRefresh = false;
 volatile bool g_testColors = false;
+volatile bool g_testDither = false;
 volatile bool g_forceListen = false;
 
 // ─── Last recorded audio (for web download/debug) ───
@@ -229,6 +231,27 @@ void loop() {
 
     unsigned long now = millis();
 
+    // ── Periodic heap health check (every 60s) ──
+    static unsigned long s_lastHeapLog = 0;
+    if (now - s_lastHeapLog > 60000) {
+        s_lastHeapLog = now;
+        Serial.printf("[Health] Heap: %u free, PSRAM: %u free (largest: %u)\n",
+                      ESP.getFreeHeap(),
+                      heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    }
+
+    // ── WiFi reconnection ──
+    if (!wifiIsConnected()) {
+        static unsigned long s_lastReconnect = 0;
+        if (now - s_lastReconnect > 30000) {
+            s_lastReconnect = now;
+            activityLog("WiFi disconnected — attempting reconnect...");
+            WiFi.reconnect();
+        }
+        return;
+    }
+
     // Process pending display update once panel finishes refreshing
     if (g_pendingArtUrl.length() > 0 && !displayIsBusy()) {
         String url = g_pendingArtUrl;
@@ -246,6 +269,8 @@ void loop() {
                                artist.c_str(), title.c_str(), album.c_str())) {
             g_lastArtUrl = url;
             activityLog("Queued artwork displayed");
+        } else {
+            activityLog("Queued artwork failed");
         }
     }
 
@@ -254,6 +279,14 @@ void loop() {
         g_testColors = false;
         activityLog("Test color pattern requested");
         pipelineShowTestPattern();
+        return;
+    }
+
+    // Dither test pattern (dithered color mixes)
+    if (g_testDither) {
+        g_testDither = false;
+        activityLog("Dither test pattern requested");
+        pipelineShowDitherTest();
         return;
     }
 
@@ -557,10 +590,13 @@ static void handlePlaying() {
         if (artUrl.length() > 0) {
             const char* overlayArtist = g_settings.show_track_info ? shazam.artist.c_str() : nullptr;
             const char* overlayAlbum  = g_settings.show_track_info ? shazam.album.c_str() : nullptr;
-            pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum,
-                               shazam.artist.c_str(), shazam.title.c_str(), shazam.album.c_str());
-            g_lastArtUrl = artUrl;
-            activityLog("Display updated");
+            if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum,
+                                   shazam.artist.c_str(), shazam.title.c_str(), shazam.album.c_str())) {
+                g_lastArtUrl = artUrl;
+                activityLog("Display updated");
+            } else {
+                activityLog("Artwork pipeline failed");
+            }
         } else {
             activityLog("No album art found — showing fallback");
             showFallbackImage();
@@ -606,6 +642,8 @@ static void handlePlaying() {
                                        track.artist.c_str(), track.title.c_str(), track.album.c_str())) {
                     g_lastArtUrl = artUrl;
                     activityLog("Display updated");
+                } else {
+                    activityLog("Artwork pipeline failed");
                 }
             }
         } else {
@@ -765,6 +803,8 @@ static void handleListen() {
                                shazam.artist.c_str(), shazam.title.c_str(), shazam.album.c_str())) {
             g_lastArtUrl = artUrl;
             activityLog("Listen: display updated");
+        } else {
+            activityLog("Listen: artwork pipeline failed");
         }
     } else {
         activityLog("Listen: no album art found");
