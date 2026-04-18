@@ -246,6 +246,8 @@ void loop() {
                                artist.c_str(), title.c_str(), album.c_str())) {
             g_lastArtUrl = url;
             activityLog("Queued artwork displayed");
+        } else {
+            activityLog("Queued artwork failed");
         }
     }
 
@@ -557,10 +559,13 @@ static void handlePlaying() {
         if (artUrl.length() > 0) {
             const char* overlayArtist = g_settings.show_track_info ? shazam.artist.c_str() : nullptr;
             const char* overlayAlbum  = g_settings.show_track_info ? shazam.album.c_str() : nullptr;
-            pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum,
-                               shazam.artist.c_str(), shazam.title.c_str(), shazam.album.c_str());
-            g_lastArtUrl = artUrl;
-            activityLog("Display updated");
+            if (pipelineProcessUrl(artUrl.c_str(), overlayArtist, overlayAlbum,
+                                   shazam.artist.c_str(), shazam.title.c_str(), shazam.album.c_str())) {
+                g_lastArtUrl = artUrl;
+                activityLog("Display updated");
+            } else {
+                activityLog("Artwork pipeline failed");
+            }
         } else {
             activityLog("No album art found — showing fallback");
             showFallbackImage();
@@ -606,6 +611,8 @@ static void handlePlaying() {
                                        track.artist.c_str(), track.title.c_str(), track.album.c_str())) {
                     g_lastArtUrl = artUrl;
                     activityLog("Display updated");
+                } else {
+                    activityLog("Artwork pipeline failed");
                 }
             }
         } else {
@@ -765,6 +772,8 @@ static void handleListen() {
                                shazam.artist.c_str(), shazam.title.c_str(), shazam.album.c_str())) {
             g_lastArtUrl = artUrl;
             activityLog("Listen: display updated");
+        } else {
+            activityLog("Listen: artwork pipeline failed");
         }
     } else {
         activityLog("Listen: no album art found");

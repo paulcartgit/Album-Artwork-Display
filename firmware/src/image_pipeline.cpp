@@ -3,6 +3,7 @@
 #include "dither.h"
 #include "display.h"
 #include "sd_manager.h"
+#include "activity_log.h"
 
 #include <HTTPClient.h>
 #include <WiFiClient.h>
@@ -15,6 +16,8 @@
 #include <Fonts/FreeSans18pt7b.h>
 
 extern Settings g_settings;
+static const size_t JPEG_INITIAL_ALLOC = 64 * 1024;
+static const size_t JPEG_MAX_DOWNLOAD  = 2 * 1024 * 1024;
 
 // ─── TJpg_Decoder callback state ───
 static uint8_t* g_decodeBuf = nullptr;
@@ -609,8 +612,9 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
                   heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                   heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 
-    if (imgW == 0 || imgH == 0) {
-        Serial.println("[Pipeline] JPEG parse failed — invalid dimensions");
+    if (jr != JDR_OK || imgW == 0 || imgH == 0) {
+        Serial.printf("[Pipeline] JPEG parse failed (jr=%d)\n", (int)jr);
+        activityLogf("Artwork decode failed: JPEG header (jr=%d)", (int)jr);
         heap_caps_free(jpegBuf);
         return false;
     }
@@ -628,10 +632,17 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
 
     TJpgDec.setCallback(tjpgCallback);
     TJpgDec.setJpgScale(1);
-    TJpgDec.drawJpg(0, 0, jpegBuf, jpegSize);
+    bool decodeOk = TJpgDec.drawJpg(0, 0, jpegBuf, jpegSize);
 
     // JPEG buffer no longer needed
     heap_caps_free(jpegBuf);
+    if (!decodeOk) {
+        Serial.println("[Pipeline] JPEG decode failed");
+        activityLog("Artwork decode failed: unsupported JPEG format");
+        heap_caps_free(g_decodeBuf);
+        g_decodeBuf = nullptr;
+        return false;
+    }
 
     // 3. Scale to display size
     bool showText = (artist && artist[0] && album && album[0]);
@@ -827,28 +838,43 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
 static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
     outSize = 0;
     HTTPClient http;
+    activityLogf("Artwork fetch: %s", url);
+    const char* hdrKeys[] = {"Content-Type", "Content-Length"};
+    http.collectHeaders(hdrKeys, 2);
 
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
     if (strncmp(url, "https", 5) == 0) {
-        WiFiClientSecure* client = new WiFiClientSecure;
-        client->setInsecure(); // album art — no cert verification needed
-        http.begin(*client, url);
+        secureClient.setInsecure(); // album art — no cert verification needed
+        http.begin(secureClient, url);
     } else {
-        http.begin(url);
+        http.begin(plainClient, url);
     }
 
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setConnectTimeout(8000);
     http.setTimeout(15000);
     int code = http.GET();
+    String contentType = http.header("Content-Type");
     if (code != HTTP_CODE_OK) {
         Serial.printf("[Pipeline] HTTP %d from %s\n", code, url);
+        activityLogf("Artwork fetch failed: HTTP %d", code);
         http.end();
         return nullptr;
     }
+    activityLogf("Artwork HTTP 200 (%s)", contentType.c_str());
 
     int contentLen = http.getSize();
-    size_t allocSize = (contentLen > 0) ? (size_t)contentLen : 256 * 1024;
+    if (contentLen > 0 && (size_t)contentLen > JPEG_MAX_DOWNLOAD) {
+        activityLogf("Artwork too large: %d bytes", contentLen);
+        http.end();
+        return nullptr;
+    }
+    size_t allocSize = (contentLen > 0) ? (size_t)contentLen : JPEG_INITIAL_ALLOC;
     uint8_t* buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM);
     if (!buf) {
         Serial.println("[Pipeline] PSRAM alloc failed for download");
+        activityLog("Artwork fetch failed: PSRAM alloc");
         http.end();
         return nullptr;
     }
@@ -856,21 +882,68 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
     WiFiClient* stream = http.getStreamPtr();
     size_t total = 0;
     unsigned long deadline = millis() + 15000;
-    while (http.connected() && total < allocSize && millis() < deadline) {
+    while ((http.connected() || stream->available()) && millis() < deadline) {
         size_t avail = stream->available();
         if (avail) {
+            if (total + avail > allocSize) {
+                size_t newSize = allocSize;
+                while (newSize < total + avail && newSize < JPEG_MAX_DOWNLOAD) {
+                    newSize *= 2;
+                }
+                if (newSize > JPEG_MAX_DOWNLOAD) newSize = JPEG_MAX_DOWNLOAD;
+                if (newSize <= allocSize || newSize < total + avail) {
+                    activityLogf("Artwork fetch failed: exceeds %u bytes", (unsigned)JPEG_MAX_DOWNLOAD);
+                    heap_caps_free(buf);
+                    http.end();
+                    return nullptr;
+                }
+                uint8_t* grown = (uint8_t*)heap_caps_realloc(buf, newSize, MALLOC_CAP_SPIRAM);
+                if (!grown) {
+                    activityLog("Artwork fetch failed: PSRAM realloc");
+                    heap_caps_free(buf);
+                    http.end();
+                    return nullptr;
+                }
+                buf = grown;
+                allocSize = newSize;
+            }
             size_t chunk = min(avail, allocSize - total);
             size_t got = stream->readBytes(buf + total, chunk);
             total += got;
         } else {
             delay(1);
         }
-        if (contentLen > 0 && (int)total >= contentLen) break;
+        if (contentLen > 0 && total >= (size_t)contentLen) break;
     }
     http.end();
 
+    if (contentLen > 0 && total != (size_t)contentLen) {
+        activityLogf("Artwork fetch incomplete: %u/%d bytes", (unsigned)total, contentLen);
+        heap_caps_free(buf);
+        return nullptr;
+    }
+    if (total < 4 || buf[0] != 0xFF || buf[1] != 0xD8) {
+        activityLog("Artwork fetch failed: not a JPEG payload");
+        heap_caps_free(buf);
+        return nullptr;
+    }
+    bool hasEoi = false;
+    size_t eoiStart = (total > 64) ? total - 64 : 0;
+    for (int i = (int)total - 2; i >= (int)eoiStart; i--) {
+        if (buf[i] == 0xFF && buf[i + 1] == 0xD9) {
+            hasEoi = true;
+            break;
+        }
+    }
+    if (!hasEoi) {
+        activityLog("Artwork fetch failed: JPEG appears truncated");
+        heap_caps_free(buf);
+        return nullptr;
+    }
+
     outSize = total;
     Serial.printf("[Pipeline] Downloaded %u bytes\n", total);
+    activityLogf("Artwork downloaded: %u bytes", (unsigned)total);
     return buf;
 }
 
@@ -881,21 +954,30 @@ bool pipelineProcessUrl(const char* url,
                         const char* artist, const char* title, const char* album) {
     size_t jpegSize;
     uint8_t* jpegBuf = downloadJpeg(url, jpegSize);
-    if (!jpegBuf || jpegSize == 0) return false;
+    if (!jpegBuf || jpegSize == 0) {
+        activityLog("Artwork fetch failed");
+        return false;
+    }
 
     // Save to album art history (before processJpegBuffer frees the buffer)
     if (artist && artist[0] && title && title[0]) {
         sdHistorySave(artist, title, album, jpegBuf, jpegSize);
     }
 
-    if (processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum))
+    if (processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum)) {
+        activityLog("Artwork render complete");
         return true; // takes ownership of jpegBuf
+    }
 
     // JPEG wasn't decodable — show placeholder with track info
     Serial.println("[Pipeline] Artwork decode failed — showing placeholder");
     if (artist && artist[0]) {
-        return pipelineShowPlaceholder(artist, album);
+        bool shown = pipelineShowPlaceholder(artist, album);
+        activityLog(shown ? "Artwork fallback: placeholder shown"
+                          : "Artwork fallback failed: placeholder");
+        return shown;
     }
+    activityLog("Artwork decode failed (no fallback metadata)");
     return false;
 }
 
