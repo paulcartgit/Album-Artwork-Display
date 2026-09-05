@@ -148,6 +148,7 @@ static int queryReleases(const char* artist, const String& album, ReleaseInfo& o
     // Only the handful of fields we use, so the document stays small.
     JsonDocument filter;
     JsonObject rel = filter["releases"].add<JsonObject>();
+    rel["id"] = true;
     rel["date"] = true;
     rel["country"] = true;
     rel["label-info"][0]["catalog-number"] = true;
@@ -184,6 +185,16 @@ static int queryReleases(const char* artist, const String& album, ReleaseInfo& o
         if (year < bestYear) { bestYear = year; best = r; }
     }
     if (best.isNull()) best = releases[0];
+
+    // Keep the ids so cover art can be compared later. Ordered as MusicBrainz
+    // returned them, which is by match confidence, so the most likely release
+    // is tried first and a truncated list still contains the obvious answer.
+    out.candidateCount = 0;
+    for (JsonObject r : releases) {
+        if (out.candidateCount >= RELEASE_CANDIDATES) break;
+        const char* id = r["id"] | "";
+        if (id && *id) out.candidates[out.candidateCount++] = id;
+    }
 
     String date = best["date"] | "";
     if (date.length() >= 4) out.year = date.substring(0, 4);

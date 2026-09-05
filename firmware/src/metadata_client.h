@@ -13,12 +13,22 @@
 // second, both of which we honour. Results are cached per album in the history
 // index, so a given record is looked up once and never again.
 
+#define RELEASE_CANDIDATES 6   // release ids kept for cover-art selection
+
 struct ReleaseInfo {
     String year;            // "1973"
     String label;           // "Harvest"
     String catalogNumber;   // "SHVL 804"
     String country;         // "GB"
     bool found = false;
+
+    // MusicBrainz ids of the matching releases, for fetching alternative
+    // cover art. The same album is pressed many times and the editions do not
+    // render alike on a six-colour panel — measured across six sleeves of
+    // Help!, the best scored roughly twice as well as the worst, and that gap
+    // is in the source image where no amount of dithering can reach it.
+    String candidates[RELEASE_CANDIDATES];
+    int candidateCount = 0;
 };
 
 // Blocking; typically under a second. Safe to call with anything — an empty or

@@ -10,6 +10,7 @@
 #include "backoff.h"
 #include "history_policy.h"
 #include "fill_policy.h"
+#include "cover_match.h"
 #include "dither.h"
 
 // Include the implementation directly for native test builds
@@ -254,6 +255,95 @@ static void addBar(uint8_t* rgb, int w, int h, int y0, int y1) {
             uint8_t v = ((s >> 20) & 1) ? 255 : 0;
             rgb[i] = v; rgb[i+1] = v; rgb[i+2] = v;
         }
+}
+
+
+// ─── Cover variant matching ───
+// The risk this guards against: ranking every cover MusicBrainz returns purely
+// on how well it renders would hang an obscure reissue on the wall instead of
+// the famous sleeve. The gate has to admit different SCANS of one artwork and
+// reject different artwork.
+
+static void fillPattern(uint8_t* rgb, int w, int h, int seed) {
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            uint8_t* p = &rgb[((y * w) + x) * 3];
+            p[0] = (uint8_t)((x * 7 + y * 3 + seed * 53) & 0xFF);
+            p[1] = (uint8_t)((x * 3 + y * 11 + seed * 31) & 0xFF);
+            p[2] = (uint8_t)((x * 5 + y * 5 + seed * 17) & 0xFF);
+        }
+}
+
+void test_cover_same_image_matches_itself(void) {
+    const int W = 64, H = 64;
+    static uint8_t a[W * H * 3];
+    fillPattern(a, W, H, 1);
+    float sa[COVER_SIG_LEN], sb[COVER_SIG_LEN];
+    coverSignature(a, W, H, sa);
+    coverSignature(a, W, H, sb);
+    TEST_ASSERT_TRUE(coverSimilarity(sa, sb) > 0.999f);
+}
+
+void test_cover_survives_a_darker_scan(void) {
+    // A pressing that scanned darker, or with a colour cast, is the SAME
+    // sleeve and must still qualify — those differences are exactly what the
+    // feature exists to choose between.
+    const int W = 64, H = 64;
+    static uint8_t a[W * H * 3], b[W * H * 3];
+    fillPattern(a, W, H, 1);
+    for (int i = 0; i < W * H; i++) {
+        b[i*3+0] = (uint8_t)(a[i*3+0] * 0.65f);
+        b[i*3+1] = (uint8_t)(a[i*3+1] * 0.65f);
+        b[i*3+2] = (uint8_t)(a[i*3+2] * 0.80f);   // and cooler
+    }
+    float sa[COVER_SIG_LEN], sb[COVER_SIG_LEN];
+    coverSignature(a, W, H, sa);
+    coverSignature(b, W, H, sb);
+    TEST_ASSERT_TRUE(coverIsSameArtwork(sa, sb));
+}
+
+void test_cover_rejects_different_artwork(void) {
+    const int W = 64, H = 64;
+    static uint8_t a[W * H * 3], b[W * H * 3];
+    fillPattern(a, W, H, 1);
+    fillPattern(b, W, H, 9);
+    float sa[COVER_SIG_LEN], sb[COVER_SIG_LEN];
+    coverSignature(a, W, H, sa);
+    coverSignature(b, W, H, sb);
+    TEST_ASSERT_FALSE(coverIsSameArtwork(sa, sb));
+}
+
+void test_cover_signature_is_resolution_independent(void) {
+    // Cover Art Archive serves whatever size it has; two sizes of one scan
+    // must not read as two different sleeves.
+    const int W = 96, H = 96;
+    static uint8_t big[W * H * 3];
+    fillPattern(big, W, H, 4);
+    static uint8_t small[(W/3) * (H/3) * 3];
+    for (int y = 0; y < H/3; y++)
+        for (int x = 0; x < W/3; x++)
+            for (int c = 0; c < 3; c++) {
+                int sum = 0;
+                for (int j = 0; j < 3; j++)
+                    for (int i = 0; i < 3; i++)
+                        sum += big[(((y*3+j) * W) + (x*3+i)) * 3 + c];
+                small[((y * (W/3)) + x) * 3 + c] = (uint8_t)(sum / 9);
+            }
+    float sa[COVER_SIG_LEN], sb[COVER_SIG_LEN];
+    coverSignature(big, W, H, sa);
+    coverSignature(small, W/3, H/3, sb);
+    TEST_ASSERT_TRUE(coverIsSameArtwork(sa, sb));
+}
+
+void test_cover_flat_image_is_safe(void) {
+    const int W = 16, H = 16;
+    static uint8_t flat[W * H * 3];
+    for (int i = 0; i < W * H * 3; i++) flat[i] = 128;
+    float s[COVER_SIG_LEN];
+    coverSignature(flat, W, H, s);           // zero variance must not divide by zero
+    TEST_ASSERT_TRUE(coverSimilarity(s, s) >= 0.0f);
+    coverSignature(nullptr, 0, 0, s);        // and a failed decode must not crash
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, s[0]);
 }
 
 void test_fill_photographic_can_crop(void) {
@@ -504,6 +594,11 @@ int main(int argc, char** argv) {
     RUN_TEST(test_dither_zero_size_is_safe);
 
     // Artwork fill policy
+    RUN_TEST(test_cover_same_image_matches_itself);
+    RUN_TEST(test_cover_survives_a_darker_scan);
+    RUN_TEST(test_cover_rejects_different_artwork);
+    RUN_TEST(test_cover_signature_is_resolution_independent);
+    RUN_TEST(test_cover_flat_image_is_safe);
     RUN_TEST(test_fill_photographic_can_crop);
     RUN_TEST(test_fill_type_across_sleeve_is_protected);
     RUN_TEST(test_fill_narrow_band_is_not_averaged_away);
