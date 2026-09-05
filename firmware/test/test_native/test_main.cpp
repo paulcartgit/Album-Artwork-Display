@@ -151,18 +151,67 @@ void test_dither_pixel_packing(void) {
 
 // Profiles must change output, and Natural must remain the documented default.
 void test_dither_profiles_differ(void) {
+    // One colour is no longer enough to separate the profiles. The only thing
+    // the profile changes inside the dither is the chroma penalty, and that
+    // penalty only ever applied to the achromatic entries — now that a light
+    // tint has a chromatic target of its own, White is rarely the nearest
+    // match and the penalty seldom decides anything. That is the point of the
+    // white-paired blends, but the profiles must still differ SOMEWHERE, so
+    // sweep a spread of colours rather than pinning one lavender.
     const int W = 16, H = 16;
     uint8_t rgb[W * H * 3];
-    fillSolid(rgb, W, H, 150, 110, 170); // a muted lavender
-
     uint8_t punchy[W * H / 2], soft[W * H / 2];
-    memset(punchy, 0, sizeof(punchy));
-    memset(soft, 0, sizeof(soft));
 
-    ditherFloydSteinberg(rgb, punchy, W, H, RENDER_PROFILES[PROFILE_PUNCHY]);
-    ditherFloydSteinberg(rgb, soft,   W, H, RENDER_PROFILES[PROFILE_SOFT]);
+    int differing = 0;
+    for (int r = 40; r <= 220; r += 60)
+        for (int g = 40; g <= 220; g += 60)
+            for (int b = 40; b <= 220; b += 60) {
+                fillSolid(rgb, W, H, r, g, b);
+                memset(punchy, 0, sizeof(punchy));
+                memset(soft, 0, sizeof(soft));
+                ditherFloydSteinberg(rgb, punchy, W, H, RENDER_PROFILES[PROFILE_PUNCHY]);
+                ditherFloydSteinberg(rgb, soft,   W, H, RENDER_PROFILES[PROFILE_SOFT]);
+                if (memcmp(punchy, soft, sizeof(punchy)) != 0) differing++;
+            }
 
-    TEST_ASSERT_NOT_EQUAL(0, memcmp(punchy, soft, sizeof(punchy)));
+    TEST_ASSERT_GREATER_THAN(0, differing);
+}
+
+void test_shaded_blue_does_not_go_green(void) {
+    // Help!'s blue capes came out 20% GREEN pigment. Every pigment is darker
+    // and more saturated than the artwork's mid-tones, so the LIT part of a
+    // blue cape needs Blue mixed with White — and the chroma penalty pushes
+    // chromatic pixels away from White. With no light-blue target the dither
+    // reached for the next lightest chromatic pigment instead: Green.
+    //
+    // It has to be a shaded ramp, not a flat patch. A flat patch of the cape
+    // colour dithers identically either way (11% green both before and after);
+    // the fault only appears where the same hue runs from lit to shadowed,
+    // which is what a photographed garment actually is.
+    const int W = 64, H = 64;
+    static uint8_t rgb[W * H * 3];
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            float t = 0.45f + (0.90f * x) / (W - 1);
+            uint8_t* px = &rgb[(y * W + x) * 3];
+            px[0] = (uint8_t)fminf(255.0f, 0x0C * t);
+            px[1] = (uint8_t)fminf(255.0f, 0x58 * t);
+            px[2] = (uint8_t)fminf(255.0f, 0x90 * t);
+        }
+    }
+
+    static uint8_t packed[W * H / 2];
+    ditherFloydSteinberg(rgb, packed, W, H);
+
+    int counts[EPD_COLORS] = {0};
+    for (int i = 0; i < W * H / 2; i++) {
+        counts[(packed[i] >> 4) & 0x0F]++;
+        counts[packed[i] & 0x0F]++;
+    }
+    const int total = W * H;
+    // Was 16% green before the white-paired blends, 5% after.
+    TEST_ASSERT_LESS_THAN(total / 10, counts[2]);
+    TEST_ASSERT_GREATER_THAN(total / 2, counts[3]);
 }
 
 void test_dither_zero_size_is_safe(void) {
@@ -451,6 +500,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_dither_emits_only_real_palette_indices);
     RUN_TEST(test_dither_pixel_packing);
     RUN_TEST(test_dither_profiles_differ);
+    RUN_TEST(test_shaded_blue_does_not_go_green);
     RUN_TEST(test_dither_zero_size_is_safe);
 
     // Artwork fill policy

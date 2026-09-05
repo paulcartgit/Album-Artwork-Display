@@ -149,11 +149,28 @@ check("solid black stays flat black", (idx == 0).all())
 _, idx = eink.dither(solid(4, 4, (255, 255, 255)))
 check("solid white stays flat white", (idx == 1).all())
 
-# Profiles must actually change the output.
-grad = solid(16, 16, (150, 110, 170))
-_, punchy = eink.dither(grad, 0)
-_, soft = eink.dither(grad, 2)
+# Profiles must actually change the output. This has to go through the whole
+# pipeline, not just dither(): once the white-paired blends were added the
+# chroma penalty stopped mattering for most colours — it only ever penalised
+# the achromatic entries, and a light tint now has a chromatic target of its
+# own — so matching alone no longer separates the profiles. They still differ,
+# via sharpen, contrast and gamma.
+grad = np.tile(np.linspace(0, 255, 32, dtype=np.uint8)[None, :, None], (32, 1, 3))
+grad[..., 1] = (grad[..., 1] * 0.7).astype(np.uint8)
+punchy = eink.enhance_for_eink(grad, 0)
+soft = eink.enhance_for_eink(grad, 2)
 check("render profiles produce different output", not np.array_equal(punchy, soft))
+
+# The penalty is now near-redundant, which is the point of the blends, but it
+# must not have become a no-op that silently stops protecting saturated colour.
+_m0 = eink._MatchCache(eink.profile(0))
+_m2 = eink._MatchCache(eink.profile(2))
+_rng = np.random.default_rng(4)
+_c = _rng.integers(0, 256, (400, 3))
+_d = (_m0.lookup(_c[:, 0], _c[:, 1], _c[:, 2])
+      != _m2.lookup(_c[:, 0], _c[:, 1], _c[:, 2])).sum()
+check("chroma penalty still separates profiles somewhere", _d > 0,
+      "profiles now match identically on 400 random colours — the penalty is dead")
 
 # Full render produces a correctly-sized canvas.
 out, idx = eink.render(Image.fromarray(solid(200, 200, (180, 90, 60))),

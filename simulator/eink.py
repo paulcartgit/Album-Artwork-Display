@@ -32,6 +32,8 @@ VIRTUAL_PAIR = (
     (4, 2),   # Brown        -> Red   / Green
     (4, 1),   # Light Pink   -> Red   / White
     (5, 1),   # Light Yellow -> Yellow/ White
+    (3, 1),   # Light Blue   -> Blue  / White
+    (2, 1),   # Light Green  -> Green / White
 )
 MATCH_COLORS = EPD_COLORS + len(VIRTUAL_PAIR)
 

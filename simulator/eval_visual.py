@@ -28,12 +28,20 @@ def stats(idx):
     return c[CHROMATIC].sum() / idx.size * 100, c.max() / idx.size * 100
 
 
+# Covers that must appear in every comparison, whatever the tonal sampling
+# picks. KPOP_DEMON_HUNTERS is the household favourite and the sleeve this
+# whole washed-out investigation started from, so a change that quietly ruins
+# it must never pass unnoticed. HELP is the blue-capes-going-green regression.
+KEY_COVERS = [
+    "995beeb2.jpg",   # HUNTR/X - KPop Demon Hunters
+    "bb8149c0.jpg",   # The Beatles - Help!
+]
+
 tone = json.load(open("/tmp/tone.json"))
 picks = [t["file"] for t in tone[:5]]                       # palest
 picks += [t["file"] for t in tone[len(tone)//2 - 2:len(tone)//2 + 2]]  # middle
 picks += [t["file"] for t in tone[-4:]]                     # darkest
-if "995beeb2.jpg" not in picks:
-    picks.insert(0, "995beeb2.jpg")
+picks = [k for k in KEY_COVERS if k not in picks] + picks
 label = {t["file"]: t["label"] for t in tone}
 strength = float(sys.argv[1]) if len(sys.argv) > 1 else 0.75
 

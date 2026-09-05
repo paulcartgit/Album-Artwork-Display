@@ -71,16 +71,17 @@ static Lab rgbToLabF(float r, float g, float b) {
 // genuinely wants and the matcher previously had to approximate by diffusing
 // error across neighbours, which reads as noise rather than as the colour.
 //
-// The two WHITE-paired entries are the reason this list grew. A pale tint had
-// no target: White is the nearest entry in Lab AND the chroma penalty below
-// actively pushes low-chroma pixels toward the achromatic entries, so pale
-// regions collapsed onto flat white pigment — the washed-out slab that started
-// this. Light Pink and Light Yellow give those regions somewhere to go.
-static constexpr int MATCH_COLORS = EPD_COLORS + 7;
+// The four WHITE-paired entries matter most. Every pigment here is darker and
+// more saturated than the artwork's mid-tones, so rendering a LIGHT version of
+// a colour needs that pigment mixed with White — and the chroma penalty below
+// deliberately pushes chromatic pixels AWAY from White. Without a light-blue
+// target the dither cannot lighten blue, so it reaches for the next lightest
+// chromatic pigment instead: Help!'s blue capes came out 20% green pigment.
+static constexpr int MATCH_COLORS = EPD_COLORS + 9;
 
 // The two real palette indices each virtual colour interleaves between.
 // Palette order: 0 Black, 1 White, 2 Green, 3 Blue, 4 Red, 5 Yellow.
-static constexpr uint8_t VIRTUAL_PAIR[7][2] = {
+static constexpr uint8_t VIRTUAL_PAIR[9][2] = {
     { 2, 3 },  // Cyan         → Green / Blue
     { 4, 3 },  // Magenta      → Red   / Blue
     { 4, 5 },  // Orange       → Red   / Yellow
@@ -88,6 +89,8 @@ static constexpr uint8_t VIRTUAL_PAIR[7][2] = {
     { 4, 2 },  // Brown        → Red   / Green
     { 4, 1 },  // Light Pink   → Red   / White
     { 5, 1 },  // Light Yellow → Yellow/ White
+    { 3, 1 },  // Light Blue   → Blue  / White
+    { 2, 1 },  // Light Green  → Green / White
 };
 
 // Matching palette in RGB, derived from PALETTE at startup.

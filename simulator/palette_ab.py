@@ -44,6 +44,16 @@ def run(pal, files):
     return out
 
 
+# Covers that must appear in every comparison, whatever the tonal sampling
+# picks. KPOP_DEMON_HUNTERS is the household favourite and the sleeve this
+# whole washed-out investigation started from, so a change that quietly ruins
+# it must never pass unnoticed. HELP is the blue-capes-going-green regression.
+KEY_COVERS = [
+    "995beeb2.jpg",   # HUNTR/X - KPop Demon Hunters
+    "bb8149c0.jpg",   # The Beatles - Help!
+]
+
+
 def score(idx):
     c = np.bincount(idx.ravel(), minlength=6)
     return c[2:].sum() / idx.size * 100, c[1] / idx.size * 100
@@ -53,6 +63,7 @@ if __name__ == "__main__":
     tone = json.load(open("/tmp/tone.json"))
     label = {t["file"]: t["label"] for t in tone}
     files = [tone[i]["file"] for i in (0, 3, 8, 20, 35, 50, 60, 75, 88, 97)]
+    files = [k for k in KEY_COVERS if k not in files] + files
 
     a = run(CURRENT, files)
     b = run(MEASURED, files)

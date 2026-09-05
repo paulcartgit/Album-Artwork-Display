@@ -3,7 +3,7 @@ import importlib, json
 import numpy as np
 from PIL import Image, ImageDraw
 OLD=((2,3),(4,3))
-NEW=((2,3),(4,3),(4,5),(2,5),(4,2),(4,1),(5,1))
+NEW=((2,3),(4,3),(4,5),(2,5),(4,2),(4,1),(5,1),(3,1),(2,1))
 def run(pairs, files):
     import eink; importlib.reload(eink)
     eink.VIRTUAL_PAIR=pairs
@@ -20,8 +20,18 @@ def run(pairs, files):
         c=eink.enhance_for_eink(fill_modes.build(art,1,bg_style=1),1)
         _,i=eink.dither(c,1); out[f]=np.asarray(i).copy()
     return out
+# Covers that must appear in every comparison, whatever the tonal sampling
+# picks. KPOP_DEMON_HUNTERS is the household favourite and the sleeve this
+# whole washed-out investigation started from, so a change that quietly ruins
+# it must never pass unnoticed. HELP is the blue-capes-going-green regression.
+KEY_COVERS = [
+    "995beeb2.jpg",   # HUNTR/X - KPop Demon Hunters
+    "bb8149c0.jpg",   # The Beatles - Help!
+]
+
 tone=json.load(open('/tmp/tone.json')); label={t['file']:t['label'] for t in tone}
 files=[tone[i]['file'] for i in (0,1,3,8,20,35,50,60,75,88,97)]
+files=[k for k in KEY_COVERS if k not in files]+files
 a=run(OLD,files); b=run(NEW,files)
 import eink
 TRUE=np.array(eink.PALETTE_RGB,dtype=np.uint8)
