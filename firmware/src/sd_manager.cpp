@@ -2,6 +2,7 @@
 #include <SD_MMC.h>
 #include <ArduinoJson.h>
 #include <ctime>
+#include "history_policy.h"
 
 bool sdInit() {
     SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3);
@@ -153,20 +154,31 @@ static bool readIndex(JsonDocument& doc) {
 // first.  Entries written by older firmware carry small millis()-derived values
 // which naturally sort below any real epoch time, so they are pruned first —
 // which is what we want, since they genuinely are the oldest.
-static const uint32_t EPOCH_PLAUSIBLE = 1600000000UL; // 2020-09-13
-
+// See history_policy.h for the rules; they live there so they can be tested
+// without an SD card.
 static uint32_t historyTimestamp(JsonArray arr) {
-    time_t now = time(nullptr);
-    if ((uint32_t)now >= EPOCH_PLAUSIBLE) return (uint32_t)now;
-
-    // NTP hasn't synced yet — stay monotonic by sitting just above the newest
-    // entry we already have, so relative ordering still works.
-    uint32_t highest = 0;
+    HistoryEntryMeta metas[HISTORY_MAX];
+    int n = 0;
     for (JsonObject obj : arr) {
-        uint32_t ts = obj["ts"] | 0UL;
-        if (ts > highest) highest = ts;
+        if (n >= HISTORY_MAX) break;
+        metas[n].ts     = obj["ts"] | 0UL;
+        metas[n].pinned = obj["pin"] | false;
+        n++;
     }
-    return highest + 1;
+    return historyNextTimestamp((uint32_t)time(nullptr), metas, n);
+}
+
+// Index of the entry to evict, or -1 when everything is pinned.
+static int historyPruneTarget(JsonArray arr) {
+    HistoryEntryMeta metas[HISTORY_MAX];
+    int n = 0;
+    for (JsonObject obj : arr) {
+        if (n >= HISTORY_MAX) break;
+        metas[n].ts     = obj["ts"] | 0UL;
+        metas[n].pinned = obj["pin"] | false;
+        n++;
+    }
+    return historyPruneIndex(metas, n);
 }
 
 static bool writeIndex(const JsonDocument& doc) {
@@ -221,18 +233,7 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
 
     // Prune oldest non-pinned entry if at capacity
     while (arr.size() >= HISTORY_MAX) {
-        // Find oldest non-pinned entry by timestamp
-        int oldest = -1;
-        uint32_t oldestTs = UINT32_MAX;
-        int i = 0;
-        for (JsonObject obj : arr) {
-            bool pinned = obj["pin"] | false;
-            if (!pinned) {
-                uint32_t ts = obj["ts"] | 0UL;
-                if (ts < oldestTs) { oldestTs = ts; oldest = i; }
-            }
-            i++;
-        }
+        int oldest = historyPruneTarget(arr);
         if (oldest < 0) {
             // All entries are pinned — cannot prune
             Serial.println("[History] All entries pinned, cannot prune");

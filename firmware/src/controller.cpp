@@ -15,6 +15,7 @@
 #include "image_pipeline.h"
 #include "web_server.h"
 #include "activity_log.h"
+#include "backoff.h"
 
 // ─── Shared state (declared in app.h) ───
 AppContext  g_app = {};
@@ -45,15 +46,13 @@ static void IRAM_ATTR onKeyPress() {
 
 // Escalating cooldown duration based on the current level
 static unsigned long vinylCooldownMs() {
-    unsigned long cooldown = g_app.settings.no_match_cooldown_ms *
-                             (1 + (unsigned long)g_app.vinylCooldownLevel);
-    if (cooldown > VINYL_MAX_COOLDOWN_MS) cooldown = VINYL_MAX_COOLDOWN_MS;
-    return cooldown;
+    return vinylCooldownMsFor(g_app.settings.no_match_cooldown_ms,
+                              g_app.vinylCooldownLevel, VINYL_MAX_COOLDOWN_MS);
 }
 
 // Retries before entering cooldown (fewer after the first escalation)
 static int vinylMaxRetries() {
-    return (g_app.vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
+    return vinylMaxRetriesFor(g_app.vinylCooldownLevel, VINYL_MAX_RETRIES);
 }
 
 // ─── Forward declarations ───

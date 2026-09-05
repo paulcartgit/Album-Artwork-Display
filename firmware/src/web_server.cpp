@@ -8,6 +8,7 @@
 #include "image_pipeline.h"
 #include "activity_log.h"
 #include "wav_utils.h"
+#include "backoff.h"
 
 #include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
@@ -248,11 +249,11 @@ void webServerInit() {
             unsigned long since = now - g_app.lastNoMatchTime;
             doc["no_match_retries"] = g_app.vinylNoMatchCount;
             doc["cooldown_level"]   = g_app.vinylCooldownLevel;
-            int maxRetries = (g_app.vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
+            int maxRetries = vinylMaxRetriesFor(g_app.vinylCooldownLevel, VINYL_MAX_RETRIES);
             if (g_app.vinylNoMatchCount >= maxRetries) {
-                unsigned long cooldown = g_app.settings.no_match_cooldown_ms *
-                                         (1 + (unsigned long)g_app.vinylCooldownLevel);
-                if (cooldown > VINYL_MAX_COOLDOWN_MS) cooldown = VINYL_MAX_COOLDOWN_MS;
+                uint32_t cooldown = vinylCooldownMsFor(g_app.settings.no_match_cooldown_ms,
+                                                       g_app.vinylCooldownLevel,
+                                                       VINYL_MAX_COOLDOWN_MS);
                 if (since < cooldown) doc["cooldown_remaining_sec"] = (cooldown - since) / 1000;
             } else if (since < VINYL_RETRY_DELAY_MS) {
                 doc["retry_in_sec"] = (VINYL_RETRY_DELAY_MS - since) / 1000;

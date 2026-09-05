@@ -43,25 +43,18 @@ try:
 except ImportError:
     HAS_AUDIO = False
 
-# ─── Constants (portrait 7.3" e-ink panel) ───
-EPD_WIDTH = 480
-EPD_HEIGHT = 800
-ART_SIZE = 480   # top square for album art
-INFO_HEIGHT = EPD_HEIGHT - ART_SIZE  # 320px bottom panel for track info
+# ─── Constants ───
+# Read straight from firmware/src/config.h — see firmware_config.py.  These
+# used to be a hand-maintained copy that had drifted to a seven-colour palette
+# (including an Orange the panel doesn't have) with completely different RGB
+# values from the real pigments.
+from firmware_config import (          # noqa: E402
+    EPD_WIDTH, EPD_HEIGHT, EPD_COLORS,
+    PALETTE_RGB, PALETTE_NAMES, PALETTE_HEX, RENDER_PROFILES, DEFAULT_PROFILE,
+)
+import eink                            # noqa: E402
 
-PALETTE = np.array([
-    [0x00, 0x00, 0x00],  # 0 Black
-    [0xFF, 0xFF, 0xFF],  # 1 White
-    [0x60, 0x80, 0x50],  # 2 Green
-    [0x50, 0x80, 0xB8],  # 3 Blue
-    [0xA0, 0x20, 0x20],  # 4 Red
-    [0xF0, 0xE0, 0x50],  # 5 Yellow
-    [0xE0, 0x80, 0x30],  # 6 Orange
-], dtype=np.float64)
-
-PALETTE_NAMES = ["Black", "White", "Green", "Blue", "Red", "Yellow", "Orange"]
-
-STATES = ["BOOT", "IDLE", "DIGITAL", "VINYL", "ERROR"]
+PALETTE = eink.PALETTE
 
 # ─── Paths ───
 SIM_DIR = Path(__file__).parent
@@ -590,267 +583,6 @@ def vinyl_recheck():
 # Floyd-Steinberg Dithering (mirrors dither.cpp exactly)
 # ═══════════════════════════════════════════════════════════════
 
-def nearest_palette_color(r, g, b):
-    """Find nearest palette color by Euclidean RGB distance."""
-    diff = PALETTE - np.array([r, g, b])
-    dists = np.sum(diff ** 2, axis=1)
-    return int(np.argmin(dists))
-
-
-def dither_floyd_steinberg(img):
-    """
-    Apply Floyd-Steinberg error-diffusion dithering to a 480×800 RGB image.
-    Returns a PIL Image using only the 7-color palette.
-    Mirrors dither.cpp exactly.
-    """
-    w, h = img.size
-    # Work in float64 for error diffusion
-    buf = np.array(img, dtype=np.float64)
-    out = np.zeros((h, w), dtype=np.uint8)
-
-    for y in range(h):
-        for x in range(w):
-            # Clamp
-            r = max(0.0, min(255.0, buf[y, x, 0]))
-            g = max(0.0, min(255.0, buf[y, x, 1]))
-            b = max(0.0, min(255.0, buf[y, x, 2]))
-
-            ci = nearest_palette_color(r, g, b)
-            out[y, x] = ci
-
-            # Quantisation error
-            er = r - PALETTE[ci, 0]
-            eg = g - PALETTE[ci, 1]
-            eb = b - PALETTE[ci, 2]
-
-            # Distribute error to neighbours
-            if x + 1 < w:
-                buf[y, x + 1] += np.array([er, eg, eb]) * 7.0 / 16.0
-            if y + 1 < h:
-                if x - 1 >= 0:
-                    buf[y + 1, x - 1] += np.array([er, eg, eb]) * 3.0 / 16.0
-                buf[y + 1, x] += np.array([er, eg, eb]) * 5.0 / 16.0
-                if x + 1 < w:
-                    buf[y + 1, x + 1] += np.array([er, eg, eb]) * 1.0 / 16.0
-
-    # Convert index buffer back to RGB image
-    result = np.zeros((h, w, 3), dtype=np.uint8)
-    for ci in range(len(PALETTE)):
-        mask = out == ci
-        result[mask] = PALETTE[ci].astype(np.uint8)
-
-    return Image.fromarray(result, "RGB"), out
-
-
-def scale_and_fit(img, target_w=EPD_WIDTH, target_h=EPD_HEIGHT):
-    """Scale to fit within target size, center on black background (letterbox)."""
-    src_w, src_h = img.size
-    scale = min(target_w / src_w, target_h / src_h)  # fit, no crop
-
-    scaled_w = int(src_w * scale)
-    scaled_h = int(src_h * scale)
-
-    img = img.resize((scaled_w, scaled_h), Image.LANCZOS)
-
-    # Center on black canvas
-    canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
-    left = (target_w - scaled_w) // 2
-    top = (target_h - scaled_h) // 2
-    canvas.paste(img, (left, top))
-    return canvas
-
-
-def _load_font(size):
-    """Load a nice font at the given size, with fallbacks."""
-    font_paths = [
-        "/System/Library/Fonts/HelveticaNeue.ttc",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/System/Library/Fonts/Avenir Next.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Linux
-    ]
-    for fp in font_paths:
-        if os.path.exists(fp):
-            try:
-                return ImageFont.truetype(fp, size)
-            except Exception:
-                continue
-    return ImageFont.load_default()
-
-
-def _wrap_text(text, font, max_width, draw):
-    """Word-wrap text to fit within max_width pixels. Returns list of lines."""
-    words = text.split()
-    if not words:
-        return []
-    lines = []
-    current = words[0]
-    for word in words[1:]:
-        test = current + " " + word
-        bbox = draw.textbbox((0, 0), test, font=font)
-        if bbox[2] - bbox[0] <= max_width:
-            current = test
-        else:
-            lines.append(current)
-            current = word
-    lines.append(current)
-    return lines
-
-
-def _extract_dominant_color(img):
-    """Extract a dominant color from the album art for the info panel background.
-    Samples the bottom edge of the art to create a natural visual flow."""
-    w, h = img.size
-    # Sample the bottom 20% of the image
-    strip = img.crop((0, int(h * 0.8), w, h))
-    small = strip.resize((80, 16), Image.LANCZOS)
-    pixels = np.array(small).reshape(-1, 3).astype(np.float64)
-    avg = pixels.mean(axis=0)
-    # Darken to make it a rich panel background
-    bg = tuple(max(0, int(c * 0.7)) for c in avg)
-    return bg
-
-
-def _text_color_for_bg(bg):
-    """Pick white or near-black text based on background luminance."""
-    lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
-    if lum > 128:
-        return (20, 20, 20)  # dark text on light bg
-    return (240, 240, 240)   # light text on dark bg
-
-
-def _secondary_text_color(bg):
-    """Slightly muted secondary text color (for artist/album)."""
-    lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
-    if lum > 128:
-        return (60, 60, 60)
-    return (180, 180, 180)
-
-
-def compose_display(art_img, artist="", title="", album=""):
-    """Compose the full 480×800 display: album art top, track info bottom.
-
-    The info panel background color is extracted from the album art's
-    bottom edge to create a natural visual flow.
-
-    Layout (top to bottom):
-    ┌──────────────┐
-    │              │
-    │   480×480    │
-    │   album art  │
-    │              │
-    ├──────────────┤
-    │  Title       │
-    │  Artist      │
-    │  Album       │
-    │              │
-    └──────────────┘
-       480px wide
-       480 + 320 = 800px tall
-    """
-    canvas = Image.new("RGB", (EPD_WIDTH, EPD_HEIGHT), (0, 0, 0))
-
-    # Filter out raw Sonos URL paths from album field
-    if album and ("/" in album or "getaa" in album or album.startswith("x-")):
-        album = ""
-
-    show_info = settings.get("show_track_info", True)
-    has_info = show_info and (artist or title or album)
-
-    # ── Top: album art ──
-    if art_img:
-        src_w, src_h = art_img.size
-        scale = min(ART_SIZE / src_w, ART_SIZE / src_h)
-        art_resized = art_img.resize((int(src_w * scale), int(src_h * scale)), Image.LANCZOS)
-        ax = (ART_SIZE - art_resized.size[0]) // 2
-        if has_info:
-            ay = (ART_SIZE - art_resized.size[1]) // 2
-        else:
-            # No track info — center art vertically on the full display
-            ay = (EPD_HEIGHT - art_resized.size[1]) // 2
-        canvas.paste(art_resized, (ax, ay))
-
-    if not has_info:
-        return canvas
-
-    # Extract panel background from album art
-    if art_img:
-        bg_color = _extract_dominant_color(art_img)
-    else:
-        bg_color = (30, 30, 30)
-
-    # Fill the info panel area
-    draw = ImageDraw.Draw(canvas)
-    draw.rectangle([(0, ART_SIZE), (EPD_WIDTH, EPD_HEIGHT)], fill=bg_color)
-
-    title_color = _text_color_for_bg(bg_color)
-    secondary_color = _secondary_text_color(bg_color)
-
-    panel_x = 32
-    panel_w = EPD_WIDTH - 64
-
-    font_title = _load_font(38)
-    font_artist = _load_font(30)
-    font_album = _load_font(24)
-
-    # -- Measure total text height first for vertical centering --
-    temp_draw = draw
-    text_height = 0
-    title_lines = _wrap_text(title, font_title, panel_w, temp_draw)[:3] if title else []
-    artist_lines = _wrap_text(artist, font_artist, panel_w, temp_draw)[:2] if artist else []
-    album_lines = _wrap_text(album, font_album, panel_w, temp_draw)[:2] if album else []
-
-    for line in title_lines:
-        bbox = temp_draw.textbbox((0, 0), line, font=font_title)
-        text_height += (bbox[3] - bbox[1]) + 6
-    if title_lines:
-        text_height += 10  # gap after title block
-
-    for line in artist_lines:
-        bbox = temp_draw.textbbox((0, 0), line, font=font_artist)
-        text_height += (bbox[3] - bbox[1]) + 4
-    if artist_lines:
-        text_height += 12  # gap after artist block
-
-    for line in album_lines:
-        bbox = temp_draw.textbbox((0, 0), line, font=font_album)
-        text_height += (bbox[3] - bbox[1]) + 4
-
-    # Center text vertically in the info panel
-    panel_top = ART_SIZE
-    panel_height = EPD_HEIGHT - ART_SIZE
-    y = panel_top + max(0, (panel_height - text_height) // 2)
-
-    # Title — large
-    for line in title_lines:
-        draw.text((panel_x, y), line, fill=title_color, font=font_title)
-        bbox = draw.textbbox((panel_x, y), line, font=font_title)
-        y = bbox[3] + 6
-    if title_lines:
-        y += 10
-
-    # Artist — medium
-    for line in artist_lines:
-        draw.text((panel_x, y), line, fill=secondary_color, font=font_artist)
-        bbox = draw.textbbox((panel_x, y), line, font=font_artist)
-        y = bbox[3] + 4
-    if artist_lines:
-        y += 12
-
-    # Album — smaller, most muted
-    if album_lines:
-        album_color = tuple(int(secondary_color[i] * 0.7 + bg_color[i] * 0.3) for i in range(3))
-        for line in album_lines:
-            draw.text((panel_x, y), line, fill=album_color, font=font_album)
-            bbox = draw.textbbox((panel_x, y), line, font=font_album)
-            y = bbox[3] + 4
-
-    return canvas
-
-
-# ═══════════════════════════════════════════════════════════════
-# Image Pipeline (mirrors image_pipeline.cpp)
-# ═══════════════════════════════════════════════════════════════
-
 def download_image(url):
     """Download image from URL, return PIL Image."""
     try:
@@ -863,20 +595,38 @@ def download_image(url):
 
 
 def process_image(img):
-    """Compose display layout with track info, optionally dither. Returns (output_pil, index_array_or_None)."""
-    print(f"[Pipeline] Input: {img.size[0]}×{img.size[1]}")
-    composed = compose_display(img, app_state.get("artist", ""),
-                               app_state.get("title", ""), app_state.get("album", ""))
+    """
+    Run the artwork through the same pipeline the firmware uses.
+
+    Everything here lives in eink.py, which mirrors image_pipeline.cpp and
+    dither.cpp.  parity_check.py fails the build if the two drift apart.
+    """
+    print(f"[Pipeline] Input: {img.size[0]}x{img.size[1]}")
+
+    artist = app_state.get("artist", "")
+    album = app_state.get("album", "")
+    # Sonos sometimes puts a URL path in the album field
+    if album and ("/" in album or "getaa" in album or album.startswith("x-")):
+        album = ""
+
+    prof = int(settings.get("render_profile", DEFAULT_PROFILE))
+    bg_mode = int(settings.get("bg_mode", 2))
+    bg_style = int(settings.get("bg_style", 0))
+    show_text = bool(settings.get("show_track_info", True))
+
+    t0 = time.time()
     if settings.get("use_dithering", True):
-        print(f"[Pipeline] Composed {EPD_WIDTH}×{EPD_HEIGHT}, dithering...")
-        t0 = time.time()
-        dithered, indices = dither_floyd_steinberg(composed)
-        dt = time.time() - t0
-        print(f"[Pipeline] Dithered in {dt:.1f}s")
-        return dithered, indices
-    else:
-        print(f"[Pipeline] Composed {EPD_WIDTH}×{EPD_HEIGHT}, dithering OFF")
-        return composed, None
+        out, indices = eink.render(img, artist, album,
+                                   bg_mode=bg_mode, bg_style=bg_style,
+                                   profile_index=prof, show_text=show_text)
+        print(f"[Pipeline] {EPD_WIDTH}x{EPD_HEIGHT} "
+              f"'{RENDER_PROFILES[prof]['name']}' profile in {time.time()-t0:.1f}s")
+        return out, indices
+
+    canvas, _ = eink.compose(img, artist, album, bg_mode, bg_style, prof, show_text)
+    print(f"[Pipeline] Composed {EPD_WIDTH}x{EPD_HEIGHT} in {time.time()-t0:.1f}s "
+          f"(dithering OFF)")
+    return Image.fromarray(canvas, "RGB"), None
 
 
 def process_art_url(art_url):
@@ -1097,6 +847,11 @@ def api_settings_get():
         "poll_interval_ms": settings.get("poll_interval_ms", 45000),
         "show_track_info": settings.get("show_track_info", True),
         "use_dithering": settings.get("use_dithering", True),
+        "render_profile": settings.get("render_profile", DEFAULT_PROFILE),
+        "bg_mode": settings.get("bg_mode", 2),
+        "bg_style": settings.get("bg_style", 0),
+        "profiles": [{"id": i, "name": p["name"]}
+                     for i, p in enumerate(RENDER_PROFILES)],
     })
 
 
@@ -1117,6 +872,9 @@ def api_settings_post():
         settings["show_track_info"] = bool(data["show_track_info"])
     if "use_dithering" in data:
         settings["use_dithering"] = bool(data["use_dithering"])
+    for key in ["render_profile", "bg_mode", "bg_style"]:
+        if key in data:
+            settings[key] = int(data[key])
 
     save_settings()
     return jsonify({"ok": True})
@@ -1221,10 +979,17 @@ def original_png():
     img = app_state.get("original_image")
     if not img:
         return "No image", 404
-    composed = compose_display(img, app_state.get("artist", ""),
-                               app_state.get("title", ""), app_state.get("album", ""))
+    album = app_state.get("album", "")
+    if album and ("/" in album or "getaa" in album or album.startswith("x-")):
+        album = ""
+    canvas, _ = eink.compose(
+        img, app_state.get("artist", ""), album,
+        bg_mode=int(settings.get("bg_mode", 2)),
+        bg_style=int(settings.get("bg_style", 0)),
+        profile_index=int(settings.get("render_profile", DEFAULT_PROFILE)),
+        show_text=bool(settings.get("show_track_info", True)))
     buf = io.BytesIO()
-    composed.save(buf, format="PNG")
+    Image.fromarray(canvas, "RGB").save(buf, format="PNG")
     buf.seek(0)
     return send_file(buf, mimetype="image/png")
 
@@ -1327,6 +1092,9 @@ def load_settings():
             "poll_interval_ms": 45000,
             "show_track_info": True,
             "use_dithering": True,
+            "render_profile": DEFAULT_PROFILE,
+            "bg_mode": 2,
+            "bg_style": 0,
         }
         save_settings()
 
