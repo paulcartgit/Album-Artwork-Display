@@ -381,6 +381,18 @@ static void serviceRequests() {
         return;
     }
 
+    if (g_req.showHistory) {
+        g_req.showHistory = false;
+        String path = String("/history/") + g_req.showHistoryFile;
+        activityLogf("Showing %s on request", g_req.showHistoryFile);
+        if (pipelineProcessFile(path.c_str())) {
+            holdDisplay();
+        } else {
+            activityLogf("Could not display %s", g_req.showHistoryFile);
+        }
+        return;
+    }
+
     // Sonos discovery — SSDP + SOAP, far too slow to run on the AsyncTCP task
     if (g_app.scanState == SCAN_REQUESTED) {
         g_app.scanState = SCAN_RUNNING;

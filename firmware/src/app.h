@@ -66,6 +66,11 @@ struct AppRequests {
     volatile bool testColors;
     volatile bool testDither;
     volatile bool testCalibration;
+
+    // Show one specific history entry, for A/B testing render changes against
+    // a fixed set of covers rather than whatever happens to be playing.
+    volatile bool showHistory;
+    char showHistoryFile[24];
     volatile bool forceListen;
     volatile bool reboot;
 };

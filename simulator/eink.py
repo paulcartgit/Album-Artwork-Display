@@ -75,9 +75,19 @@ MATCH_PAL_CHROMA = np.sqrt(MATCH_PAL_LAB[:, 1] ** 2 + MATCH_PAL_LAB[:, 2] ** 2)
 ACHROMATIC = MATCH_PAL_CHROMA < 5.0
 
 
+# Experimental: penalise CHROMATIC entries when the pixel is neutral, mirroring
+# the existing penalty on achromatic entries when the pixel is chromatic.
+# Set via eink.NEUTRAL_PENALTY_K; 0 reproduces the shipped behaviour.
+NEUTRAL_PENALTY_K = 0.0
+
+
+NEUTRAL_CHROMA_BUCKETS = 4
+
+
 class _MatchCache:
     """
-    Lazily-filled 256^3 lookup of rounded-RGB -> match index.
+    Lazily-filled 256^3 lookup of rounded-RGB -> match index, one table per
+    source-chroma bucket.
 
     The firmware matches on floats; rounding to integers changes the result
     only for pixels sitting exactly on a decision boundary, and buys a ~100x
@@ -87,9 +97,10 @@ class _MatchCache:
     def __init__(self, profile_dict):
         self.k = profile_dict["chroma_penalty_k"]
         self.onset = profile_dict["chroma_penalty_onset"]
-        self._table = np.full(256 * 256 * 256, 255, dtype=np.uint8)
+        self._tables = [np.full(256 * 256 * 256, 255, dtype=np.uint8)
+                        for _ in range(NEUTRAL_CHROMA_BUCKETS)]
 
-    def _compute(self, keys):
+    def _compute(self, keys, bucket):
         rgb = np.stack([(keys >> 16) & 0xFF, (keys >> 8) & 0xFF, keys & 0xFF], axis=-1)
         lab = rgb_to_lab(rgb.astype(np.float64))
         chroma = np.sqrt(lab[:, 1] ** 2 + lab[:, 2] ** 2)
@@ -98,18 +109,29 @@ class _MatchCache:
 
         d = ((lab[:, None, :] - MATCH_PAL_LAB[None, :, :]) ** 2).sum(axis=2)
         d[:, ACHROMATIC] += penalty[:, None]
+
+        if NEUTRAL_PENALTY_K > 0:
+            # Keyed on the SOURCE pixel's chroma, not this pixel's accumulated
+            # value. Error diffusion makes every pixel chromatic within a step
+            # or two, so keying on the running value never engages.
+            src_chroma = (bucket + 0.5) * self.onset / NEUTRAL_CHROMA_BUCKETS
+            deficit = max(0.0, self.onset - src_chroma)
+            weight = (MATCH_PAL_CHROMA ** 2) / 1000.0
+            d[:, ~ACHROMATIC] += (NEUTRAL_PENALTY_K * deficit ** 2
+                                  * weight[None, ~ACHROMATIC])
         return np.argmin(d, axis=1).astype(np.uint8)
 
-    def lookup(self, r, g, b):
+    def lookup(self, r, g, b, bucket=NEUTRAL_CHROMA_BUCKETS - 1):
         keys = (np.rint(np.clip(r, 0, 255)).astype(np.int64) << 16) \
              | (np.rint(np.clip(g, 0, 255)).astype(np.int64) << 8) \
              |  np.rint(np.clip(b, 0, 255)).astype(np.int64)
-        vals = self._table[keys]
+        table = self._tables[bucket]
+        vals = table[keys]
         missing = vals == 255
         if missing.any():
             need = np.unique(keys[missing])
-            self._table[need] = self._compute(need)
-            vals = self._table[keys]
+            table[need] = self._compute(need, bucket)
+            vals = table[keys]
         return vals
 
 
@@ -155,6 +177,15 @@ def dither(rgb_img, profile_index=DEFAULT_PROFILE):
     edge = build_edge_map(rgb)
     out = np.zeros((h, w), dtype=np.uint8)
 
+    if NEUTRAL_PENALTY_K > 0:
+        src_lab = rgb_to_lab(rgb)
+        src_chroma = np.sqrt(src_lab[:, :, 1] ** 2 + src_lab[:, :, 2] ** 2)
+        buckets = np.clip((src_chroma / prof["chroma_penalty_onset"]
+                           * NEUTRAL_CHROMA_BUCKETS).astype(int),
+                          0, NEUTRAL_CHROMA_BUCKETS - 1)
+    else:
+        buckets = None
+
     # Two rolling error rows, exactly as the firmware does
     row = [np.zeros((w, 3), dtype=np.float64), np.zeros((w, 3), dtype=np.float64)]
 
@@ -166,7 +197,8 @@ def dither(rgb_img, profile_index=DEFAULT_PROFILE):
         for x in xs:
             c = np.clip(row[0][x], 0.0, 255.0)
 
-            ci = int(cache.lookup(c[0:1], c[1:2], c[2:3])[0])
+            bucket = (NEUTRAL_CHROMA_BUCKETS - 1) if buckets is None else int(buckets[y, x])
+            ci = int(cache.lookup(c[0:1], c[1:2], c[2:3], bucket)[0])
 
             if ci >= EPD_COLORS:
                 pair = VIRTUAL_PAIR[ci - EPD_COLORS]

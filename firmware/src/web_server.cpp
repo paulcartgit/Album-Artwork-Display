@@ -473,6 +473,29 @@ void webServerInit() {
         }
     });
 
+    // ─── Display one specific history entry ───
+    // Renders through the full pipeline and holds it, so a fixed set of covers
+    // can be compared across render changes.
+    server.on("/api/history/show", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
+        if (!req->hasParam("f", true)) {
+            req->send(400, "application/json", "{\"error\":\"missing f\"}");
+            return;
+        }
+        String file = req->getParam("f", true)->value();
+        if (!safeHistoryName(file)) {
+            req->send(400, "application/json", "{\"error\":\"invalid name\"}");
+            return;
+        }
+        if (!SD_MMC.exists("/history/" + file)) {
+            req->send(404, "application/json", "{\"error\":\"not found\"}");
+            return;
+        }
+        strlcpy((char*)g_req.showHistoryFile, file.c_str(), sizeof(g_req.showHistoryFile));
+        g_req.showHistory = true;
+        req->send(200, "application/json", "{\"ok\":true}");
+    });
+
     // ─── List album art history ───
     server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!requireAuth(req)) return;

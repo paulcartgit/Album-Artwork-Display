@@ -211,14 +211,40 @@ def locate_panel(img, debug=False):
                     tr=(xs[np.argmax(sdif)], ys[np.argmax(sdif)]),
                     bl=(xs[np.argmin(sdif)], ys[np.argmin(sdif)]))
 
-    top = blob_corners(group[0])       # green band
-    bottom = blob_corners(group[-1])   # yellow band (or red+yellow merged)
+    top = blob_corners(group[0])
+    bottom = blob_corners(group[-1])
+
+    # Work out which rows these blobs actually are, rather than assuming the
+    # last one is yellow. Adjacent bands merge when the keyline between them is
+    # not resolved, so a photo may show three blobs, not four — and assuming
+    # the bottom blob is the last row then stretches the vertical mapping,
+    # which drifts the sampling progressively down the card until the black and
+    # white references swap over. That failure is silent and produces confident
+    # nonsense, so it is worth the arithmetic.
+    heights = [b["y1"] - b["y0"] for b in group]
+    unit = min(heights)                       # a single, unmerged band
+    spans = [max(1, int(round(h / unit))) for h in heights]
+
+    row_index = first_sat_row
+    for span_rows in spans[:-1]:
+        row_index += span_rows
+    bottom_row = row_index + spans[-1] - 1
+
+    if bottom_row > last_sat_row:
+        if debug:
+            print(f"  locate_panel: inferred bottom row {bottom_row} beyond the "
+                  f"card's {last_sat_row}; rejecting")
+        return None
 
     # Their positions in panel coordinates are known exactly.
     x_patch_l = CAL["margin_x"] + CAL["chip_w"] + CAL["chip_gap"]
     x_patch_r = x_patch_l + CAL["patch_w"]
     y_top = CAL["margin_y"] + first_sat_row * row_pitch
-    y_bot = CAL["margin_y"] + last_sat_row * row_pitch + CAL["row_h"]
+    y_bot = CAL["margin_y"] + bottom_row * row_pitch + CAL["row_h"]
+
+    if debug and bottom_row != last_sat_row:
+        print(f"  locate_panel: {len(group)} blobs spanning rows "
+              f"{first_sat_row}-{bottom_row} (some bands merged)")
 
     src = [top["tl"], top["tr"], bottom["br"], bottom["bl"]]
     dst = [(x_patch_l, y_top), (x_patch_r, y_top),
@@ -478,6 +504,21 @@ def main():
           f"(spread {spread:.0f})")
     print(f"    black uniformity  : {min(black_levels):.0f}-{max(black_levels):.0f} "
           f"(lift {black_lift:.0f})")
+
+    # ── Geometry check ──
+    # The black reference must be darker than the white one in every row. If it
+    # is not, the rectification is misaligned and every number below is
+    # meaningless — better to stop than to explain away inverted readings.
+    inverted = [PALETTE_NAMES[i] for i in range(len(PALETTE_RGB))
+                if np.mean(refs[i][0]) >= np.mean(refs[i][1])]
+    if inverted:
+        sys.exit(
+            f"Reference chips are inverted in row(s): {', '.join(inverted)}.\n"
+            f"The black reference is reading brighter than the white one, which "
+            f"means the panel was not located correctly — the sampling grid is "
+            f"offset or stretched.\n"
+            f"Check the --preview image. A photo taken from a steep angle, or "
+            f"one where some colour bands are not clearly separated, can do this.")
 
     # ── Validity check the references cannot see ──
     # A reflective panel cannot bounce more light in any channel than its own

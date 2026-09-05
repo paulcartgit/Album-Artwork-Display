@@ -36,6 +36,33 @@ static void busyYieldCallback(const void*) {
     yield();
 }
 
+// GxEPD2 gives this panel a 20 s busy timeout (see the constructor in
+// GxEPD2_730c_GDEP073E01.cpp) but a full Spectra 6 refresh actually takes
+// longer than that, and longer still when cold — the serial log shows it
+// hitting the timeout at _refresh: 20001027 us on every update. GxEPD2 then
+// gives up and returns while the panel is still cycling, so we report the
+// image as displayed before it is, and the next SPI transaction can land
+// mid-refresh. Wait it out ourselves.
+static const unsigned long PANEL_SETTLE_TIMEOUT_MS = 45000;
+
+static void waitUntilPanelIdle() {
+    unsigned long start = millis();
+    // BUSY is active LOW on the GDEP073E01
+    while (digitalRead(EPD_BUSY) == LOW) {
+        if (millis() - start > PANEL_SETTLE_TIMEOUT_MS) {
+            Serial.printf("[Display] Panel still busy after %lums — giving up\n",
+                          PANEL_SETTLE_TIMEOUT_MS);
+            return;
+        }
+        delay(50);
+        yield();
+    }
+    unsigned long waited = millis() - start;
+    if (waited > 50) {
+        Serial.printf("[Display] Panel settled %lums after GxEPD2 returned\n", waited);
+    }
+}
+
 void displayShowImage(const uint8_t* packedBuffer) {
     // packedBuffer: EPD_WIDTH×EPD_HEIGHT (480×800) at 4bpp, 2 pixels/byte
     // Panel native: 800×480.  Rotation 3: src(sx,sy) → native(sy, 479-sx)
@@ -83,6 +110,7 @@ void displayShowImage(const uint8_t* packedBuffer) {
     epd.epd2.setBusyCallback(busyYieldCallback);
     epd.epd2.refresh();
     epd.epd2.setBusyCallback(nullptr);
+    waitUntilPanelIdle();
 
     g_refreshing = false;
     Serial.println("[Display] Refresh complete");
@@ -126,6 +154,7 @@ void displayShowMessage(const char* msg) {
             }
         }
     } while (epd.nextPage());
+    waitUntilPanelIdle();
     g_refreshing = false;
     Serial.printf("[Display] Message: %s\n", msg);
 }
