@@ -125,7 +125,9 @@ select{appearance:none;padding-right:36px;
   <ol class="steps">
     <li>The frame restarts and joins your network.</li>
     <li>This page will stop responding — that is expected. Rejoin your usual Wi-Fi.</li>
-    <li>Open <b>nowplaying.local</b> to finish setup and choose your Sonos speaker.</li>
+    <li>Open <b>nowplaying.local</b> to finish setup and choose your Sonos speaker.
+        On Android that name will not resolve &mdash; the frame shows its IP address
+        on screen once it has joined, so use that instead.</li>
   </ol>
 
   <p class="foot">If the password is wrong, the frame reopens this

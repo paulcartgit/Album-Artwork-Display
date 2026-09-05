@@ -296,7 +296,16 @@ void controllerSetup() {
     digitalWrite(LED_GREEN, HIGH);
     Serial.printf("[BOOT] Reset reason: %d\n", (int)esp_reset_reason());
     Serial.println("[BOOT] Ready — entering main loop");
-    displayShowMessage("Ready\nnowplaying.local");
+
+    // Show the IP as well as the mDNS name. Android has no system mDNS
+    // resolver, so nowplaying.local simply does not resolve in Chrome there —
+    // and a phone is the most likely thing anyone sets this up from. The frame
+    // is sitting right in front of them, so it may as well say its address.
+    {
+        String ready = String("Ready\n\nnowplaying.local\nor\n") +
+                       WiFi.localIP().toString();
+        displayShowMessage(ready.c_str());
+    }
     delay(3000);
 }
 

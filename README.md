@@ -43,7 +43,13 @@ Or use the convenience script:
 1. Power on the device — it will create a WiFi network called **NowPlaying-Setup**
 2. Connect to it from your phone or laptop
 3. A captive portal will appear — select your home WiFi network and enter the password
-4. The device reboots. Once connected, it's accessible at **http://nowplaying.local**
+4. The device reboots. Once connected it shows its address on screen, and is reachable at
+   **http://nowplaying.local** — or at that IP directly.
+
+   > **On Android, use the IP.** Android has no system-wide mDNS resolver, so `.local`
+   > names do not resolve in Chrome and you will get `DNS_PROBE_FINISHED_NXDOMAIN`.
+   > macOS, iOS and most desktop browsers resolve `nowplaying.local` fine. The frame
+   > displays its IP address after connecting for exactly this reason.
 5. Open the web portal → **Settings** tab → scan for Sonos speakers and select yours
 6. (Optional) Add a [Shazam RapidAPI](https://rapidapi.com/apidojo/api/shazam/) key for vinyl identification
 7. Save settings — the display will start showing album art automatically
@@ -70,7 +76,8 @@ Artwork is cached to the SD card only after it successfully decodes, so an unrea
 
 ## Web Portal
 
-Once connected, visit **http://nowplaying.local** (or the device IP):
+Once connected, visit **http://nowplaying.local** — or the IP shown on the frame,
+which is what you need on Android:
 
 ### Now Playing
 Current track info, artwork preview, and activity log. Buttons to force a Sonos check or trigger a manual listen (Shazam identify). Auto-refreshes every 3 seconds.
