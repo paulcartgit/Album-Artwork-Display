@@ -84,8 +84,9 @@ button{background:none;border:0;padding:0;cursor:pointer}
 .done{font-size:15px;font-weight:500;color:var(--text);padding:6px 4px}
 
 /* ── The frame: the hero ── */
-.stage{padding:16px 0 4px}
-.frame{position:relative;width:100%;aspect-ratio:480/800;max-height:62vh;margin:0 auto;
+.stage{padding:14px 0 0}
+.frame{position:relative;display:block;width:100%;aspect-ratio:480/800;max-height:70vh;margin:0 auto;
+  padding:0;border:0;cursor:pointer;
   border-radius:var(--r);overflow:hidden;background:var(--surface-2);
   box-shadow:0 2px 6px rgba(0,0,0,.35),0 18px 50px rgba(0,0,0,.4);
   display:block}
@@ -100,12 +101,9 @@ button{background:none;border:0;padding:0;cursor:pointer}
 .skeleton{background:linear-gradient(90deg,var(--surface-2) 25%,var(--surface-3) 50%,var(--surface-2) 75%);
   background-size:200% 100%;animation:shimmer 1.5s linear infinite}
 
-.stagefoot{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px}
-.seg{display:flex;gap:2px;background:var(--surface-2);border:1px solid var(--line);
-  border-radius:9px;padding:2px}
-.segbtn{padding:5px 12px;border-radius:7px;font-size:12.5px;color:var(--dim);
-  transition:background .15s var(--ease),color .15s var(--ease)}
-.segbtn.active{background:var(--surface-3);color:var(--text)}
+.tag{position:absolute;top:10px;left:50%;transform:translateX(-50%);
+  padding:4px 10px;border-radius:999px;font-size:11px;font-weight:500;letter-spacing:.03em;
+  background:rgba(0,0,0,.55);color:#fff;backdrop-filter:blur(8px)}
 
 /* ── Track ── */
 .track{text-align:center;margin:22px 0 4px}
@@ -113,8 +111,9 @@ button{background:none;border:0;padding:0;cursor:pointer}
 .track .artist{margin:0;color:var(--dim);font-size:15.5px}
 .track .album{margin:3px 0 0;color:var(--faint);font-size:13px}
 .track .release{margin:9px 0 0;color:var(--faint);font-size:12px;letter-spacing:.02em;min-height:16px}
-.status{display:flex;align-items:center;justify-content:center;gap:7px;margin:14px 0 20px;
-  color:var(--faint);font-size:12.5px;min-height:18px}
+.status{display:flex;align-items:center;justify-content:center;gap:7px;margin:0 0 20px;
+  color:var(--faint);font-size:12.5px}
+.status[hidden]{display:none}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--faint);flex:none}
 .dot.on{background:var(--live);box-shadow:0 0 0 3px color-mix(in srgb,var(--live) 22%,transparent)}
 .dot.warn{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 22%,transparent)}
@@ -260,20 +259,16 @@ details[open] summary::after{transform:rotate(-135deg)}
 
   <div class="wrap">
     <div class="stage">
-      <div class="frame" id="frame">
+      <button class="frame" id="frame" onclick="toggleView()"
+              aria-label="Show the original artwork instead">
         <img id="art" alt="">
         <div class="ph skeleton" id="ph">
           <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
             <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>
         </div>
-      </div>
+        <span class="tag" id="viewTag" hidden>Original</span>
+      </button>
       <span class="sr" id="artDesc" aria-live="polite"></span>
-      <div class="stagefoot">
-        <div class="seg" role="group" aria-label="Image shown">
-          <button class="segbtn active" id="segPanel" onclick="setView('panel')">On the frame</button>
-          <button class="segbtn" id="segSource" onclick="setView('source')">Original</button>
-        </div>
-      </div>
     </div>
 
     <div class="track">
@@ -283,7 +278,8 @@ details[open] summary::after{transform:rotate(-135deg)}
       <p class="release" id="npRelease"></p>
     </div>
 
-    <div class="status"><span class="dot" id="dot"></span><span id="npStatus">Connecting</span></div>
+    <div class="status" id="statusRow"><span class="dot" id="dot"></span>
+      <span id="npStatus">Connecting</span></div>
 
     <div class="actions">
       <button class="btn" id="btnRefresh" onclick="act(this,'/api/refresh','Redrawing the frame')">
@@ -296,13 +292,6 @@ details[open] summary::after{transform:rotate(-135deg)}
       </button>
     </div>
 
-    <div class="label">Activity</div>
-    <div class="card">
-      <details>
-        <summary><span id="logSummary">Recent events</span></summary>
-        <div class="log" id="log"></div>
-      </details>
-    </div>
   </div>
 </div>
 
@@ -436,6 +425,14 @@ details[open] summary::after{transform:rotate(-135deg)}
       <div class="row"><span class="k">Last restart</span><span class="v" id="dReset">—</span></div>
     </div>
 
+    <div class="label">Activity</div>
+    <div class="card">
+      <details>
+        <summary><span id="logSummary">Recent events</span></summary>
+        <div class="log" id="log"></div>
+      </details>
+    </div>
+
     <div class="label">Diagnostics</div>
     <div class="card">
       <div class="row tap" onclick="act(this,'/api/test-colors','Colour bars sent')">
@@ -516,7 +513,7 @@ function openScreen(name){
   $('#' + name).classList.add('open');
   history.pushState({screen:name}, '');
   if(name === 'history') loadHistory();
-  if(name === 'settings') loadSettings();
+  if(name === 'settings'){ loadSettings(); loadLog(); }
 }
 function closeScreen(){
   if(openName) history.back(); else dismiss();
@@ -543,17 +540,19 @@ const RESET = {1:'Power on', 3:'Software restart', 4:'Watchdog', 5:'Interrupt wa
                6:'Task watchdog', 7:'Watchdog', 8:'Deep sleep', 9:'Brownout', 12:'CPU reset'};
 let view = 'panel', seq = -1, lastSrc = null;
 
-function setView(v){
-  view = v;
-  $('#segPanel').classList.toggle('active', v === 'panel');
-  $('#segSource').classList.toggle('active', v === 'source');
-  seq = -1; lastSrc = null;
-  show(v === 'panel' ? null : lastSrc);
+function toggleView(){
+  view = (view === 'panel') ? 'source' : 'panel';
+  $('#viewTag').hidden = (view === 'panel');
+  $('#frame').setAttribute('aria-label', view === 'panel'
+    ? 'Show the original artwork instead' : 'Show what is on the frame');
+  seq = -1;
+  if(view === 'source') show(lastSrc); else show();
 }
 function show(url){
   const img = $('#art');
   if(view === 'panel') url = '/api/display/current.bmp?v=' + seq;
   if(!url){ img.classList.remove('on'); $('#ph').hidden = false; return; }
+  img.dataset.src = url;
   img.onload  = () => { img.classList.add('on'); $('#ph').hidden = true; };
   img.onerror = () => { img.classList.remove('on'); $('#ph').hidden = false; };
   img.src = url;
@@ -567,7 +566,12 @@ function fmtUptime(s){
 async function tick(){
   let d;
   try { d = await api('/api/status'); }
-  catch(e){ $('#npStatus').textContent = 'Frame offline'; $('#dot').className = 'dot'; return; }
+  catch(e){
+    $('#statusRow').hidden = false;
+    $('#npStatus').textContent = 'Frame offline';
+    $('#dot').className = 'dot warn';
+    return;
+  }
 
   const st = d.state_name || 'IDLE';
   $('#npTitle').textContent   = d.title  || (st === 'IDLE' ? 'Nothing playing' : ' ');
@@ -575,21 +579,29 @@ async function tick(){
   $('#npAlbum').textContent   = d.album  || ' ';
   $('#npRelease').textContent = d.release || '';
 
-  // Status line: whichever single fact matters most right now.
-  let msg = STATE_TEXT[st] || st;
-  if(d.quiet) msg = 'Quiet hours — frame paused';
-  else if(d.display_hold_sec > 0) msg = 'Test pattern held, ' + Math.ceil(d.display_hold_sec/60) + ' min left';
-  else if(d.cooldown_remaining_sec > 0) msg = 'Paused ' + Math.ceil(d.cooldown_remaining_sec/60) + ' min after failed matches';
+  // Say something only when there is something to say. Playing normally is the
+  // expected case and needs no caption; the exceptions are worth a line, but
+  // only while they apply.
+  let msg = '', warn = false;
+  if(d.quiet){ msg = 'Quiet hours — frame paused'; warn = true; }
+  else if(d.display_hold_sec > 0){
+    msg = 'Test pattern held, ' + Math.ceil(d.display_hold_sec/60) + ' min left'; warn = true; }
+  else if(d.cooldown_remaining_sec > 0){
+    msg = 'Paused ' + Math.ceil(d.cooldown_remaining_sec/60) + ' min after failed matches'; warn = true; }
   else if(d.retry_in_sec > 0) msg = 'Retrying in ' + d.retry_in_sec + 's';
-  else if(st === 'IDLE' && d.next_poll_sec > 0) msg = 'Nothing playing · next check ' + d.next_poll_sec + 's';
+  else if(st === 'ERROR'){ msg = 'Error'; warn = true; }
+  else if(st === 'VINYL') msg = 'Listening to vinyl';
+  else if(st === 'SETUP'){ msg = 'Setup mode'; warn = true; }
+
+  $('#statusRow').hidden = !msg;
   $('#npStatus').textContent = msg;
-  $('#dot').className = 'dot' + (st === 'DIGITAL' || st === 'VINYL' ? ' on'
-                        : (st === 'ERROR' || d.quiet) ? ' warn' : '');
+  $('#dot').className = 'dot' + (warn ? ' warn' : (st === 'VINYL' ? ' on' : ''));
 
   if(view === 'panel'){
     if(d.refreshes !== undefined && d.refreshes !== seq){ seq = d.refreshes; show(); }
-  } else if(d.art_url && d.art_url !== lastSrc){
-    lastSrc = d.art_url; show(lastSrc);
+  } else if(d.art_url){
+    lastSrc = d.art_url;
+    if($('#art').dataset.src !== lastSrc) show(lastSrc);
   }
   $('#artDesc').textContent = d.artist
     ? 'Frame showing ' + d.artist + (d.album ? ', ' + d.album : '') : '';
@@ -870,7 +882,10 @@ function upload(){
 
 /* ── Polling ────────────────────────────────────────────── */
 let timer = null;
-function start(){ stop(); tick(); loadLog(); timer = setInterval(() => { tick(); loadLog(); }, 3000); }
+function start(){
+  stop(); tick();
+  timer = setInterval(() => { tick(); if(openName === 'settings') loadLog(); }, 3000);
+}
 function stop(){ if(timer) clearInterval(timer); timer = null; }
 // Don't poll a device that may be on battery while the tab is hidden.
 document.addEventListener('visibilitychange', () => document.hidden ? stop() : start());
