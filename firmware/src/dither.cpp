@@ -1,6 +1,7 @@
 #include "dither.h"
 #include "config.h"
 #include <cmath>
+#include <cstring>
 
 #ifdef NATIVE_TEST
 #include <cstdlib>
@@ -16,113 +17,11 @@ struct FakeSerial { template<typename... Args> void println(Args...) {} template
 // sRGB → CIELAB colour-space pipeline
 // ═══════════════════════════════════════════════════════════
 
-// Precomputed sRGB → linear LUT (gamma decode)
-static float g_srgbLUT[256];
-static bool  g_lutReady = false;
-
-static void ensureLUT() {
-    if (g_lutReady) return;
-    for (int i = 0; i < 256; i++) {
-        float v = i / 255.0f;
-        g_srgbLUT[i] = (v <= 0.04045f)
-            ? v / 12.92f
-            : powf((v + 0.055f) / 1.055f, 2.4f);
-    }
-    g_lutReady = true;
-}
-
 struct Lab { float L, a, b; };
 
-static Lab rgbToLab(uint8_t R, uint8_t G, uint8_t B) {
-    float lr = g_srgbLUT[R], lg = g_srgbLUT[G], lb = g_srgbLUT[B];
-
-    // Linear sRGB → XYZ (D65 illuminant)
-    float x = lr * 0.4124564f + lg * 0.3575761f + lb * 0.1804375f;
-    float y = lr * 0.2126729f + lg * 0.7151522f + lb * 0.0721750f;
-    float z = lr * 0.0193339f + lg * 0.1191920f + lb * 0.9503041f;
-
-    // Normalise to D65 white point
-    x /= 0.95047f;
-    z /= 1.08883f;
-
-    // XYZ → Lab
-    auto labf = [](float t) -> float {
-        return (t > 0.008856f) ? cbrtf(t) : (7.787f * t + 16.0f / 116.0f);
-    };
-    float fx = labf(x), fy = labf(y), fz = labf(z);
-
-    return { 116.0f * fy - 16.0f,
-             500.0f * (fx - fy),
-             200.0f * (fy - fz) };
-}
-
-// ═══════════════════════════════════════════════════════════
-// Palette helpers
-// ═══════════════════════════════════════════════════════════
-
-static bool g_palReady = false;
-
-static void ensurePalette() {
-    if (g_palReady) return;
-    ensureLUT();
-    g_palReady = true;
-}
-
-// ═══════════════════════════════════════════════════════════
-// Extended matching palette: 6 real + 2 virtual RGB cube corners
-//
-// Our 6-colour palette is 6 of the 8 RGB cube corners, missing
-// only Cyan(0,255,255) and Magenta(255,0,255).  For purple,
-// the display MUST interleave Red and Blue pixels.  But in any
-// perceptual colour space (Lab, YCbCr), Red is ~89° away from
-// purple on the hue wheel — standard error diffusion can never
-// naturally alternate Red↔Blue.
-//
-// Solution (caca.zoy.org §6.1–6.2, Reddit/Spectra-6 community):
-// Add virtual Magenta + Cyan to the matching palette.  Purple
-// pixels match Magenta, which gets mapped to alternating Red/Blue
-// in a checkerboard — producing the interleaved pattern that the
-// eye perceives as purple.
-//
-// Chroma-aware penalty prevents White/Black from absorbing
-// chromatic pixels: if a pixel has significant chroma, achromatic
-// palette entries get a distance penalty proportional to (chroma)².
-// Without this, lavender(Lab L*=57, C*=48) is closer to White
-// (L*=100) than to Magenta (a*=98) — White steals the purple.
-// ═══════════════════════════════════════════════════════════
-static constexpr int MATCH_COLORS = 8;
-
-// Full matching palette (Lab matching searches all 8)
-static const float MATCH_PAL[MATCH_COLORS][3] = {
-    {   0.0f,   0.0f,   0.0f }, // 0  Black
-    { 255.0f, 255.0f, 255.0f }, // 1  White
-    {   0.0f, 255.0f,   0.0f }, // 2  Green
-    {   0.0f,   0.0f, 255.0f }, // 3  Blue
-    { 255.0f,   0.0f,   0.0f }, // 4  Red
-    { 255.0f, 255.0f,   0.0f }, // 5  Yellow
-    {   0.0f, 255.0f, 255.0f }, // 6  Cyan    (virtual)
-    { 255.0f,   0.0f, 255.0f }, // 7  Magenta (virtual)
-};
-
-// Error reference: for real colours [0–5] = idealized value.
-// For virtual colours [6–7] = average of the two alternating
-// real colours.  This ensures correct total error accumulation
-// (true error sums are identical to per-pixel true error sums)
-// while avoiding the violent oscillation of per-pixel true error.
-static const float ERROR_REF[MATCH_COLORS][3] = {
-    {   0.0f,   0.0f,   0.0f }, // 0  Black
-    { 255.0f, 255.0f, 255.0f }, // 1  White
-    {   0.0f, 255.0f,   0.0f }, // 2  Green
-    {   0.0f,   0.0f, 255.0f }, // 3  Blue
-    { 255.0f,   0.0f,   0.0f }, // 4  Red
-    { 255.0f, 255.0f,   0.0f }, // 5  Yellow
-    {   0.0f, 127.5f, 127.5f }, // 6  Cyan    → avg(Green, Blue)
-    { 127.5f,   0.0f, 127.5f }, // 7  Magenta → avg(Red, Blue)
-};
-
-// Float-accepting Lab conversion (pixels carry accumulated error)
+// Float-accepting Lab conversion (pixels carry accumulated error, so values
+// can land outside [0,255] before clamping).
 static Lab rgbToLabF(float r, float g, float b) {
-    // Clamp to [0,255] then gamma-decode
     r = fmaxf(0.0f, fminf(255.0f, r)) / 255.0f;
     g = fmaxf(0.0f, fminf(255.0f, g)) / 255.0f;
     b = fmaxf(0.0f, fminf(255.0f, b)) / 255.0f;
@@ -132,6 +31,7 @@ static Lab rgbToLabF(float r, float g, float b) {
     };
     float lr = decode(r), lg = decode(g), lb = decode(b);
 
+    // Linear sRGB → XYZ (D65 illuminant)
     float x = lr * 0.4124564f + lg * 0.3575761f + lb * 0.1804375f;
     float y = lr * 0.2126729f + lg * 0.7151522f + lb * 0.0721750f;
     float z = lr * 0.0193339f + lg * 0.1191920f + lb * 0.9503041f;
@@ -147,36 +47,76 @@ static Lab rgbToLabF(float r, float g, float b) {
              200.0f * (fy - fz) };
 }
 
-// Pre-computed CIELAB values and chroma for matching palette
+// ═══════════════════════════════════════════════════════════
+// Extended matching palette: 6 real + 2 virtual entries
+//
+// Our 6 pigments are (roughly) 6 of the 8 RGB cube corners, missing Cyan and
+// Magenta.  To render purple the panel MUST interleave Red and Blue pixels,
+// but in any perceptual space Red sits ~89° from purple on the hue wheel, so
+// plain error diffusion never alternates Red↔Blue on its own.
+//
+// Solution (caca.zoy.org §6.1–6.2): add *virtual* Magenta and Cyan to the
+// matching palette, positioned at the midpoint of the two real pigments that
+// will be interleaved.  Purple pixels then match virtual Magenta, which is
+// emitted as a Red/Blue checkerboard the eye integrates back into purple.
+//
+// CRITICAL: every entry below is derived from the CALIBRATED pigment values in
+// config.h — what the panel actually looks like — not from idealised RGB cube
+// corners.  Matching against idealised corners tells the dither it just placed
+// pure #00FF00 when the panel will show a dark teal, so every subsequent error
+// term is wrong and the whole image drifts.
+// ═══════════════════════════════════════════════════════════
+static constexpr int MATCH_COLORS = EPD_COLORS + 2;
+static constexpr uint8_t VIRTUAL_CYAN    = EPD_COLORS;     // 6 → Green + Blue
+static constexpr uint8_t VIRTUAL_MAGENTA = EPD_COLORS + 1; // 7 → Red   + Blue
+
+// The two real palette indices each virtual colour interleaves between.
+static constexpr uint8_t VIRTUAL_PAIR[2][2] = {
+    { 2, 3 },  // Cyan    → Green / Blue
+    { 4, 3 },  // Magenta → Red   / Blue
+};
+
+// Matching palette in RGB, derived from PALETTE at startup.
+static float MATCH_PAL[MATCH_COLORS][3];
 static Lab   MATCH_PAL_LAB[MATCH_COLORS];
 static float MATCH_PAL_CHROMA[MATCH_COLORS];
-static bool  g_labReady = false;
+static bool  g_palReady = false;
 
-static void ensureLabPalette() {
-    if (g_labReady) return;
-    for (int i = 0; i < MATCH_COLORS; i++) {
-        MATCH_PAL_LAB[i] = rgbToLabF(
-            MATCH_PAL[i][0], MATCH_PAL[i][1], MATCH_PAL[i][2]);
-        MATCH_PAL_CHROMA[i] = sqrtf(
-            MATCH_PAL_LAB[i].a * MATCH_PAL_LAB[i].a +
-            MATCH_PAL_LAB[i].b * MATCH_PAL_LAB[i].b);
+static void ensureMatchPalette() {
+    if (g_palReady) return;
+
+    // Real pigments — straight from the calibrated table.
+    for (int i = 0; i < EPD_COLORS; i++) {
+        MATCH_PAL[i][0] = (float)PALETTE[i].r;
+        MATCH_PAL[i][1] = (float)PALETTE[i].g;
+        MATCH_PAL[i][2] = (float)PALETTE[i].b;
     }
-    g_labReady = true;
+    // Virtual colours — midpoint of the pigment pair they interleave.
+    for (int v = 0; v < 2; v++) {
+        const PaletteColor& a = PALETTE[VIRTUAL_PAIR[v][0]];
+        const PaletteColor& b = PALETTE[VIRTUAL_PAIR[v][1]];
+        MATCH_PAL[EPD_COLORS + v][0] = (a.r + b.r) * 0.5f;
+        MATCH_PAL[EPD_COLORS + v][1] = (a.g + b.g) * 0.5f;
+        MATCH_PAL[EPD_COLORS + v][2] = (a.b + b.b) * 0.5f;
+    }
+
+    for (int i = 0; i < MATCH_COLORS; i++) {
+        MATCH_PAL_LAB[i] = rgbToLabF(MATCH_PAL[i][0], MATCH_PAL[i][1], MATCH_PAL[i][2]);
+        MATCH_PAL_CHROMA[i] = sqrtf(MATCH_PAL_LAB[i].a * MATCH_PAL_LAB[i].a +
+                                    MATCH_PAL_LAB[i].b * MATCH_PAL_LAB[i].b);
+    }
+    g_palReady = true;
 }
 
-// Chroma-aware penalty: when pixel has significant chroma,
-// penalize achromatic palette entries (White, Black) so they
-// don't absorb the colour signal.  Without this, light purple
-// (Lab L*=57, C*=48) always matches White (L*=100) because the
-// lightness gap is smaller than the a* gap to Magenta.
-static constexpr float CHROMA_PENALTY_K     = 5.0f;
-static constexpr float CHROMA_PENALTY_ONSET = 12.0f;
-
-static uint8_t nearestLab(float r, float g, float b) {
+// Chroma-aware penalty: when a pixel has significant chroma, penalise the
+// achromatic palette entries (White, Black) so they don't absorb the colour
+// signal.  Without this, light purple (L*≈57, C*≈48) always matches White
+// because the lightness gap to White is smaller than the a* gap to Magenta.
+static uint8_t nearestLab(float r, float g, float b, float penaltyK, float penaltyOnset) {
     Lab px = rgbToLabF(r, g, b);
     float pxChroma = sqrtf(px.a * px.a + px.b * px.b);
-    float excess   = fmaxf(0.0f, pxChroma - CHROMA_PENALTY_ONSET);
-    float penalty  = excess * excess * CHROMA_PENALTY_K;
+    float excess   = fmaxf(0.0f, pxChroma - penaltyOnset);
+    float penalty  = excess * excess * penaltyK;
 
     float best = 1e30f;
     uint8_t ci = 0;
@@ -191,22 +131,8 @@ static uint8_t nearestLab(float r, float g, float b) {
     return ci;
 }
 
-// Nearest palette colour — RGB (for quantizeNearest fallback)
-static uint8_t nearestPaletteColor(int16_t r, int16_t g, int16_t b) {
-    uint32_t minDist = UINT32_MAX;
-    uint8_t best = 0;
-    for (uint8_t i = 0; i < EPD_COLORS; i++) {
-        int16_t dr = r - PALETTE[i].r;
-        int16_t dg = g - PALETTE[i].g;
-        int16_t db = b - PALETTE[i].b;
-        uint32_t dist = (uint32_t)(dr * dr + dg * dg + db * db);
-        if (dist < minDist) { minDist = dist; best = i; }
-    }
-    return best;
-}
-
 // ═══════════════════════════════════════════════════════════
-// Lab-match + RGB-error dithering  ("Lab errRGB")
+// Lab-match + RGB-error dithering
 //   • Nearest colour found in CIELAB (perceptual distance)
 //   • Error computed & diffused in RGB (channel independence)
 //   • Floyd-Steinberg kernel (4 neighbours, tight error spread)
@@ -214,14 +140,12 @@ static uint8_t nearestPaletteColor(int16_t r, int16_t g, int16_t b) {
 //   • Edge-aware: suppresses error diffusion across hard edges
 // ═══════════════════════════════════════════════════════════
 
-// Compute per-pixel edge strength map from source RGB.
-// Returns a heap-allocated array of floats [0..1] where 1 = strong edge.
+// Per-pixel edge strength map [0..1] where 1 = strong edge.
 // Caller must free with heap_caps_free().
 static float* buildEdgeMap(const uint8_t* rgb, int w, int h) {
     float* edge = (float*)heap_caps_malloc((size_t)w * h * sizeof(float), MALLOC_CAP_SPIRAM);
     if (!edge) return nullptr;
 
-    // Gradient magnitude using luminance (Sobel-like, simplified to central differences)
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
             auto lum = [&](int px, int py) -> float {
@@ -242,9 +166,12 @@ static float* buildEdgeMap(const uint8_t* rgb, int w, int h) {
     return edge;
 }
 
-void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int h) {
-    ensurePalette();
-    ensureLabPalette();
+void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int h,
+                          const RenderProfile& profile) {
+    if (w <= 0 || h <= 0) return;
+    ensureMatchPalette();
+
+    const float edgeAtten = profile.edgeAttenuation;
 
     // Build edge map for edge-aware error diffusion
     float* edgeMap = buildEdgeMap(rgb888, w, h);
@@ -276,9 +203,9 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
 
         // Serpentine: even rows L→R, odd rows R→L
         bool ltr = (y & 1) == 0;
-        int xs = ltr ? 0     : w - 1;
-        int xe = ltr ? w     : -1;
-        int xd = ltr ? 1     : -1;
+        int xs = ltr ? 0 : w - 1;
+        int xe = ltr ? w : -1;
+        int xd = ltr ? 1 : -1;
 
         for (int x = xs; x != xe; x += xd) {
             int ri = x * 3;
@@ -288,31 +215,29 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
             float cg = fmaxf(0.0f, fminf(255.0f, row[0][ri + 1]));
             float cb = fmaxf(0.0f, fminf(255.0f, row[0][ri + 2]));
 
-            // Match in CIELAB space (8-colour palette with chroma penalty)
-            uint8_t ci = nearestLab(cr, cg, cb);
+            // Match in CIELAB space against the calibrated palette
+            uint8_t ci = nearestLab(cr, cg, cb,
+                                    profile.chromaPenaltyK,
+                                    profile.chromaPenaltyOnset);
 
-            // Map virtual colours to alternating real display colours
+            // Map virtual colours to alternating real pigments
             uint8_t displayIdx = ci;
-            if (ci == 6) {        // Cyan → alternate Green/Blue
-                displayIdx = ((x + y) & 1) ? 2 : 3;
-            } else if (ci == 7) { // Magenta → alternate Red/Blue
-                displayIdx = ((x + y) & 1) ? 4 : 3;
+            if (ci >= EPD_COLORS) {
+                const uint8_t* pair = VIRTUAL_PAIR[ci - EPD_COLORS];
+                displayIdx = ((x + y) & 1) ? pair[0] : pair[1];
             }
 
-            // Error in RGB against the ACTUAL placed colour.
-            // For virtual colours, error is computed vs the real colour
-            // that was physically placed (Red or Blue for Magenta, etc).
-            // This causes error to naturally oscillate: after placing Red,
-            // the residual blue pushes the next pixel toward Blue/Magenta,
-            // creating the interleaved pattern that reads as purple.
-            float refR = MATCH_PAL[displayIdx][0];
-            float refG = MATCH_PAL[displayIdx][1];
-            float refB = MATCH_PAL[displayIdx][2];
-            float er = cr - refR;
-            float eg = cg - refG;
-            float eb = cb - refB;
+            // Error is measured against the pigment PHYSICALLY PLACED, not
+            // against the virtual colour that was matched.  That is what makes
+            // the interleave happen: after placing Red for a magenta pixel the
+            // residual blue pushes the next pixel toward Blue, and vice versa.
+            // (Diffusing against the virtual midpoint instead would under-
+            // account for the error and wash the interleave out.)
+            float er = cr - (float)PALETTE[displayIdx].r;
+            float eg = cg - (float)PALETTE[displayIdx].g;
+            float eb = cb - (float)PALETTE[displayIdx].b;
 
-            // Shadow chroma suppression: in very dark regions, humans can't
+            // Shadow chroma suppression: in very dark regions humans can't
             // perceive colour, but error diffusion accumulates chrominance
             // error across black pixels until it flips one to blue/red.
             float lum = 0.299f * cr + 0.587f * cg + 0.114f * cb;
@@ -325,10 +250,11 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
                 eb = eLum + (eb - eLum) * chromaScale;
             }
 
-            // Edge-aware: attenuate error at source pixel when on/near an edge
+            // Edge-aware: attenuate error leaving a pixel that sits on an edge.
+            // (Only applied here, at the source — attenuating again at each
+            // target would discard the same energy twice and drift edges light.)
             if (edgeMap) {
-                float srcEdge = edgeMap[y * w + x];
-                float atten = 1.0f - srcEdge * 0.85f;
+                float atten = 1.0f - edgeMap[y * w + x] * edgeAtten;
                 er *= atten;
                 eg *= atten;
                 eb *= atten;
@@ -342,10 +268,6 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
                 if (nx >= 0 && nx < w) { \
                     int ni = nx * 3; \
                     float f = (wt) / 16.0f; \
-                    if (edgeMap && (y + (dy)) < h) { \
-                        float tgtEdge = edgeMap[(y + (dy)) * w + nx]; \
-                        f *= (1.0f - tgtEdge * 0.85f); \
-                    } \
                     row[dy][ni]     += er * f; \
                     row[dy][ni + 1] += eg * f; \
                     row[dy][ni + 2] += eb * f; \
@@ -375,22 +297,5 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
 
     for (int i = 0; i < 2; i++) heap_caps_free(row[i]);
     if (edgeMap) heap_caps_free(edgeMap);
-    Serial.printf("[Dither] Lab+chroma-penalty+virtual-Mag/Cyn F-S — %dx%d → %d bytes\n", w, h, (w * h) / 2);
-}
-
-void quantizeNearest(const uint8_t* rgb888, uint8_t* packedOut, int w, int h) {
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int idx = (y * w + x) * 3;
-            uint8_t ci = nearestPaletteColor(rgb888[idx], rgb888[idx + 1], rgb888[idx + 2]);
-
-            int pixelIdx = y * w + x;
-            int byteIdx  = pixelIdx / 2;
-            if (pixelIdx % 2 == 0)
-                packedOut[byteIdx] = (ci << 4);
-            else
-                packedOut[byteIdx] |= (ci & 0x0F);
-        }
-    }
-    Serial.printf("[Quantize] Done — %dx%d → %d bytes (no dither)\n", w, h, (w * h) / 2);
+    Serial.printf("[Dither] %s profile — %dx%d → %d bytes\n", profile.name, w, h, (w * h) / 2);
 }

@@ -4,6 +4,7 @@
 #include "display.h"
 #include "sd_manager.h"
 #include "activity_log.h"
+#include "app.h"
 
 #include <HTTPClient.h>
 #include <WiFiClient.h>
@@ -15,7 +16,6 @@
 #include <Fonts/FreeSansBold24pt7b.h>
 #include <Fonts/FreeSans18pt7b.h>
 
-extern Settings g_settings;
 static const size_t JPEG_INITIAL_ALLOC = 64 * 1024;
 static const size_t JPEG_MAX_DOWNLOAD  = 2 * 1024 * 1024;
 
@@ -121,52 +121,38 @@ static float edgeVariance(const uint8_t* src, int w, int h) {
     return (varR + varG + varB) / 3.0f;
 }
 
-// ─── Render text into RGB888 buffer using Adafruit GFX ───
-// Render a single line of text centred in a horizontal band.
-// 2× supersampled for anti-aliased output on the 6-colour e-ink display.
-static void renderTextBand(uint8_t* rgb, int canvasW, int canvasH,
-                           const char* text,
-                           const GFXfont* font, int initScale, int minScale,
-                           int textAreaY, int textAreaH,
-                           uint8_t bgR, uint8_t bgG, uint8_t bgB) {
-    int ssW = canvasW * 2;
-    int ssH = textAreaH * 2;
-    GFXcanvas1 canvas(ssW, ssH);
-    canvas.fillScreen(0);
-    canvas.setTextColor(1);
-    canvas.setTextWrap(false);
-
-    canvas.setFont(font);
-    canvas.setTextSize(initScale);
+// ─── Shared text fitting ───
+// Both text renderers need the same behaviour: try the requested scale, step
+// down while the string overflows the band, then truncate with an ellipsis.
+// Returns the chosen scale and leaves `str` holding the text to draw.
+static int fitTextToWidth(GFXcanvas1& canvas, const GFXfont* font,
+                          String& str, int initScale, int minScale, int maxWidth) {
     int16_t x1, y1; uint16_t tw, th;
+    canvas.setFont(font);
 
-    String str(text);
     int scale = initScale;
+    canvas.setTextSize(scale);
     canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    while (tw > (uint16_t)(ssW - 60) && scale > minScale) {
+    while (tw > (uint16_t)maxWidth && scale > minScale) {
         scale--;
         canvas.setTextSize(scale);
         canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
     }
-    while (tw > (uint16_t)(ssW - 60) && str.length() > 4) {
+    while (tw > (uint16_t)maxWidth && str.length() > 4) {
         str = str.substring(0, str.length() - 2);
         String test = str + "...";
         canvas.getTextBounds(test.c_str(), 0, 0, &x1, &y1, &tw, &th);
-        if (tw <= (uint16_t)(ssW - 60)) { str = test; break; }
+        if (tw <= (uint16_t)maxWidth) { str = test; break; }
     }
+    return scale;
+}
 
-    canvas.setFont(font);
-    canvas.setTextSize(scale);
-    canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    int textX = (ssW - tw) / 2 - x1;
-    int textY = (ssH - th) / 2 - y1;
-    canvas.setCursor(textX, textY);
-    canvas.print(str);
-
-    // Sample actual background pixels in the band to pick text colour
+// Average brightness of a band of the RGB canvas, used to pick a text colour
+// that contrasts with whatever is actually behind it.
+static int bandBrightness(const uint8_t* rgb, int canvasW, int textAreaY, int textAreaH) {
     long rSum = 0, gSum = 0, bSum = 0;
     int samples = 0;
-    int step = 4; // sample every 4th pixel for speed
+    const int step = 4; // sample every 4th pixel for speed
     for (int y = 0; y < textAreaH; y += step) {
         for (int x = 0; x < canvasW; x += step) {
             int di = ((textAreaY + y) * canvasW + x) * 3;
@@ -174,35 +160,9 @@ static void renderTextBand(uint8_t* rgb, int canvasW, int canvasH,
             samples++;
         }
     }
+    if (samples == 0) return 255;
     int avgR = rSum / samples, avgG = gSum / samples, avgB = bSum / samples;
-    int brightness = (avgR * 299 + avgG * 587 + avgB * 114) / 1000;
-    uint8_t textR, textG, textB;
-    if (brightness < 128) {
-        textR = 255; textG = 255; textB = 255;
-    } else {
-        textR = 0; textG = 0; textB = 0;
-    }
-
-    for (int y = 0; y < textAreaH; y++) {
-        for (int x = 0; x < canvasW; x++) {
-            int count = canvas.getPixel(x * 2,     y * 2)
-                      + canvas.getPixel(x * 2 + 1, y * 2)
-                      + canvas.getPixel(x * 2,     y * 2 + 1)
-                      + canvas.getPixel(x * 2 + 1, y * 2 + 1);
-            if (count == 0) continue;
-            int di = ((textAreaY + y) * canvasW + x) * 3;
-            if (count == 4) {
-                rgb[di]     = textR;
-                rgb[di + 1] = textG;
-                rgb[di + 2] = textB;
-            } else {
-                float alpha = count * 0.25f;
-                rgb[di]     = (uint8_t)(rgb[di]     + (textR - rgb[di])     * alpha);
-                rgb[di + 1] = (uint8_t)(rgb[di + 1] + (textG - rgb[di + 1]) * alpha);
-                rgb[di + 2] = (uint8_t)(rgb[di + 2] + (textB - rgb[di + 2]) * alpha);
-            }
-        }
-    }
+    return (avgR * 299 + avgG * 587 + avgB * 114) / 1000;
 }
 
 // Render text directly onto the packed (4-bit palette index) buffer,
@@ -220,47 +180,18 @@ static void renderTextBandPacked(uint8_t* packed, const uint8_t* rgb,
     canvas.setTextColor(1);
     canvas.setTextWrap(false);
 
-    canvas.setFont(font);
-    canvas.setTextSize(initScale);
-    int16_t x1, y1; uint16_t tw, th;
-
     String str(text);
-    int scale = initScale;
-    canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    while (tw > (uint16_t)(ssW - 60) && scale > minScale) {
-        scale--;
-        canvas.setTextSize(scale);
-        canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    }
-    while (tw > (uint16_t)(ssW - 60) && str.length() > 4) {
-        str = str.substring(0, str.length() - 2);
-        String test = str + "...";
-        canvas.getTextBounds(test.c_str(), 0, 0, &x1, &y1, &tw, &th);
-        if (tw <= (uint16_t)(ssW - 60)) { str = test; break; }
-    }
+    int scale = fitTextToWidth(canvas, font, str, initScale, minScale, ssW - 60);
 
+    int16_t x1, y1; uint16_t tw, th;
     canvas.setFont(font);
     canvas.setTextSize(scale);
     canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    int textX = (ssW - tw) / 2 - x1;
-    int textY = (ssH - th) / 2 - y1;
-    canvas.setCursor(textX, textY);
+    canvas.setCursor((ssW - tw) / 2 - x1, (ssH - th) / 2 - y1);
     canvas.print(str);
 
-    // Sample actual background pixels in the band to pick text colour
-    long rSum = 0, gSum = 0, bSum = 0;
-    int samples = 0;
-    int step = 4;
-    for (int y = 0; y < textAreaH; y += step) {
-        for (int x = 0; x < canvasW; x += step) {
-            int di = ((textAreaY + y) * canvasW + x) * 3;
-            rSum += rgb[di]; gSum += rgb[di + 1]; bSum += rgb[di + 2];
-            samples++;
-        }
-    }
-    int avgR = rSum / samples, avgG = gSum / samples, avgB = bSum / samples;
-    int brightness = (avgR * 299 + avgG * 587 + avgB * 114) / 1000;
-    uint8_t textIdx = (brightness < 128) ? 1 : 0; // White on dark, Black on light
+    // White on dark, black on light — measured against the real background
+    uint8_t textIdx = (bandBrightness(rgb, canvasW, textAreaY, textAreaH) < 128) ? 1 : 0;
 
     for (int y = 0; y < textAreaH; y++) {
         for (int x = 0; x < canvasW; x++) {
@@ -296,48 +227,19 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
     canvas.setTextColor(1);
     canvas.setTextWrap(false);
 
-    // Artist name — bold 24pt, scaled 4× on 2× canvas = ~66px effective
-    canvas.setFont(&FreeSansBold24pt7b);
-    canvas.setTextSize(4);
+    const int maxW = ssW - 60;
     int16_t x1, y1; uint16_t tw, th;
+    int16_t ax1, ay1; uint16_t atw, ath;
 
-    // If artist name is too wide, try smaller scale, then truncate
+    // Artist name — bold 24pt, scaled 4× on 2× canvas = ~66px effective
     String artistStr(artist);
-    int artistScale = 4;
-    canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    while (tw > (uint16_t)(ssW - 60) && artistScale > 2) {
-        artistScale--;
-        canvas.setTextSize(artistScale);
-        canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    }
-    // Still too wide? Truncate with ellipsis
-    while (tw > (uint16_t)(ssW - 60) && artistStr.length() > 4) {
-        artistStr = artistStr.substring(0, artistStr.length() - 2);
-        String test = artistStr + "...";
-        canvas.getTextBounds(test.c_str(), 0, 0, &x1, &y1, &tw, &th);
-        if (tw <= (uint16_t)(ssW - 60)) { artistStr = test; break; }
-    }
+    int artistScale = fitTextToWidth(canvas, &FreeSansBold24pt7b, artistStr, 4, 2, maxW);
     canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
     int artistH = th;
 
     // Album name — regular 18pt, scaled 3× on 2× canvas = ~36px effective
-    canvas.setFont(&FreeSans18pt7b);
-    canvas.setTextSize(3);
     String albumStr(album);
-    int albumScale = 3;
-    int16_t ax1, ay1; uint16_t atw, ath;
-    canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
-    while (atw > (uint16_t)(ssW - 60) && albumScale > 2) {
-        albumScale--;
-        canvas.setTextSize(albumScale);
-        canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
-    }
-    while (atw > (uint16_t)(ssW - 60) && albumStr.length() > 4) {
-        albumStr = albumStr.substring(0, albumStr.length() - 2);
-        String test = albumStr + "...";
-        canvas.getTextBounds(test.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
-        if (atw <= (uint16_t)(ssW - 60)) { albumStr = test; break; }
-    }
+    int albumScale = fitTextToWidth(canvas, &FreeSans18pt7b, albumStr, 3, 2, maxW);
     canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
     int albumH = ath;
 
@@ -350,28 +252,20 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
     canvas.setFont(&FreeSansBold24pt7b);
     canvas.setTextSize(artistScale);
     canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    int artistX = (ssW - tw) / 2 - x1;
-    int artistY = startY - y1;
-    canvas.setCursor(artistX, artistY);
+    canvas.setCursor((ssW - tw) / 2 - x1, startY - y1);
     canvas.print(artistStr);
 
     // Draw album
     canvas.setFont(&FreeSans18pt7b);
     canvas.setTextSize(albumScale);
     canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
-    int albumX = (ssW - atw) / 2 - ax1;
-    int albumY = startY + artistH + gap - ay1;
-    canvas.setCursor(albumX, albumY);
+    canvas.setCursor((ssW - atw) / 2 - ax1, startY + artistH + gap - ay1);
     canvas.print(albumStr);
 
     // Determine text color: white on dark bg, black on light bg
     int brightness = (bgR * 299 + bgG * 587 + bgB * 114) / 1000;
-    uint8_t textR, textG, textB;
-    if (brightness < 128) {
-        textR = 255; textG = 255; textB = 255;
-    } else {
-        textR = 0; textG = 0; textB = 0;
-    }
+    uint8_t textR = (brightness < 128) ? 255 : 0;
+    uint8_t textG = textR, textB = textR;
 
     // Downsample 2×2 blocks → alpha (0..4) and blend text color with background
     for (int y = 0; y < textAreaH; y++) {
@@ -401,10 +295,10 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
 // ─── Pre-dither image enhancement for e-ink output ───
 // Applies mild unsharp-mask sharpening + contrast boost + gamma correction
 // in a single pass using a 3-row rolling buffer (~4 KB working memory).
-static void enhanceForEink(uint8_t* rgb, int w, int h) {
-    const float sharpenAmt   = 0.4f;   // unsharp mask strength
-    const float contrastFact = 1.2f;   // 20 % contrast boost
-    const float gamma        = 0.9f;   // < 1 lifts midtones slightly
+static void enhanceForEink(uint8_t* rgb, int w, int h, const RenderProfile& profile) {
+    const float sharpenAmt   = profile.sharpen;
+    const float contrastFact = profile.contrast;
+    const float gamma        = profile.gamma;
     const int   rowBytes     = w * 3;
 
     // Combined contrast + gamma LUT (one per intensity level)
@@ -485,7 +379,8 @@ static void enhanceForEink(uint8_t* rgb, int w, int h) {
     free(prev);
     free(curr);
     free(next);
-    Serial.println("[Pipeline] Enhanced (sharpen+contrast+gamma)");
+    Serial.printf("[Pipeline] Enhanced (%s: sharpen %.2f contrast %.2f gamma %.2f)\n",
+                  profile.name, sharpenAmt, contrastFact, gamma);
 }
 
 // ─── Blurred background fill ───
@@ -588,7 +483,7 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
     free(tmp);
 
     // Darken or wash out depending on bg_style setting
-    if (g_settings.bg_style == 1) {
+    if (g_app.settings.bg_style == 1) {
         // Wash out: blend toward white
         for (int i = 0; i < fillH * cW * 3; i++)
             canvas[i] = (uint8_t)(canvas[i] + (255 - canvas[i]) * 45 / 100);
@@ -602,8 +497,17 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
 }
 
 // ─── Core: decode JPEG buffer → scale → optional text → dither → display ───
-static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
-                              const char* artist = nullptr, const char* album = nullptr) {
+// Does NOT take ownership of jpegBuf — the caller frees it.  Distinguishing
+// "this JPEG is undecodable" from "we ran out of memory" matters: only the
+// former should stop us caching the artwork to history.
+enum PipelineResult {
+    PIPE_OK = 0,
+    PIPE_DECODE_FAILED,   // the JPEG itself is unusable — do not cache it
+    PIPE_RESOURCE_FAILED  // transient (allocation) — the JPEG is fine
+};
+
+static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
+                                        const char* artist = nullptr, const char* album = nullptr) {
     // 1. Get dimensions
     uint16_t imgW, imgH;
     JRESULT jr = TJpgDec.getJpgSize(&imgW, &imgH, jpegBuf, jpegSize);
@@ -615,8 +519,7 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     if (jr != JDR_OK || imgW == 0 || imgH == 0) {
         Serial.printf("[Pipeline] JPEG parse failed (jr=%d)\n", (int)jr);
         activityLogf("Artwork decode failed: JPEG header (jr=%d)", (int)jr);
-        heap_caps_free(jpegBuf);
-        return false;
+        return PIPE_DECODE_FAILED;
     }
 
     // 2. Decode to RGB888 in PSRAM
@@ -626,22 +529,19 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     if (!g_decodeBuf) {
         Serial.printf("[Pipeline] Decode buffer alloc failed (%dx%dx3 = %u bytes)\n",
                       imgW, imgH, (unsigned)(imgW * imgH * 3));
-        heap_caps_free(jpegBuf);
-        return false;
+        return PIPE_RESOURCE_FAILED;
     }
 
     TJpgDec.setCallback(tjpgCallback);
     TJpgDec.setJpgScale(1);
     JRESULT decodeResult = TJpgDec.drawJpg(0, 0, jpegBuf, jpegSize);
 
-    // JPEG buffer no longer needed
-    heap_caps_free(jpegBuf);
     if (decodeResult != JDR_OK) {
         Serial.printf("[Pipeline] JPEG decode failed (jr=%d)\n", (int)decodeResult);
         activityLogf("Artwork decode failed: unsupported JPEG format (jr=%d)", (int)decodeResult);
         heap_caps_free(g_decodeBuf);
         g_decodeBuf = nullptr;
-        return false;
+        return PIPE_DECODE_FAILED;
     }
 
     // 3. Scale to display size
@@ -658,7 +558,7 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         heap_caps_free(g_decodeBuf);
         g_decodeBuf = nullptr;
         Serial.println("[Pipeline] Scaled buffer alloc failed");
-        return false;
+        return PIPE_RESOURCE_FAILED;
     }
 
     // Compute edge color for background fill (used as fallback)
@@ -667,10 +567,10 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
 
     // Background mode: 0 = always solid, 1 = always blur, 2 = auto-detect.
     bool useBlur;
-    if (g_settings.bg_mode == 0) {
+    if (g_app.settings.bg_mode == 0) {
         useBlur = false;
         Serial.println("[Pipeline] Background: forced solid");
-    } else if (g_settings.bg_mode == 1) {
+    } else if (g_app.settings.bg_mode == 1) {
         useBlur = true;
         Serial.println("[Pipeline] Background: forced blur");
     } else {
@@ -763,7 +663,8 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     g_decodeBuf = nullptr;
 
     // 3.5. Pre-dither enhancement (sharpen + contrast + gamma)
-    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+    const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
+    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     // 4. Dither to 6-colour packed buffer
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
@@ -771,10 +672,10 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     if (!packedBuf) {
         heap_caps_free(scaledBuf);
         Serial.println("[Pipeline] Packed buffer alloc failed");
-        return false;
+        return PIPE_RESOURCE_FAILED;
     }
 
-    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT);
+    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     // Render text directly onto packed buffer (after dithering for crisp text)
     if (showText) {
@@ -791,7 +692,7 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     displayShowImage(packedBuf);
     heap_caps_free(packedBuf);
 
-    return true;
+    return PIPE_OK;
 }
 
 // ─── Placeholder display when artwork can't be decoded ───
@@ -814,7 +715,8 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
     renderText(scaledBuf, EPD_WIDTH, EPD_HEIGHT, artist, album,
                0, EPD_HEIGHT, bgR, bgG, bgB);
 
-    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+    const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
+    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
     uint8_t* packedBuf = (uint8_t*)heap_caps_calloc(packedSize, 1, MALLOC_CAP_SPIRAM);
@@ -824,7 +726,7 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
         return false;
     }
 
-    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT);
+    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT, profile);
     heap_caps_free(scaledBuf);
 
     displayShowImage(packedBuf);
@@ -960,21 +862,31 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
 bool pipelineProcessUrl(const char* url,
                         const char* overlayArtist, const char* overlayAlbum,
                         const char* artist, const char* title, const char* album) {
-    size_t jpegSize;
+    size_t jpegSize = 0;
     uint8_t* jpegBuf = downloadJpeg(url, jpegSize);
     if (!jpegBuf || jpegSize == 0) {
         activityLog("Artwork fetch failed");
         return false;
     }
 
-    // Save to album art history (before processJpegBuffer frees the buffer)
-    if (artist && artist[0] && title && title[0]) {
+    PipelineResult res = processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum);
+
+    // Cache to history only once we know the JPEG actually decodes.  Caching
+    // first would leave undecodable artwork on the SD card forever, where the
+    // idle gallery would pick it and fail on every rotation.
+    if (res != PIPE_DECODE_FAILED && artist && artist[0] && title && title[0]) {
         sdHistorySave(artist, title, album, jpegBuf, jpegSize);
     }
+    heap_caps_free(jpegBuf);
 
-    if (processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum)) {
+    if (res == PIPE_OK) {
         activityLog("Artwork render complete");
-        return true; // takes ownership of jpegBuf
+        return true;
+    }
+
+    if (res == PIPE_RESOURCE_FAILED) {
+        activityLog("Artwork render failed: out of memory");
+        return false;
     }
 
     // JPEG wasn't decodable — show placeholder with track info
@@ -997,16 +909,30 @@ bool pipelineProcessFile(const char* path) {
     }
 
     size_t fSize = f.size();
+    if (fSize == 0) {
+        f.close();
+        Serial.printf("[Pipeline] %s is empty\n", path);
+        return false;
+    }
+
     uint8_t* jpegBuf = (uint8_t*)heap_caps_malloc(fSize, MALLOC_CAP_SPIRAM);
     if (!jpegBuf) {
         f.close();
         Serial.println("[Pipeline] PSRAM alloc failed for file");
         return false;
     }
-    f.readBytes((char*)jpegBuf, fSize);
+    size_t got = f.readBytes((char*)jpegBuf, fSize);
     f.close();
+    if (got != fSize) {
+        Serial.printf("[Pipeline] Short read on %s (%u/%u bytes)\n",
+                      path, (unsigned)got, (unsigned)fSize);
+        heap_caps_free(jpegBuf);
+        return false;
+    }
 
-    return processJpegBuffer(jpegBuf, fSize); // takes ownership
+    PipelineResult res = processJpegBuffer(jpegBuf, fSize);
+    heap_caps_free(jpegBuf);
+    return res == PIPE_OK;
 }
 
 void pipelineShowTestPattern() {
@@ -1155,7 +1081,7 @@ void pipelineShowDitherTest() {
     }
     memset(packed, 0, packedSize);
 
-    ditherFloydSteinberg(rgb, packed, W, H);
+    ditherFloydSteinberg(rgb, packed, W, H, renderProfile(g_app.settings.render_profile));
     heap_caps_free(rgb);
 
     displayShowImage(packed);

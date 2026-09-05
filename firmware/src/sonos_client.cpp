@@ -31,6 +31,8 @@ bool sonosGetTrackInfo(const char* sonosIp, SonosTrackInfo& info) {
     HTTPClient http;
     String url = String("http://") + sonosIp + ":1400/MediaRenderer/AVTransport/Control";
     http.begin(url);
+    http.setConnectTimeout(3000);
+    http.setTimeout(5000);
     http.addHeader("Content-Type", "text/xml; charset=\"utf-8\"");
     http.addHeader("SOAPAction",
         "\"urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo\"");
@@ -53,12 +55,14 @@ bool sonosGetTrackInfo(const char* sonosIp, SonosTrackInfo& info) {
     String metaRaw = extractTag(body, "TrackMetaData");
     if (metaRaw.isEmpty()) return true; // valid but no track
 
+    // DIDL-Lite nests <item> inside <DIDL-Lite>; scope the lookups to the item
+    // so an outer container element can't shadow the track's own metadata.
     String meta = decodeXmlEntities(metaRaw);
-    info.title  = decodeXmlEntities(extractTag(meta, "dc:title"));
-    info.artist = decodeXmlEntities(extractTag(meta, "dc:creator"));
-    info.album  = decodeXmlEntities(extractTag(meta, "upnp:album"));
+    info.title  = decodeXmlEntities(extractTagWithin(meta, "item", "dc:title"));
+    info.artist = decodeXmlEntities(extractTagWithin(meta, "item", "dc:creator"));
+    info.album  = decodeXmlEntities(extractTagWithin(meta, "item", "upnp:album"));
 
-    String artPath = decodeXmlEntities(extractTag(meta, "upnp:albumArtURI"));
+    String artPath = decodeXmlEntities(extractTagWithin(meta, "item", "upnp:albumArtURI"));
     if (artPath.length() > 0) {
         if (artPath.startsWith("http")) {
             info.artUrl = artPath;
@@ -77,6 +81,8 @@ bool sonosIsPlaying(const char* sonosIp, bool* reachable) {
     HTTPClient http;
     String url = String("http://") + sonosIp + ":1400/MediaRenderer/AVTransport/Control";
     http.begin(url);
+    http.setConnectTimeout(3000);
+    http.setTimeout(5000);
     http.addHeader("Content-Type", "text/xml; charset=\"utf-8\"");
     http.addHeader("SOAPAction",
         "\"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\"");
@@ -109,6 +115,7 @@ bool sonosGetDeviceName(const char* ip, char* nameOut, size_t nameLen) {
     HTTPClient http;
     String url = String("http://") + ip + ":1400/xml/device_description.xml";
     http.begin(url);
+    http.setConnectTimeout(2000);
     http.setTimeout(2000);
     int code = http.GET();
     if (code != HTTP_CODE_OK) {

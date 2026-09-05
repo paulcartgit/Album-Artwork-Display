@@ -1,6 +1,7 @@
 #include "sd_manager.h"
 #include <SD_MMC.h>
 #include <ArduinoJson.h>
+#include <ctime>
 
 bool sdInit() {
     SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3);
@@ -62,6 +63,7 @@ bool sdReadSettings(Settings& settings) {
     settings.show_track_info = true;
     settings.bg_mode = 2;  // auto
     settings.bg_style = 0; // darken
+    settings.render_profile = PROFILE_NATURAL;
 
     File f = SD_MMC.open("/settings.json", FILE_READ);
     if (!f) return false;
@@ -90,6 +92,9 @@ bool sdReadSettings(Settings& settings) {
         settings.bg_mode = 2;
     }
     settings.bg_style = doc["bg_style"] | 0;
+    settings.render_profile = doc["render_profile"] | (uint8_t)PROFILE_NATURAL;
+    if (settings.render_profile >= PROFILE_COUNT) settings.render_profile = PROFILE_NATURAL;
+    strlcpy(settings.portal_password, doc["portal_password"] | "", sizeof(settings.portal_password));
     return true;
 }
 
@@ -105,6 +110,8 @@ bool sdWriteSettings(const Settings& settings) {
     doc["show_track_info"] = settings.show_track_info;
     doc["bg_mode"] = settings.bg_mode;
     doc["bg_style"] = settings.bg_style;
+    doc["render_profile"] = settings.render_profile;
+    doc["portal_password"] = settings.portal_password;
 
     File f = SD_MMC.open("/settings.json", FILE_WRITE);
     if (!f) return false;
@@ -138,6 +145,28 @@ static bool readIndex(JsonDocument& doc) {
     bool ok = !deserializeJson(doc, f);
     f.close();
     return ok;
+}
+
+// Timestamps are wall-clock epoch seconds, NOT millis().  millis() restarts at
+// zero on every boot, so anything saved after a power cycle looked *older* than
+// everything already on the card and the pruner deleted the newest artwork
+// first.  Entries written by older firmware carry small millis()-derived values
+// which naturally sort below any real epoch time, so they are pruned first —
+// which is what we want, since they genuinely are the oldest.
+static const uint32_t EPOCH_PLAUSIBLE = 1600000000UL; // 2020-09-13
+
+static uint32_t historyTimestamp(JsonArray arr) {
+    time_t now = time(nullptr);
+    if ((uint32_t)now >= EPOCH_PLAUSIBLE) return (uint32_t)now;
+
+    // NTP hasn't synced yet — stay monotonic by sitting just above the newest
+    // entry we already have, so relative ordering still works.
+    uint32_t highest = 0;
+    for (JsonObject obj : arr) {
+        uint32_t ts = obj["ts"] | 0UL;
+        if (ts > highest) highest = ts;
+    }
+    return highest + 1;
 }
 
 static bool writeIndex(const JsonDocument& doc) {
@@ -174,7 +203,7 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
     // Check if entry already exists — just bump timestamp
     for (JsonObject obj : arr) {
         if (strcmp(obj["f"] | "", fname) == 0) {
-            obj["ts"] = (unsigned long)millis();
+            obj["ts"] = historyTimestamp(arr);
             writeIndex(doc);
             Serial.printf("[History] Already cached: %s\n", fname);
             return true;
@@ -194,12 +223,12 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
     while (arr.size() >= HISTORY_MAX) {
         // Find oldest non-pinned entry by timestamp
         int oldest = -1;
-        unsigned long oldestTs = ULONG_MAX;
+        uint32_t oldestTs = UINT32_MAX;
         int i = 0;
         for (JsonObject obj : arr) {
             bool pinned = obj["pin"] | false;
             if (!pinned) {
-                unsigned long ts = obj["ts"] | 0UL;
+                uint32_t ts = obj["ts"] | 0UL;
                 if (ts < oldestTs) { oldestTs = ts; oldest = i; }
             }
             i++;
@@ -222,7 +251,7 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
     obj["a"]  = artist;
     obj["t"]  = title;
     obj["al"] = album ? album : "";
-    obj["ts"] = (unsigned long)millis();
+    obj["ts"] = historyTimestamp(arr);
     obj["on"] = true;
 
     writeIndex(doc);

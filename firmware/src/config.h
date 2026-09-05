@@ -69,7 +69,8 @@
 
 // ─── 6-Color Palette (calibrated to GDEP073E01 actual pigment appearance) ───
 // These RGB values represent what the e-ink pigments LOOK LIKE, not ideal RGB.
-// Accurate values are critical for Floyd-Steinberg dithering quality.
+// The dither matches against these values and diffuses error against them, so
+// their accuracy directly determines output quality — see DITHERING.md.
 struct PaletteColor {
     uint8_t r, g, b;
     uint8_t index;
@@ -83,6 +84,40 @@ static const PaletteColor PALETTE[EPD_COLORS] = {
     {0x9C, 0x30, 0x2C, 4}, // Red    (dark brick-crimson)
     {0xC8, 0xB8, 0x30, 5}, // Yellow (warm golden)
 };
+
+// ─── Render profiles ───
+// The rendering pipeline is heavily parameterised.  Rather than bake the
+// constants in, expose three named presets the user can pick in the portal.
+// PROFILE_NATURAL reproduces the historical (pre-profile) behaviour exactly.
+struct RenderProfile {
+    const char* name;
+    // Pre-dither enhancement (image_pipeline.cpp / enhanceForEink)
+    float sharpen;        // unsharp-mask strength
+    float contrast;       // contrast multiplier around mid-grey
+    float gamma;          // < 1 lifts midtones
+    // Dithering (dither.cpp)
+    float chromaPenaltyK;      // strength of the achromatic penalty
+    float chromaPenaltyOnset;  // chroma below which no penalty applies
+    float edgeAttenuation;     // 0 = diffuse across edges, 1 = fully blocked
+};
+
+enum RenderProfileId {
+    PROFILE_PUNCHY  = 0,
+    PROFILE_NATURAL = 1,
+    PROFILE_SOFT    = 2,
+    PROFILE_COUNT   = 3
+};
+
+static const RenderProfile RENDER_PROFILES[PROFILE_COUNT] = {
+    //  name        sharpen contrast gamma  chromaK onset  edgeAtten
+    { "Punchy",     0.65f,  1.35f,   0.85f, 7.0f,   10.0f, 0.85f },
+    { "Natural",    0.40f,  1.20f,   0.90f, 5.0f,   12.0f, 0.85f },
+    { "Soft",       0.20f,  1.08f,   0.95f, 3.5f,   16.0f, 0.70f },
+};
+
+inline const RenderProfile& renderProfile(uint8_t id) {
+    return RENDER_PROFILES[(id < PROFILE_COUNT) ? id : PROFILE_NATURAL];
+}
 
 // ─── App State ───
 enum AppState {
@@ -106,8 +141,11 @@ struct Settings {
     uint32_t idle_gallery_ms;
     // Display
     bool show_track_info;
-    uint8_t bg_mode;   // 0 = always solid, 1 = always blur, 2 = auto (default)
-    uint8_t bg_style;  // 0 = darken background, 1 = wash out (lighten)
+    uint8_t bg_mode;         // 0 = always solid, 1 = always blur, 2 = auto (default)
+    uint8_t bg_style;        // 0 = darken background, 1 = wash out (lighten)
+    uint8_t render_profile;  // RenderProfileId — 1 (Natural) by default
+    // Web portal access control (empty password = no auth)
+    char portal_password[64];
 };
 
 // ─── WiFi Config (stored in /config.json on SD) ───

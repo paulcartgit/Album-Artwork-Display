@@ -14,32 +14,11 @@ static GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT / 4> epd
     GxEPD2_730c_GDEP073E01(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY)
 );
 
-// Track whether we kicked off a refresh that hasn't finished yet
-static bool g_refreshInProgress = false;
+// Set for the duration of a refresh so other tasks can see the panel is busy.
+static volatile bool g_refreshing = false;
 
 bool displayIsBusy() {
-    if (!g_refreshInProgress) return false;
-    // BUSY pin is active LOW on GDEP073E01
-    if (digitalRead(EPD_BUSY) == LOW) return true;
-    // Refresh finished
-    g_refreshInProgress = false;
-    Serial.println("[Display] Refresh complete (async)");
-    return false;
-}
-
-void displayWaitReady() {
-    if (!g_refreshInProgress) return;
-    unsigned long start = millis();
-    while (digitalRead(EPD_BUSY) == LOW) {
-        yield();
-        delay(50);
-        if (millis() - start > 20000) {
-            Serial.println("[Display] Busy timeout (20s)!");
-            break;
-        }
-    }
-    g_refreshInProgress = false;
-    Serial.printf("[Display] Wait complete (%lu ms)\n", millis() - start);
+    return g_refreshing;
 }
 
 bool displayInit() {
@@ -58,12 +37,6 @@ static void busyYieldCallback(const void*) {
 }
 
 void displayShowImage(const uint8_t* packedBuffer) {
-    // Wait for any previous refresh to complete before touching the SPI bus
-    if (g_refreshInProgress) {
-        Serial.println("[Display] Waiting for previous refresh to finish...");
-        displayWaitReady();
-    }
-
     // packedBuffer: EPD_WIDTH×EPD_HEIGHT (480×800) at 4bpp, 2 pixels/byte
     // Panel native: 800×480.  Rotation 3: src(sx,sy) → native(sy, 479-sx)
     // writeNative() applies _convert_to_native internally, so we pass GxEPD2 indices as-is.
@@ -77,6 +50,8 @@ void displayShowImage(const uint8_t* packedBuffer) {
         Serial.println("[Display] Native buffer alloc failed");
         return;
     }
+
+    g_refreshing = true;
     memset(native, 0x11, nativeSize); // white fill (index 1)
 
     // Rotate portrait → native landscape
@@ -109,12 +84,12 @@ void displayShowImage(const uint8_t* packedBuffer) {
     epd.epd2.refresh();
     epd.epd2.setBusyCallback(nullptr);
 
-    g_refreshInProgress = false;
+    g_refreshing = false;
     Serial.println("[Display] Refresh complete");
 }
 
 void displayShowMessage(const char* msg) {
-    displayWaitReady();
+    g_refreshing = true;
     epd.setFullWindow();
     epd.firstPage();
     do {
@@ -151,10 +126,12 @@ void displayShowMessage(const char* msg) {
             }
         }
     } while (epd.nextPage());
+    g_refreshing = false;
     Serial.printf("[Display] Message: %s\n", msg);
 }
 
 void displayClear() {
-    displayWaitReady();
+    g_refreshing = true;
     epd.clearScreen(GxEPD_WHITE);
+    g_refreshing = false;
 }

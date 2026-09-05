@@ -1,34 +1,153 @@
 #include "web_server.h"
 #include "web_portal.h"
 #include "captive_portal.h"
+#include "app.h"
 #include "config.h"
 #include "sd_manager.h"
 #include "sonos_client.h"
 #include "image_pipeline.h"
 #include "activity_log.h"
+#include "wav_utils.h"
 
 #include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
 #include <ArduinoJson.h>
 #include <SD_MMC.h>
 #include <WiFi.h>
+#include <Update.h>
 
-// ─── Captive portal (setup mode) ───────────────────────────
+// ═══════════════════════════════════════════════════════════
+// Request-body accumulation
+//
+// These callbacks fire once per TCP chunk and several requests can be in
+// flight at once, so the buffer must belong to the request — not to the
+// handler.  _tempObject is freed by the framework when the request completes.
+// It is also capped: an unbounded String here is a trivial way to exhaust the
+// heap from the LAN.
+// ═══════════════════════════════════════════════════════════
+static const size_t MAX_BODY_BYTES = 4096;
 
-static DNSServer       s_dns;
-static AsyncWebServer  s_setupServer(80);
+struct BodyBuffer {
+    size_t len;
+    size_t cap;
+    char   data[MAX_BODY_BYTES + 1];
+};
 
-// Redirect every DNS query to us (192.168.4.1) so the OS pops the portal
-static const uint8_t DNS_PORT = 53;
+// Returns true once the whole body has arrived and is available in `out`.
+static bool collectBody(AsyncWebServerRequest* req, uint8_t* data, size_t len,
+                        size_t index, size_t total, const char** out) {
+    if (total > MAX_BODY_BYTES) {
+        if (index == 0) req->send(413, "application/json", "{\"error\":\"body too large\"}");
+        return false;
+    }
+    if (index == 0) {
+        if (req->_tempObject) free(req->_tempObject);
+        req->_tempObject = calloc(1, sizeof(BodyBuffer));
+        if (!req->_tempObject) {
+            req->send(500, "application/json", "{\"error\":\"out of memory\"}");
+            return false;
+        }
+    }
+    BodyBuffer* buf = (BodyBuffer*)req->_tempObject;
+    if (!buf) return false;
 
-// Delay long enough for the HTTP response to reach the browser before restart
-static const uint32_t REBOOT_RESPONSE_DELAY_MS = 800;
+    size_t room = MAX_BODY_BYTES - buf->len;
+    size_t n = (len < room) ? len : room;
+    memcpy(buf->data + buf->len, data, n);
+    buf->len += n;
+    buf->data[buf->len] = '\0';
+
+    if (index + len < total) return false;
+    *out = buf->data;
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Access control
+//
+// Anyone on the LAN could previously rewrite the Wi-Fi credentials and reboot
+// the device.  A password is optional (empty = open, as before) but when set
+// it guards every API route, not just the destructive ones — /api/settings
+// alone leaks the configured SSID and speaker.
+// ═══════════════════════════════════════════════════════════
+static bool requireAuth(AsyncWebServerRequest* req) {
+    const char* pwd = g_app.settings.portal_password;
+    if (!pwd || pwd[0] == '\0') return true; // auth disabled
+    if (req->authenticate("admin", pwd)) return true;
+    req->requestAuthentication();
+    return false;
+}
+
+// Reject history filenames that try to escape /history.
+static bool safeHistoryName(const String& f) {
+    return f.length() > 0 && f.length() < 64 &&
+           f.indexOf("..") < 0 && f.indexOf('/') < 0 && f.indexOf('\\') < 0;
+}
+
+static void sendJson(AsyncWebServerRequest* req, int code, const JsonDocument& doc) {
+    String out;
+    serializeJson(doc, out);
+    req->send(code, "application/json", out);
+}
+
+// Shared Wi-Fi scan handler: always uses the *async* scan API.  The blocking
+// variant stalls the AsyncTCP task for seconds and takes the whole portal
+// down with it.
+static void handleWifiScan(AsyncWebServerRequest* req) {
+    int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) {
+        req->send(202, "application/json", "[]"); // client retries shortly
+        return;
+    }
+    if (n == WIFI_SCAN_FAILED || n == 0) {
+        WiFi.scanDelete();
+        WiFi.scanNetworks(true);
+        req->send(200, "application/json", "[]");
+        return;
+    }
+    // Deduplicate by SSID — keep the strongest signal for each
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    for (int i = 0; i < n; i++) {
+        String ssid = WiFi.SSID(i);
+        if (ssid.isEmpty()) continue;
+        int rssi = WiFi.RSSI(i);
+        bool isOpen = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+        bool found = false;
+        for (JsonObject obj : arr) {
+            if (obj["ssid"].as<String>() == ssid) {
+                if (rssi > obj["rssi"].as<int>()) {
+                    obj["rssi"] = rssi;
+                    obj["open"] = isOpen;
+                }
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            JsonObject obj = arr.add<JsonObject>();
+            obj["ssid"] = ssid;
+            obj["rssi"] = rssi;
+            obj["open"] = isOpen;
+        }
+    }
+    WiFi.scanDelete();
+    WiFi.scanNetworks(true); // start the next scan for future requests
+    sendJson(req, 200, doc);
+}
+
+// ═══════════════════════════════════════════════════════════
+// Captive portal (setup mode)
+// ═══════════════════════════════════════════════════════════
+
+static DNSServer      s_dns;
+static AsyncWebServer s_setupServer(80);
+static const uint8_t  DNS_PORT = 53;
 
 void captivePortalInit() {
-    // Redirect all DNS to the AP IP
     s_dns.start(DNS_PORT, "*", WiFi.softAPIP());
 
-    // Kick off an async WiFi scan immediately so results are ready when page loads
+    // Kick off an async WiFi scan immediately so results are ready on first load
     WiFi.scanNetworks(true);
 
     // Serve the setup page for any path (handles OS captive-portal probes too)
@@ -40,87 +159,37 @@ void captivePortalInit() {
         req->send_P(200, "text/html", CAPTIVE_PORTAL_HTML);
     });
 
-    // Wi-Fi scan endpoint — serves cached async results, then kicks off next scan
-    s_setupServer.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
-        int n = WiFi.scanComplete();
-        if (n == WIFI_SCAN_RUNNING) {
-            // Still scanning — tell client to retry shortly
-            req->send(202, "application/json", "[]");
-            return;
-        }
-        if (n == WIFI_SCAN_FAILED || n == 0) {
-            // No results — start a new scan and return empty
-            WiFi.scanDelete();
-            WiFi.scanNetworks(true);
-            req->send(200, "application/json", "[]");
-            return;
-        }
-        // Deduplicate by SSID — keep strongest signal for each
-        JsonDocument doc;
-        JsonArray arr = doc.to<JsonArray>();
-        for (int i = 0; i < n; i++) {
-            String ssid = WiFi.SSID(i);
-            if (ssid.isEmpty()) continue;
-            int rssi = WiFi.RSSI(i);
-            bool isOpen = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
-            bool found = false;
-            for (JsonObject obj : arr) {
-                if (obj["ssid"].as<String>() == ssid) {
-                    if (rssi > obj["rssi"].as<int>()) {
-                        obj["rssi"] = rssi;
-                        obj["open"] = isOpen;
-                    }
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                JsonObject obj = arr.add<JsonObject>();
-                obj["ssid"] = ssid;
-                obj["rssi"] = rssi;
-                obj["open"] = isOpen;
-            }
-        }
-        WiFi.scanDelete();
-        WiFi.scanNetworks(true); // start next scan for future requests
-        String out;
-        serializeJson(doc, out);
-        req->send(200, "application/json", out);
-    });
+    s_setupServer.on("/api/wifi/scan", HTTP_GET, handleWifiScan);
 
     // Save credentials and reboot
     s_setupServer.on("/api/wifi/save", HTTP_POST,
         [](AsyncWebServerRequest* req) { /* handled in body callback */ },
         nullptr,
         [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
-            static String body;
-            if (index == 0) body = "";
-            body += String((char*)data, len);
+            const char* body = nullptr;
+            if (!collectBody(req, data, len, index, total, &body)) return;
 
-            if (index + len >= total) {
-                JsonDocument doc;
-                if (deserializeJson(doc, body)) {
-                    req->send(400, "application/json", "{\"error\":\"bad json\"}");
-                    return;
-                }
-                const char* ssid = doc["ssid"] | "";
-                const char* pwd  = doc["password"] | "";
-                if (!ssid || strlen(ssid) == 0) {
-                    req->send(400, "application/json", "{\"error\":\"ssid required\"}");
-                    return;
-                }
-                WifiConfig cfg;
-                strlcpy(cfg.ssid,     ssid, sizeof(cfg.ssid));
-                strlcpy(cfg.password, pwd,  sizeof(cfg.password));
-                if (!sdWriteWifiConfig(cfg)) {
-                    req->send(500, "application/json", "{\"error\":\"sd write failed\"}");
-                    return;
-                }
-                req->send(200, "application/json", "{\"ok\":true}");
-                // Allow the HTTP response to reach the browser before rebooting
-                delay(REBOOT_RESPONSE_DELAY_MS);
-                ESP.restart();
+            JsonDocument doc;
+            if (deserializeJson(doc, body)) {
+                req->send(400, "application/json", "{\"error\":\"bad json\"}");
+                return;
             }
+            const char* ssid = doc["ssid"] | "";
+            const char* pwd  = doc["password"] | "";
+            if (strlen(ssid) == 0) {
+                req->send(400, "application/json", "{\"error\":\"ssid required\"}");
+                return;
+            }
+            WifiConfig cfg;
+            strlcpy(cfg.ssid,     ssid, sizeof(cfg.ssid));
+            strlcpy(cfg.password, pwd,  sizeof(cfg.password));
+            if (!sdWriteWifiConfig(cfg)) {
+                req->send(500, "application/json", "{\"error\":\"sd write failed\"}");
+                return;
+            }
+            req->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+            // Reboot from the main loop — never block the AsyncTCP task
+            g_req.reboot = true;
         }
     );
 
@@ -132,26 +201,9 @@ void captivePortalLoop() {
     s_dns.processNextRequest();
 }
 
-// Globals declared in main.cpp
-extern Settings   g_settings;
-extern AppState   g_state;
-extern String     g_currentArtist;
-extern String     g_currentTitle;
-extern String     g_currentAlbum;
-extern volatile bool g_forceRefresh;
-extern volatile bool g_testColors;
-extern volatile bool g_testDither;
-extern volatile bool g_forceListen;
-extern uint8_t* g_lastAudio;
-extern size_t   g_lastAudioLen;
-extern uint32_t g_lastAudioChannels;
-extern uint32_t g_lastAudioSampleRate;
-extern unsigned long g_lastPollTime;
-extern unsigned long g_lastNoMatchTime;
-extern int g_vinylNoMatchCount;
-extern int g_vinylCooldownLevel;
-extern unsigned long g_lastVinylMatchTime;
-extern String g_lastArtUrl;
+// ═══════════════════════════════════════════════════════════
+// Main portal
+// ═══════════════════════════════════════════════════════════
 
 static AsyncWebServer server(80);
 
@@ -163,78 +215,82 @@ void webServerInit() {
 
     // ─── Status API ───
     server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
         JsonDocument doc;
         const char* stateNames[] = {"BOOT","IDLE","DIGITAL","VINYL","ERROR","SETUP"};
-        int stateIdx = (int)g_state;
+        int stateIdx = (int)g_app.state;
         doc["state"]      = stateIdx;
         doc["state_name"] = (stateIdx >= 0 && stateIdx < 6) ? stateNames[stateIdx] : "UNKNOWN";
-        doc["artist"]     = g_currentArtist;
-        doc["title"]      = g_currentTitle;
-        doc["album"]      = g_currentAlbum;
-        doc["art_url"]    = g_lastArtUrl;
+        doc["artist"]     = g_app.currentArtist;
+        doc["title"]      = g_app.currentTitle;
+        doc["album"]      = g_app.currentAlbum;
+        doc["art_url"]    = g_app.lastArtUrl;
         doc["ip"]         = WiFi.localIP().toString();
         doc["uptime"]     = millis() / 1000;
 
         // Timing: next Sonos poll
         unsigned long now = millis();
-        unsigned long elapsed = now - g_lastPollTime;
-        unsigned long pollInterval = g_settings.sonos_poll_ms;
-        if (elapsed < pollInterval)
-            doc["next_poll_sec"] = (pollInterval - elapsed) / 1000;
-        else
-            doc["next_poll_sec"] = 0;
+        unsigned long elapsed = now - g_app.lastPollTime;
+        unsigned long pollInterval = g_app.settings.sonos_poll_ms;
+        doc["next_poll_sec"] = (elapsed < pollInterval) ? (pollInterval - elapsed) / 1000 : 0;
 
         // Timing: vinyl recheck
-        if (g_state == STATE_VINYL && g_lastVinylMatchTime != 0) {
-            unsigned long since = now - g_lastVinylMatchTime;
-            if (since < g_settings.vinyl_recheck_ms)
-                doc["next_vinyl_check_sec"] = (g_settings.vinyl_recheck_ms - since) / 1000;
-            else
-                doc["next_vinyl_check_sec"] = 0;
-            doc["vinyl_recheck_min"] = g_settings.vinyl_recheck_ms / 60000;
+        if (g_app.state == STATE_VINYL && g_app.lastVinylMatchTime != 0) {
+            unsigned long since = now - g_app.lastVinylMatchTime;
+            doc["next_vinyl_check_sec"] =
+                (since < g_app.settings.vinyl_recheck_ms)
+                    ? (g_app.settings.vinyl_recheck_ms - since) / 1000 : 0;
+            doc["vinyl_recheck_min"] = g_app.settings.vinyl_recheck_ms / 60000;
         }
 
-        // Timing: no-match retry / cooldown
-        if (g_lastNoMatchTime != 0) {
-            unsigned long since = now - g_lastNoMatchTime;
-            doc["no_match_retries"] = g_vinylNoMatchCount;
-            doc["cooldown_level"] = g_vinylCooldownLevel;
-            // Mirror the escalating cooldown logic from main loop
-            int maxRetries = (g_vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
-            if (g_vinylNoMatchCount >= maxRetries) {
-                unsigned long cooldown = g_settings.no_match_cooldown_ms *
-                                         (1 + (unsigned long)g_vinylCooldownLevel);
+        // Timing: no-match retry / cooldown (mirrors controller.cpp)
+        if (g_app.lastNoMatchTime != 0) {
+            unsigned long since = now - g_app.lastNoMatchTime;
+            doc["no_match_retries"] = g_app.vinylNoMatchCount;
+            doc["cooldown_level"]   = g_app.vinylCooldownLevel;
+            int maxRetries = (g_app.vinylCooldownLevel == 0) ? VINYL_MAX_RETRIES : 1;
+            if (g_app.vinylNoMatchCount >= maxRetries) {
+                unsigned long cooldown = g_app.settings.no_match_cooldown_ms *
+                                         (1 + (unsigned long)g_app.vinylCooldownLevel);
                 if (cooldown > VINYL_MAX_COOLDOWN_MS) cooldown = VINYL_MAX_COOLDOWN_MS;
-                if (since < cooldown)
-                    doc["cooldown_remaining_sec"] = (cooldown - since) / 1000;
-            } else {
-                if (since < VINYL_RETRY_DELAY_MS)
-                    doc["retry_in_sec"] = (VINYL_RETRY_DELAY_MS - since) / 1000;
+                if (since < cooldown) doc["cooldown_remaining_sec"] = (cooldown - since) / 1000;
+            } else if (since < VINYL_RETRY_DELAY_MS) {
+                doc["retry_in_sec"] = (VINYL_RETRY_DELAY_MS - since) / 1000;
             }
         }
+        sendJson(req, 200, doc);
+    });
 
-        String out;
-        serializeJson(doc, out);
-        req->send(200, "application/json", out);
+    // ─── Render profiles (for the settings dropdown) ───
+    server.on("/api/profiles", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        for (int i = 0; i < PROFILE_COUNT; i++) {
+            JsonObject obj = arr.add<JsonObject>();
+            obj["id"]   = i;
+            obj["name"] = RENDER_PROFILES[i].name;
+        }
+        sendJson(req, 200, doc);
     });
 
     // ─── Get settings (mask secrets) ───
     server.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
         JsonDocument doc;
-        doc["sonos_ip"]                = g_settings.sonos_ip;
-        doc["sonos_name"]              = g_settings.sonos_name;
-        doc["shazam_api_key_set"]      = strlen(g_settings.shazam_api_key) > 0;
-        doc["sonos_poll_ms"]           = g_settings.sonos_poll_ms;
-        doc["vinyl_recheck_ms"]        = g_settings.vinyl_recheck_ms;
-        doc["no_match_cooldown_ms"]    = g_settings.no_match_cooldown_ms;
-        doc["idle_gallery_ms"]         = g_settings.idle_gallery_ms;
-        doc["show_track_info"]         = g_settings.show_track_info;
-        doc["bg_mode"]                 = g_settings.bg_mode;
-        doc["bg_style"]                = g_settings.bg_style;
-
-        String out;
-        serializeJson(doc, out);
-        req->send(200, "application/json", out);
+        doc["sonos_ip"]             = g_app.settings.sonos_ip;
+        doc["sonos_name"]           = g_app.settings.sonos_name;
+        doc["shazam_api_key_set"]   = strlen(g_app.settings.shazam_api_key) > 0;
+        doc["sonos_poll_ms"]        = g_app.settings.sonos_poll_ms;
+        doc["vinyl_recheck_ms"]     = g_app.settings.vinyl_recheck_ms;
+        doc["no_match_cooldown_ms"] = g_app.settings.no_match_cooldown_ms;
+        doc["idle_gallery_ms"]      = g_app.settings.idle_gallery_ms;
+        doc["show_track_info"]      = g_app.settings.show_track_info;
+        doc["bg_mode"]              = g_app.settings.bg_mode;
+        doc["bg_style"]             = g_app.settings.bg_style;
+        doc["render_profile"]       = g_app.settings.render_profile;
+        doc["portal_password_set"]  = strlen(g_app.settings.portal_password) > 0;
+        sendJson(req, 200, doc);
     });
 
     // ─── Save settings (JSON body) ───
@@ -242,90 +298,61 @@ void webServerInit() {
         [](AsyncWebServerRequest* req) { /* handled in body callback */ },
         nullptr,
         [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
-            // Accumulate body across chunks
-            static String body;
-            if (index == 0) body = "";
-            body += String((char*)data, len);
+            if (!requireAuth(req)) return;
+            const char* body = nullptr;
+            if (!collectBody(req, data, len, index, total, &body)) return;
 
-            if (index + len >= total) {
-                JsonDocument doc;
-                if (deserializeJson(doc, body)) {
-                    req->send(400, "application/json", "{\"error\":\"bad json\"}");
-                    return;
-                }
-
-                if (doc["sonos_ip"].is<const char*>())
-                    strlcpy(g_settings.sonos_ip, doc["sonos_ip"], sizeof(g_settings.sonos_ip));
-                if (doc["sonos_name"].is<const char*>())
-                    strlcpy(g_settings.sonos_name, doc["sonos_name"], sizeof(g_settings.sonos_name));
-                if (doc["shazam_api_key"].is<const char*>())
-                    strlcpy(g_settings.shazam_api_key, doc["shazam_api_key"], sizeof(g_settings.shazam_api_key));
-                if (doc["sonos_poll_ms"].is<unsigned int>())
-                    g_settings.sonos_poll_ms = doc["sonos_poll_ms"];
-                if (doc["vinyl_recheck_ms"].is<unsigned int>())
-                    g_settings.vinyl_recheck_ms = doc["vinyl_recheck_ms"];
-                if (doc["no_match_cooldown_ms"].is<unsigned int>())
-                    g_settings.no_match_cooldown_ms = doc["no_match_cooldown_ms"];
-                if (doc["idle_gallery_ms"].is<unsigned int>())
-                    g_settings.idle_gallery_ms = doc["idle_gallery_ms"];
-                if (doc["show_track_info"].is<bool>())
-                    g_settings.show_track_info = doc["show_track_info"];
-                if (doc["bg_mode"].is<unsigned int>())
-                    g_settings.bg_mode = doc["bg_mode"];
-                if (doc["bg_style"].is<unsigned int>())
-                    g_settings.bg_style = doc["bg_style"];
-
-                sdWriteSettings(g_settings);
-                req->send(200, "application/json", "{\"ok\":true}");
+            JsonDocument doc;
+            if (deserializeJson(doc, body)) {
+                req->send(400, "application/json", "{\"error\":\"bad json\"}");
+                return;
             }
+
+            if (doc["sonos_ip"].is<const char*>())
+                strlcpy(g_app.settings.sonos_ip, doc["sonos_ip"], sizeof(g_app.settings.sonos_ip));
+            if (doc["sonos_name"].is<const char*>())
+                strlcpy(g_app.settings.sonos_name, doc["sonos_name"], sizeof(g_app.settings.sonos_name));
+            if (doc["shazam_api_key"].is<const char*>())
+                strlcpy(g_app.settings.shazam_api_key, doc["shazam_api_key"], sizeof(g_app.settings.shazam_api_key));
+            if (doc["portal_password"].is<const char*>())
+                strlcpy(g_app.settings.portal_password, doc["portal_password"], sizeof(g_app.settings.portal_password));
+            if (doc["sonos_poll_ms"].is<unsigned int>())
+                g_app.settings.sonos_poll_ms = doc["sonos_poll_ms"];
+            if (doc["vinyl_recheck_ms"].is<unsigned int>())
+                g_app.settings.vinyl_recheck_ms = doc["vinyl_recheck_ms"];
+            if (doc["no_match_cooldown_ms"].is<unsigned int>())
+                g_app.settings.no_match_cooldown_ms = doc["no_match_cooldown_ms"];
+            if (doc["idle_gallery_ms"].is<unsigned int>())
+                g_app.settings.idle_gallery_ms = doc["idle_gallery_ms"];
+            if (doc["show_track_info"].is<bool>())
+                g_app.settings.show_track_info = doc["show_track_info"];
+            if (doc["bg_mode"].is<unsigned int>())
+                g_app.settings.bg_mode = doc["bg_mode"];
+            if (doc["bg_style"].is<unsigned int>())
+                g_app.settings.bg_style = doc["bg_style"];
+            if (doc["render_profile"].is<unsigned int>()) {
+                uint8_t p = doc["render_profile"];
+                g_app.settings.render_profile = (p < PROFILE_COUNT) ? p : PROFILE_NATURAL;
+            }
+
+            sdWriteSettings(g_app.settings);
+            req->send(200, "application/json", "{\"ok\":true}");
         }
     );
 
     // ─── Scan WiFi networks ───
     server.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
-        int n = WiFi.scanNetworks(false, false);
-        JsonDocument doc;
-        JsonArray arr = doc.to<JsonArray>();
-        for (int i = 0; i < n; i++) {
-            String ssid = WiFi.SSID(i);
-            if (ssid.isEmpty()) continue;
-            int rssi = WiFi.RSSI(i);
-            bool isOpen = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
-            bool found = false;
-            for (JsonObject obj : arr) {
-                if (obj["ssid"].as<String>() == ssid) {
-                    if (rssi > obj["rssi"].as<int>()) {
-                        obj["rssi"] = rssi;
-                        obj["open"] = isOpen;
-                    }
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                JsonObject obj = arr.add<JsonObject>();
-                obj["ssid"] = ssid;
-                obj["rssi"] = rssi;
-                obj["open"] = isOpen;
-            }
-        }
-        String out;
-        serializeJson(doc, out);
-        req->send(200, "application/json", out);
+        if (!requireAuth(req)) return;
+        handleWifiScan(req);
     });
 
     // ─── Get current WiFi SSID ───
     server.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
         WifiConfig cfg;
         JsonDocument doc;
-        if (sdReadWifiConfig(cfg)) {
-            doc["ssid"] = cfg.ssid;
-        } else {
-            doc["ssid"] = "";
-        }
-        String out;
-        serializeJson(doc, out);
-        req->send(200, "application/json", out);
+        doc["ssid"] = sdReadWifiConfig(cfg) ? cfg.ssid : "";
+        sendJson(req, 200, doc);
     });
 
     // ─── Update WiFi credentials ───
@@ -333,44 +360,42 @@ void webServerInit() {
         [](AsyncWebServerRequest* req) { /* handled in body callback */ },
         nullptr,
         [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
-            static String body;
-            if (index == 0) body = "";
-            body += String((char*)data, len);
+            if (!requireAuth(req)) return;
+            const char* body = nullptr;
+            if (!collectBody(req, data, len, index, total, &body)) return;
 
-            if (index + len >= total) {
-                JsonDocument doc;
-                if (deserializeJson(doc, body)) {
-                    req->send(400, "application/json", "{\"error\":\"bad json\"}");
-                    return;
-                }
-                const char* ssid = doc["ssid"] | "";
-                const char* pwd  = doc["password"] | "";
-                if (!ssid || strlen(ssid) == 0) {
-                    req->send(400, "application/json", "{\"error\":\"ssid required\"}");
-                    return;
-                }
-                WifiConfig cfg;
-                strlcpy(cfg.ssid,     ssid, sizeof(cfg.ssid));
-                strlcpy(cfg.password, pwd,  sizeof(cfg.password));
-                if (!sdWriteWifiConfig(cfg)) {
-                    req->send(500, "application/json", "{\"error\":\"sd write failed\"}");
-                    return;
-                }
-                req->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
-                delay(500);
-                ESP.restart();
+            JsonDocument doc;
+            if (deserializeJson(doc, body)) {
+                req->send(400, "application/json", "{\"error\":\"bad json\"}");
+                return;
             }
+            const char* ssid = doc["ssid"] | "";
+            const char* pwd  = doc["password"] | "";
+            if (strlen(ssid) == 0) {
+                req->send(400, "application/json", "{\"error\":\"ssid required\"}");
+                return;
+            }
+            WifiConfig cfg;
+            strlcpy(cfg.ssid,     ssid, sizeof(cfg.ssid));
+            strlcpy(cfg.password, pwd,  sizeof(cfg.password));
+            if (!sdWriteWifiConfig(cfg)) {
+                req->send(500, "application/json", "{\"error\":\"sd write failed\"}");
+                return;
+            }
+            req->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+            g_req.reboot = true;
         }
     );
 
     // ─── Serve history image (must register before /api/history) ───
     server.on("/api/history/image", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
         if (!req->hasParam("f")) {
             req->send(400, "text/plain", "missing f");
             return;
         }
         String file = req->getParam("f")->value();
-        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+        if (!safeHistoryName(file)) {
             req->send(400, "text/plain", "invalid");
             return;
         }
@@ -379,19 +404,20 @@ void webServerInit() {
             req->send(404, "text/plain", "not found");
             return;
         }
-        AsyncWebServerResponse *response = req->beginResponse(SD_MMC, path, "image/jpeg");
+        AsyncWebServerResponse* response = req->beginResponse(SD_MMC, path, "image/jpeg");
         response->addHeader("Cache-Control", "public, max-age=604800, immutable");
         req->send(response);
     });
 
     // ─── Pin/unpin history entry ───
     server.on("/api/history/pin", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
         if (!req->hasParam("f", true) || !req->hasParam("pin", true)) {
             req->send(400, "application/json", "{\"error\":\"missing f or pin\"}");
             return;
         }
         String file = req->getParam("f", true)->value();
-        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+        if (!safeHistoryName(file)) {
             req->send(400, "application/json", "{\"error\":\"invalid name\"}");
             return;
         }
@@ -405,13 +431,13 @@ void webServerInit() {
 
     // ─── Toggle history entry on/off ───
     server.on("/api/history/toggle", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
         if (!req->hasParam("f", true) || !req->hasParam("on", true)) {
             req->send(400, "application/json", "{\"error\":\"missing f or on\"}");
             return;
         }
         String file = req->getParam("f", true)->value();
-        // Path traversal protection
-        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+        if (!safeHistoryName(file)) {
             req->send(400, "application/json", "{\"error\":\"invalid name\"}");
             return;
         }
@@ -425,12 +451,13 @@ void webServerInit() {
 
     // ─── Delete history entry ───
     server.on("/api/history/delete", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
         if (!req->hasParam("f", true)) {
             req->send(400, "application/json", "{\"error\":\"missing f\"}");
             return;
         }
         String file = req->getParam("f", true)->value();
-        if (file.indexOf("..") >= 0 || file.indexOf("/") >= 0) {
+        if (!safeHistoryName(file)) {
             req->send(400, "application/json", "{\"error\":\"invalid name\"}");
             return;
         }
@@ -443,36 +470,38 @@ void webServerInit() {
 
     // ─── List album art history ───
     server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
         req->send(200, "application/json", sdHistoryList());
     });
 
-    // ─── Force display refresh ───
+    // ─── Actions: all deferred to the controller loop ───
     server.on("/api/refresh", HTTP_POST, [](AsyncWebServerRequest* req) {
-        g_forceRefresh = true;
+        if (!requireAuth(req)) return;
+        g_req.forceRefresh = true;
         req->send(200, "application/json", "{\"ok\":true}");
-        Serial.println("[Web] Force refresh requested");
     });
 
-    // ─── Test color pattern ───
     server.on("/api/test-colors", HTTP_POST, [](AsyncWebServerRequest* req) {
-        g_testColors = true;
+        if (!requireAuth(req)) return;
+        g_req.testColors = true;
         req->send(200, "application/json", "{\"ok\":true}");
     });
 
-    // ─── Dither test pattern ───
     server.on("/api/test-dither", HTTP_POST, [](AsyncWebServerRequest* req) {
-        g_testDither = true;
+        if (!requireAuth(req)) return;
+        g_req.testDither = true;
         req->send(200, "application/json", "{\"ok\":true}");
     });
 
-    // ─── Force listen (audio identify) ───
     server.on("/api/listen", HTTP_POST, [](AsyncWebServerRequest* req) {
-        g_forceListen = true;
+        if (!requireAuth(req)) return;
+        g_req.forceListen = true;
         req->send(200, "application/json", "{\"ok\":true}");
     });
 
     // ─── Activity log ───
     server.on("/api/log", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
         LogEntry entries[LOG_MAX_ENTRIES];
         int count = activityLogGet(entries, LOG_MAX_ENTRIES);
 
@@ -483,78 +512,48 @@ void webServerInit() {
             obj["t"] = entries[i].timestamp / 1000; // seconds
             obj["m"] = entries[i].message;
         }
-
-        String out;
-        serializeJson(doc, out);
-        req->send(200, "application/json", out);
+        sendJson(req, 200, doc);
     });
 
     // ─── Download last audio recording as WAV ───
+    // The audio buffer is allocated once and never freed (see identify.cpp), so
+    // the pointer stays valid for the life of the chunked response.  Worst case
+    // a new recording overwrites it mid-download and you get a spliced WAV —
+    // which beats the use-after-free this used to be.
     server.on("/api/last-audio", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (!g_lastAudio || g_lastAudioLen == 0) {
+        if (!requireAuth(req)) return;
+        uint8_t* audioPtr = g_app.lastAudio;
+        size_t   audioLen = g_app.lastAudioLen;
+        if (!audioPtr || audioLen == 0) {
             req->send(404, "text/plain", "No audio recorded yet");
             return;
         }
 
-        uint32_t sampleRate = g_lastAudioSampleRate;
-        uint16_t channels = g_lastAudioChannels;
-        uint16_t bitsPerSample = 16;
-        uint32_t byteRate = sampleRate * channels * bitsPerSample / 8;
-        uint16_t blockAlign = channels * bitsPerSample / 8;
-        uint32_t dataLen = g_lastAudioLen;
-        uint32_t fileLen = 44 + dataLen;
-
-        // Build WAV header (44 bytes)
-        uint8_t hdr[44];
-        memcpy(hdr, "RIFF", 4);
-        uint32_t riffSize = fileLen - 8;
-        memcpy(hdr + 4, &riffSize, 4);
-        memcpy(hdr + 8, "WAVEfmt ", 8);
-        uint32_t fmtSize = 16;
-        memcpy(hdr + 16, &fmtSize, 4);
-        uint16_t audioFmt = 1; // PCM
-        memcpy(hdr + 20, &audioFmt, 2);
-        memcpy(hdr + 22, &channels, 2);
-        memcpy(hdr + 24, &sampleRate, 4);
-        memcpy(hdr + 28, &byteRate, 4);
-        memcpy(hdr + 32, &blockAlign, 2);
-        memcpy(hdr + 34, &bitsPerSample, 2);
-        memcpy(hdr + 36, "data", 4);
-        memcpy(hdr + 40, &dataLen, 4);
-
-        // Capture pointer/len at request time (audio won't change mid-serve)
-        uint8_t* audioPtr = g_lastAudio;
-        size_t audioLen = g_lastAudioLen;
+        uint8_t hdr[WAV_HEADER_SIZE];
+        wavWriteHeader(hdr, audioLen, g_app.lastAudioChannels, g_app.lastAudioSampleRate);
 
         AsyncWebServerResponse* response = req->beginChunkedResponse("audio/wav",
             [hdr, audioPtr, audioLen](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
-                size_t totalLen = 44 + audioLen;
+                size_t totalLen = WAV_HEADER_SIZE + audioLen;
                 if (index >= totalLen) return 0;
 
                 size_t remaining = totalLen - index;
                 size_t toSend = (remaining < maxLen) ? remaining : maxLen;
                 size_t sent = 0;
 
-                // Send from header (first 44 bytes)
-                if (index < 44) {
-                    size_t hdrBytes = 44 - index;
+                if (index < WAV_HEADER_SIZE) {
+                    size_t hdrBytes = WAV_HEADER_SIZE - index;
                     if (hdrBytes > toSend) hdrBytes = toSend;
                     memcpy(buffer, hdr + index, hdrBytes);
                     sent += hdrBytes;
                 }
-
-                // Send from audio data
                 if (sent < toSend) {
-                    size_t audioOffset = (index > 44) ? index - 44 : 0;
-                    if (index < 44) audioOffset = 0;
-                    size_t dataStart = (index < 44) ? 0 : index - 44;
+                    size_t dataStart = (index < WAV_HEADER_SIZE) ? 0 : index - WAV_HEADER_SIZE;
                     size_t dataBytes = toSend - sent;
-                    if (dataStart + dataBytes > audioLen)
-                        dataBytes = audioLen - dataStart;
+                    if (dataStart + dataBytes > audioLen) dataBytes = audioLen - dataStart;
                     memcpy(buffer + sent, audioPtr + dataStart, dataBytes);
                     sent += dataBytes;
                 }
-
                 return sent;
             }
         );
@@ -563,24 +562,68 @@ void webServerInit() {
     });
 
     // ─── Scan LAN for Sonos speakers ───
-    // Returns a JSON array of {name, ip} objects.
-    // The scan takes up to ~3 seconds; call from an async context.
+    // SSDP plus a SOAP round-trip takes seconds; running it here would block
+    // the AsyncTCP task (and blow its stack via HTTPClient).  Ask the
+    // controller loop to do it and poll for the result.
     server.on("/api/sonos/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
-        SonosDevice devices[16];
-        int count = sonosDiscover(devices, 16, 3000);
+        if (!requireAuth(req)) return;
 
-        JsonDocument doc;
-        JsonArray arr = doc.to<JsonArray>();
-        for (int i = 0; i < count; i++) {
-            JsonObject obj = arr.add<JsonObject>();
-            obj["name"] = devices[i].name;
-            obj["ip"]   = devices[i].ip;
+        if (g_app.scanState == SCAN_DONE) {
+            JsonDocument doc;
+            JsonArray arr = doc.to<JsonArray>();
+            int n = g_app.scanCount;
+            for (int i = 0; i < n && i < SONOS_SCAN_MAX; i++) {
+                JsonObject obj = arr.add<JsonObject>();
+                obj["name"] = g_app.scanResults[i].name;
+                obj["ip"]   = g_app.scanResults[i].ip;
+            }
+            g_app.scanState = SCAN_IDLE; // consumed
+            sendJson(req, 200, doc);
+            return;
         }
 
-        String out;
-        serializeJson(doc, out);
-        req->send(200, "application/json", out);
+        if (g_app.scanState == SCAN_IDLE) g_app.scanState = SCAN_REQUESTED;
+        req->send(202, "application/json", "[]"); // client retries shortly
     });
+
+    // ═══ OTA firmware update ═══
+    // POST the firmware.bin produced by `pio run` to /api/update.
+    server.on("/api/update", HTTP_POST,
+        [](AsyncWebServerRequest* req) {
+            bool ok = !Update.hasError();
+            AsyncWebServerResponse* res = req->beginResponse(
+                ok ? 200 : 500, "application/json",
+                ok ? "{\"ok\":true,\"rebooting\":true}" : "{\"error\":\"update failed\"}");
+            res->addHeader("Connection", "close");
+            req->send(res);
+            if (ok) g_req.reboot = true;
+        },
+        [](AsyncWebServerRequest* req, const String& filename, size_t index,
+           uint8_t* data, size_t len, bool final) {
+            if (!requireAuth(req)) return;
+            if (index == 0) {
+                activityLogf("OTA: starting update from %s", filename.c_str());
+                if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                    Update.printError(Serial);
+                    activityLog("OTA: begin failed");
+                    return;
+                }
+            }
+            if (Update.write(data, len) != len) {
+                Update.printError(Serial);
+                activityLog("OTA: write failed");
+                return;
+            }
+            if (final) {
+                if (Update.end(true)) {
+                    activityLogf("OTA: complete (%u bytes) — rebooting", (unsigned)(index + len));
+                } else {
+                    Update.printError(Serial);
+                    activityLog("OTA: finalise failed");
+                }
+            }
+        }
+    );
 
     server.begin();
     Serial.println("[Web] Server started on port 80");

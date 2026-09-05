@@ -3,6 +3,7 @@
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
+#include "certs.h"
 
 bool shazamIdentify(const char* rapidApiKey,
                     const uint8_t* audioData, size_t audioLen,
@@ -32,7 +33,8 @@ bool shazamIdentify(const char* rapidApiKey,
 
     // HTTPS POST to Shazam Song Recognition API
     WiFiClientSecure client;
-    client.setInsecure();
+    // This request carries the RapidAPI key — verify the server before sending it.
+    client.setCACert(RAPIDAPI_ROOT_CA);
     HTTPClient http;
     http.begin(client, "https://shazam-song-recognition-api.p.rapidapi.com/recognize/file");
     http.setTimeout(20000);
@@ -44,8 +46,15 @@ bool shazamIdentify(const char* rapidApiKey,
     heap_caps_free(body);
 
     if (code != HTTP_CODE_OK) {
-        String body = http.getString();
-        Serial.printf("[Shazam] HTTP %d: %s\n", code, body.c_str());
+        if (code < 0) {
+            // Negative codes are transport failures.  A TLS handshake failure
+            // here almost certainly means the pinned root in certs.h is stale.
+            Serial.printf("[Shazam] Transport error %d (TLS/connection) — "
+                          "check the pinned CA in certs.h\n", code);
+        } else {
+            String errBody = http.getString();
+            Serial.printf("[Shazam] HTTP %d: %s\n", code, errBody.c_str());
+        }
         http.end();
         return false;
     }
@@ -75,7 +84,7 @@ bool shazamIdentify(const char* rapidApiKey,
         if (section["type"] == "SONG") {
             JsonArray metadata = section["metadata"].as<JsonArray>();
             for (JsonObject meta : metadata) {
-                if (String(meta["title"].as<const char*>()) == "Album") {
+                if (strcmp(meta["title"] | "", "Album") == 0) {
                     result.album = meta["text"].as<String>();
                 }
             }

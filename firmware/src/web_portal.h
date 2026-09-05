@@ -159,6 +159,24 @@ button.danger:active{background:#722}
     </select>
   </label>
 
+  <label style="margin-top:8px">Render profile
+    <select id="fProfile"></select>
+  </label>
+  <p style="font-size:.75rem;color:#888;margin:4px 0 0">
+    Controls sharpening, contrast and how aggressively colour is dithered.
+    <b>Punchy</b> for bold graphic covers, <b>Soft</b> for photographic ones.
+    Takes effect on the next artwork change &mdash; use Force Display Refresh to see it now.
+  </p>
+
+  <h2>Security</h2>
+  <label>Portal password
+    <input type="password" id="fPortalPwd" placeholder="(blank &mdash; no password)">
+  </label>
+  <p style="font-size:.75rem;color:#888;margin:4px 0 0">
+    Sets a password on this portal (username <b>admin</b>). Leave blank to disable.
+    Without one, anyone on your network can change the Wi-Fi settings.
+  </p>
+
   <button onclick="saveSettings()">Save Settings</button>
   <div id="settingsMsg" class="msg"></div>
 </div>
@@ -189,6 +207,20 @@ button.danger:active{background:#722}
   <button class="debug-btn" onclick="testColors()">Test Color Pattern</button>
   <button class="debug-btn" onclick="testDither()">Dither Test Pattern</button>
   <a href="/api/last-audio" download="recording.wav"><button type="button" class="debug-btn">Download Last Audio</button></a>
+  <h2 style="margin-top:24px">Firmware Update</h2>
+  <p style="font-size:.75rem;color:#888;margin-bottom:8px">
+    Upload <code>firmware.bin</code> from <code>.pio/build/esp32-s3-photopainter/</code>.
+    The device reboots automatically when the upload completes. Do not power it off during the update.
+  </p>
+  <input type="file" id="fwFile" accept=".bin" style="width:100%;margin-bottom:8px">
+  <button class="debug-btn" onclick="uploadFirmware()">Upload &amp; Reboot</button>
+  <div id="otaProgress" style="display:none;margin-top:8px">
+    <div style="background:#333;border-radius:4px;overflow:hidden;height:8px">
+      <div id="otaBar" style="background:#4a9;height:100%;width:0%;transition:width .2s"></div>
+    </div>
+    <div id="otaMsg" class="msg"></div>
+  </div>
+
   <p style="color:#666;font-size:.75rem;margin-top:16px">
     <b>Force Display Refresh</b> — re-fetches artwork and redraws the e-ink display.<br>
     <b>Test Color Pattern</b> — shows 6 color bands to verify all e-ink pigments.<br>
@@ -292,6 +324,44 @@ async function testDither() {
   } catch(e) { alert('Failed: '+e.message); }
 }
 
+function uploadFirmware() {
+  const input = document.getElementById('fwFile');
+  const file = input.files && input.files[0];
+  if (!file) { alert('Choose a firmware.bin first'); return; }
+  if (!confirm('Flash ' + file.name + ' (' + Math.round(file.size/1024) + ' KB)? '
+             + 'The device will reboot. Do not power it off.')) return;
+
+  const wrap = document.getElementById('otaProgress');
+  const bar  = document.getElementById('otaBar');
+  const msg  = document.getElementById('otaMsg');
+  wrap.style.display = 'block';
+  msg.textContent = 'Uploading\u2026';
+  bar.style.width = '0%';
+
+  const form = new FormData();
+  form.append('firmware', file, file.name);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/update');
+  xhr.upload.onprogress = function(e) {
+    if (e.lengthComputable) {
+      bar.style.width = Math.round((e.loaded / e.total) * 100) + '%';
+    }
+  };
+  xhr.onload = function() {
+    if (xhr.status === 200) {
+      bar.style.width = '100%';
+      msg.textContent = 'Update complete \u2014 rebooting. This page will work again in ~20s.';
+    } else {
+      msg.textContent = 'Update failed (HTTP ' + xhr.status + '). The old firmware is still installed.';
+    }
+  };
+  xhr.onerror = function() {
+    msg.textContent = 'Upload failed \u2014 connection lost.';
+  };
+  xhr.send(form);
+}
+
 function bindSlider(id, valId, suffix) {
   const sl = document.getElementById(id);
   const vl = document.getElementById(valId);
@@ -309,7 +379,11 @@ async function scanWifi() {
   btn.disabled = true;
   msg.textContent = 'Scanning\u2026';
   try {
-    const r = await fetch('/api/wifi/scan');
+    let r = await fetch('/api/wifi/scan');
+    for (let attempt = 0; attempt < 10 && r.status === 202; attempt++) {
+      await new Promise(res => setTimeout(res, 700));
+      r = await fetch('/api/wifi/scan');
+    }
     const networks = await r.json();
     const prev = sel.value;
     sel.innerHTML = '<option value="">-- select a network --</option>';
@@ -385,6 +459,23 @@ async function loadSettings() {
     document.getElementById('fShowTrackInfo').checked = !!d.show_track_info;
     document.getElementById('fBgMode').value = (d.bg_mode !== undefined) ? d.bg_mode : 2;
     document.getElementById('fBgStyle').value = (d.bg_style !== undefined) ? d.bg_style : 0;
+    try {
+      const pr = await fetch('/api/profiles');
+      const profiles = await pr.json();
+      const psel = document.getElementById('fProfile');
+      psel.innerHTML = '';
+      profiles.forEach(function(p){
+        const o = document.createElement('option');
+        o.value = p.id; o.textContent = p.name;
+        psel.appendChild(o);
+      });
+      psel.value = (d.render_profile !== undefined) ? d.render_profile : 1;
+    } catch(e) {}
+    const pwd = document.getElementById('fPortalPwd');
+    pwd.value = '';
+    pwd.placeholder = d.portal_password_set
+      ? '(set \u2014 leave blank to keep)'
+      : '(blank \u2014 no password)';
   } catch(e) { console.error(e); }
 }
 
@@ -395,8 +486,19 @@ async function scanSonos() {
   btn.disabled = true;
   msg.textContent = 'Scanning\u2026 (~3 seconds)';
   try {
-    const r = await fetch('/api/sonos/scan');
-    const devices = await r.json();
+    // The device runs discovery on its main loop (it's far too slow to do
+    // inside a request), replying 202 until the results are ready.
+    let devices = null;
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const r = await fetch('/api/sonos/scan');
+      if (r.status === 200) { devices = await r.json(); break; }
+      await new Promise(res => setTimeout(res, 700));
+    }
+    if (devices === null) {
+      msg.textContent = 'Scan timed out \u2014 try again.';
+      btn.disabled = false;
+      return;
+    }
     const prev = sel.value;
     sel.innerHTML = '<option value="">-- select a speaker --</option>';
     devices.forEach(d => {
@@ -431,10 +533,13 @@ async function saveSettings() {
     idle_gallery_ms: parseInt(document.getElementById('fIdleGallery').value)*60000,
     show_track_info: document.getElementById('fShowTrackInfo').checked,
     bg_mode: parseInt(document.getElementById('fBgMode').value),
-    bg_style: parseInt(document.getElementById('fBgStyle').value)
+    bg_style: parseInt(document.getElementById('fBgStyle').value),
+    render_profile: parseInt(document.getElementById('fProfile').value || '1')
   };
   const shz = document.getElementById('fShazamKey').value;
   if (shz) body.shazam_api_key = shz;
+  const ppw = document.getElementById('fPortalPwd').value;
+  if (ppw) body.portal_password = ppw;
   const el = document.getElementById('settingsMsg');
   try {
     const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
