@@ -295,6 +295,7 @@ void webServerInit() {
         doc["bg_mode"]              = g_app.settings.bg_mode;
         doc["bg_style"]             = g_app.settings.bg_style;
         doc["render_profile"]       = g_app.settings.render_profile;
+        doc["fill_mode"]            = g_app.settings.fill_mode;
         doc["portal_password_set"]  = strlen(g_app.settings.portal_password) > 0;
         sendJson(req, 200, doc);
     });
@@ -336,6 +337,10 @@ void webServerInit() {
                 g_app.settings.bg_mode = doc["bg_mode"];
             if (doc["bg_style"].is<unsigned int>())
                 g_app.settings.bg_style = doc["bg_style"];
+            if (doc["fill_mode"].is<unsigned int>()) {
+                uint8_t f = doc["fill_mode"];
+                g_app.settings.fill_mode = (f <= FILL_COVER) ? f : FILL_ADAPTIVE;
+            }
             if (doc["render_profile"].is<unsigned int>()) {
                 uint8_t p = doc["render_profile"];
                 g_app.settings.render_profile = (p < PROFILE_COUNT) ? p : PROFILE_NATURAL;

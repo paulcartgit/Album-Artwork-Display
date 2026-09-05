@@ -65,6 +65,7 @@ bool sdReadSettings(Settings& settings) {
     settings.bg_mode = 2;  // auto
     settings.bg_style = 0; // darken
     settings.render_profile = PROFILE_NATURAL;
+    settings.fill_mode = FILL_ADAPTIVE;
 
     File f = SD_MMC.open("/settings.json", FILE_READ);
     if (!f) return false;
@@ -94,6 +95,8 @@ bool sdReadSettings(Settings& settings) {
     }
     settings.bg_style = doc["bg_style"] | 0;
     settings.render_profile = doc["render_profile"] | (uint8_t)PROFILE_NATURAL;
+    settings.fill_mode = doc["fill_mode"] | (uint8_t)FILL_ADAPTIVE;
+    if (settings.fill_mode > FILL_COVER) settings.fill_mode = FILL_ADAPTIVE;
     if (settings.render_profile >= PROFILE_COUNT) settings.render_profile = PROFILE_NATURAL;
     strlcpy(settings.portal_password, doc["portal_password"] | "", sizeof(settings.portal_password));
     return true;
@@ -112,6 +115,7 @@ bool sdWriteSettings(const Settings& settings) {
     doc["bg_mode"] = settings.bg_mode;
     doc["bg_style"] = settings.bg_style;
     doc["render_profile"] = settings.render_profile;
+    doc["fill_mode"] = settings.fill_mode;
     doc["portal_password"] = settings.portal_password;
 
     File f = SD_MMC.open("/settings.json", FILE_WRITE);

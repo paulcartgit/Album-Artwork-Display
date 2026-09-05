@@ -116,6 +116,24 @@ static const RenderProfile RENDER_PROFILES[PROFILE_COUNT] = {
     { "Soft",       0.20f,  1.08f,   0.95f, 3.5f,   16.0f, 0.70f },
 };
 
+// ─── Artwork fill ───
+// The panel is 480x800 but album art is square, so fitting it to the width
+// covers only 60% of the screen. Cover-cropping fills it but discards 40% of
+// the sleeve horizontally, which usually cuts straight through the type.
+enum FillMode {
+    FILL_FIT      = 0,  // square centred, blurred background (original behaviour)
+    FILL_ADAPTIVE = 1,  // enlarge as far as the sleeve's own detail allows
+    FILL_BLEED    = 2,  // never crop; extend the artwork to the edges
+    FILL_COVER    = 3   // always fill completely, cropping whatever it takes
+};
+
+// Enlarging beyond this covers the panel outright (800/480).
+#define FILL_MAX_ZOOM   1.6667f
+// Peak detail allowed along the crop lines, relative to the sleeve overall,
+// before adaptive stops enlarging. Calibrated against real sleeves: type
+// running across a cover scores 27-42, photographic sleeves 2-6.
+#define FILL_CUT_LIMIT  7.0f
+
 inline const RenderProfile& renderProfile(uint8_t id) {
     return RENDER_PROFILES[(id < PROFILE_COUNT) ? id : PROFILE_NATURAL];
 }
@@ -145,6 +163,7 @@ struct Settings {
     uint8_t bg_mode;         // 0 = always solid, 1 = always blur, 2 = auto (default)
     uint8_t bg_style;        // 0 = darken background, 1 = wash out (lighten)
     uint8_t render_profile;  // RenderProfileId — 1 (Natural) by default
+    uint8_t fill_mode;       // FillMode — how artwork fills the portrait panel
     // Web portal access control (empty password = no auth)
     char portal_password[64];
 };

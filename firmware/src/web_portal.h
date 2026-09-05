@@ -381,6 +381,13 @@ details .body{padding:0 16px 14px}
   <div class="card">
     <div class="row"><span class="k">Show artist and album</span>
       <label class="sw"><input type="checkbox" id="fTrackInfo" aria-label="Show artist and album on the display"><span></span></label></div>
+    <div class="row col"><span class="k">Fill the screen</span>
+      <select id="fFill" aria-label="How artwork fills the screen">
+        <option value="1">Adaptive</option>
+        <option value="2">Never crop</option>
+        <option value="3">Always fill</option>
+        <option value="0">Centred square</option>
+      </select></div>
     <div class="row col"><span class="k">Background</span>
       <select id="fBgMode" aria-label="Background">
         <option value="2">Automatic</option><option value="1">Blurred artwork</option>
@@ -389,6 +396,12 @@ details .body{padding:0 16px 14px}
       <select id="fBgStyle" aria-label="Background tone"><option value="0">Darken</option><option value="1">Lighten</option></select></div>
     <div class="row col"><span class="k">Render profile</span><select id="fProfile" aria-label="Render profile"></select></div>
   </div>
+  <p class="hint">Album art is square but the screen is not, so a centred square covers only
+  60&#37; of it. <b>Adaptive</b> enlarges each sleeve as far as it can before the crop would cut
+  through the artwork itself, then blends the remainder out to the edges — photographic sleeves
+  fill the screen completely, sleeves with the artist's name across them are left intact.
+  The background options below apply to the centred-square layout, which is also used whenever
+  the artist and album overlay is switched on.</p>
   <p class="hint">The render profile controls sharpening, contrast and how aggressively colour
   is dithered. <b>Punchy</b> suits bold graphic sleeves, <b>Soft</b> suits photographic ones.
   Changes apply to the next artwork.</p>
@@ -732,6 +745,7 @@ async function loadSettings(force){
     set('tIdle',  Math.round((d.idle_gallery_ms || 300000)/60000), ' min');
 
     $('#fTrackInfo').checked = !!d.show_track_info;
+    $('#fFill').value    = d.fill_mode !== undefined ? d.fill_mode : 1;
     $('#fBgMode').value  = d.bg_mode !== undefined ? d.bg_mode : 2;
     $('#fBgStyle').value = d.bg_style !== undefined ? d.bg_style : 0;
 
@@ -815,6 +829,7 @@ async function saveSettings(){
     no_match_cooldown_ms: +$('#tCool').value * 60000,
     idle_gallery_ms: +$('#tIdle').value * 60000,
     show_track_info: $('#fTrackInfo').checked,
+    fill_mode: +$('#fFill').value,
     bg_mode: +$('#fBgMode').value,
     bg_style: +$('#fBgStyle').value,
     render_profile: +($('#fProfile').value || 1)

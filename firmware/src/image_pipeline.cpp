@@ -496,6 +496,182 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
     Serial.println("[Pipeline] Blurred background fill applied");
 }
 
+// ═══════════════════════════════════════════════════════════
+// Filling the panel with square artwork
+//
+// The panel is 480x800; sleeves are square. Fitting to the width leaves 40% of
+// the screen as background, and cover-cropping to fill it throws away 40% of
+// the sleeve horizontally — which on album art usually means slicing through
+// the artist's name.
+//
+// So the choice is not crop-or-don't, it is *how much*. `zoom` spans the whole
+// range: 1.0 crops nothing and leaves a wide band to extend, FILL_MAX_ZOOM
+// covers the panel outright. Adaptive walks it up and stops before the cut
+// lines start passing through the sleeve's own detail.
+// ═══════════════════════════════════════════════════════════
+
+// Peak detail lying along the two vertical crop lines at a given zoom,
+// relative to the sleeve overall.
+//
+// Averaging down the cut was tried first and is wrong: a band of type is a
+// small fraction of the height, so its contribution washes out and sleeves
+// that cropping visibly ruins score as safe. A high percentile asks the right
+// question — is there ANY row where the cut goes through something strong.
+static float cutSeverity(const uint8_t* rgb, int w, int h, float zoom) {
+    if (zoom <= 1.0f) return 0.0f;
+
+    // Work in source coordinates: the crop keeps a centred fraction 1/zoom.
+    int keep = (int)(w / zoom + 0.5f);
+    int x0 = (w - keep) / 2;
+    int x1 = x0 + keep;
+    if (x0 < 2 || x1 >= w - 2) return 0.0f;
+
+    const int SAMPLES = 160;                 // enough rows to find a type band
+    int step = (h > SAMPLES) ? h / SAMPLES : 1;
+
+    float total = 0.0f; int totalN = 0;
+    static float rowPeak[SAMPLES];
+    int n = 0;
+
+    for (int y = 0; y < h && n < SAMPLES; y += step) {
+        const uint8_t* row = &rgb[(size_t)y * w * 3];
+        float peak = 0.0f;
+        for (int x = 1; x < w; x++) {
+            float l1 = 0.299f*row[(x-1)*3] + 0.587f*row[(x-1)*3+1] + 0.114f*row[(x-1)*3+2];
+            float l0 = 0.299f*row[x*3]     + 0.587f*row[x*3+1]     + 0.114f*row[x*3+2];
+            float g = fabsf(l0 - l1);
+            total += g; totalN++;
+            if (x >= x0 - 2 && x <= x0 + 2) { if (g > peak) peak = g; }
+            if (x >= x1 - 2 && x <= x1 + 2) { if (g > peak) peak = g; }
+        }
+        rowPeak[n++] = peak;
+    }
+    if (n == 0 || totalN == 0) return 0.0f;
+
+    // 96th percentile of the per-row peaks, by partial selection.
+    // The selection below sorts DESCENDING, so the 96th percentile sits near
+    // the FRONT of the array, not at 0.96*n. Indexing at 0.96*n returned a
+    // near-minimum instead — severity came out tiny, every sleeve looked safe
+    // to crop, and the panel duly sliced "THE BEATLES" in half.
+    int idx = (int)((n - 1) * 0.04f);
+    if (idx >= n) idx = n - 1;
+    if (idx < 0)  idx = 0;
+    for (int i = 0; i <= idx; i++) {
+        int best = i;
+        for (int j = i + 1; j < n; j++) if (rowPeak[j] > rowPeak[best]) best = j;
+        float t = rowPeak[i]; rowPeak[i] = rowPeak[best]; rowPeak[best] = t;
+    }
+    float mean = total / totalN;
+    return rowPeak[idx] / fmaxf(mean, 0.001f);
+}
+
+static float adaptiveZoom(const uint8_t* rgb, int w, int h) {
+    static const float STEPS[] = {1.0f, 1.1f, 1.2f, 1.3f, 1.45f, FILL_MAX_ZOOM};
+    float best = 1.0f;
+    for (int i = 0; i < 6; i++) {
+        float sev = cutSeverity(rgb, w, h, STEPS[i]);
+        if (sev < FILL_CUT_LIMIT) best = STEPS[i];
+        else {
+            Serial.printf("[Fill] zoom %.2f severity %.1f — stopping\n", STEPS[i], sev);
+            break;
+        }
+    }
+    return best;
+}
+
+// Horizontal + vertical box blur over a band of rows, in place.
+static void blurBand(uint8_t* canvas, int w, int y0, int y1, int radius) {
+    if (radius < 1 || y1 - y0 < 1) return;
+    int diam = 2 * radius + 1;
+    uint8_t* tmp = (uint8_t*)malloc((size_t)w * 3);
+    if (!tmp) return;
+    for (int y = y0; y < y1; y++) {
+        uint8_t* row = &canvas[(size_t)y * w * 3];
+        int rS = 0, gS = 0, bS = 0;
+        for (int k = -radius; k <= radius; k++) {
+            int xi = constrain(k, 0, w - 1) * 3;
+            rS += row[xi]; gS += row[xi+1]; bS += row[xi+2];
+        }
+        for (int x = 0; x < w; x++) {
+            tmp[x*3] = rS / diam; tmp[x*3+1] = gS / diam; tmp[x*3+2] = bS / diam;
+            int a = constrain(x + radius + 1, 0, w - 1) * 3;
+            int b = constrain(x - radius,     0, w - 1) * 3;
+            rS += row[a] - row[b]; gS += row[a+1] - row[b+1]; bS += row[a+2] - row[b+2];
+        }
+        memcpy(row, tmp, (size_t)w * 3);
+    }
+    free(tmp);
+}
+
+// Fill the strips above and below the artwork so it reaches the panel edges.
+//
+// Mirroring guarantees the colour matches exactly at the join — the reflected
+// row beside the edge IS the edge row. But mirroring alone reflects *content*,
+// and sleeves put type near their edges: the first version produced legible
+// ghost text above the artwork, which reads as a fault rather than a design.
+// So the extension starts already blurred past recognition and is pulled
+// progressively toward a flat continuation of the artwork's edge colour.
+static void extendEdges(uint8_t* canvas, int w, int h, int artY0, int artH) {
+    const int artY1 = artY0 + artH;
+    if (artY0 <= 0 && artY1 >= h) return;
+
+    // Mirror the artwork outward.
+    for (int y = 0; y < artY0; y++) {
+        int src = artY0 + (artY0 - y);
+        if (src >= artY1) src = artY1 - 1;
+        memcpy(&canvas[(size_t)y * w * 3], &canvas[(size_t)src * w * 3], (size_t)w * 3);
+    }
+    for (int y = artY1; y < h; y++) {
+        int src = artY1 - (y - artY1) - 1;
+        if (src < artY0) src = artY0;
+        memcpy(&canvas[(size_t)y * w * 3], &canvas[(size_t)src * w * 3], (size_t)w * 3);
+    }
+
+    // Flat wash: the artwork's own edge colour, per column, softened across.
+    uint8_t* washTop = (uint8_t*)malloc((size_t)w * 3);
+    uint8_t* washBot = (uint8_t*)malloc((size_t)w * 3);
+    if (washTop && washBot) {
+        const int SAMPLE = 24;
+        for (int x = 0; x < w; x++) {
+            int rt=0,gt=0,bt=0,rb=0,gb=0,bb=0,n=0;
+            for (int k = 0; k < SAMPLE; k++) {
+                const uint8_t* t = &canvas[((size_t)(artY0 + k) * w + x) * 3];
+                const uint8_t* b = &canvas[((size_t)(artY1 - 1 - k) * w + x) * 3];
+                rt+=t[0]; gt+=t[1]; bt+=t[2]; rb+=b[0]; gb+=b[1]; bb+=b[2]; n++;
+            }
+            washTop[x*3]=rt/n; washTop[x*3+1]=gt/n; washTop[x*3+2]=bt/n;
+            washBot[x*3]=rb/n; washBot[x*3+1]=gb/n; washBot[x*3+2]=bb/n;
+        }
+    }
+
+    const int BANDS = 6;
+    for (int i = 0; i < BANDS; i++) {
+        float f0 = (float)i / BANDS, f1 = (float)(i + 1) / BANDS;
+        int radius = (int)(10 + 30 * powf(f1, 1.2f));
+        float t = powf(f1, 0.8f);      // pull toward the flat wash with distance
+
+        int ty1 = artY0 - (int)(artY0 * f0), ty0 = artY0 - (int)(artY0 * f1);
+        int by0 = artY1 + (int)((h - artY1) * f0), by1 = artY1 + (int)((h - artY1) * f1);
+        blurBand(canvas, w, max(0, ty0), max(0, ty1), radius);
+        blurBand(canvas, w, min(h, by0), min(h, by1), radius);
+
+        if (washTop && washBot) {
+            for (int y = max(0, ty0); y < max(0, ty1); y++)
+                for (int x = 0; x < w * 3; x++) {
+                    uint8_t* p = &canvas[(size_t)y * w * 3 + x];
+                    *p = (uint8_t)(*p * (1 - t) + washTop[x] * t);
+                }
+            for (int y = min(h, by0); y < min(h, by1); y++)
+                for (int x = 0; x < w * 3; x++) {
+                    uint8_t* p = &canvas[(size_t)y * w * 3 + x];
+                    *p = (uint8_t)(*p * (1 - t) + washBot[x] * t);
+                }
+        }
+    }
+    free(washTop); free(washBot);
+    Serial.printf("[Fill] edges extended (artwork rows %d-%d of %d)\n", artY0, artY1, h);
+}
+
 // ─── Core: decode JPEG buffer → scale → optional text → dither → display ───
 // Does NOT take ownership of jpegBuf — the caller frees it.  Distinguishing
 // "this JPEG is undecodable" from "we ran out of memory" matters: only the
@@ -560,6 +736,43 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         Serial.println("[Pipeline] Scaled buffer alloc failed");
         return PIPE_RESOURCE_FAILED;
     }
+
+    // ── Fill strategy ──
+    // The text-overlay layout needs its bands, so it keeps the original
+    // fit-and-background treatment. Without text we can use the whole panel.
+    uint8_t fillMode = showText ? FILL_FIT : g_app.settings.fill_mode;
+
+    if (fillMode != FILL_FIT) {
+        float zoom = 1.0f;
+        if (fillMode == FILL_COVER)         zoom = FILL_MAX_ZOOM;
+        else if (fillMode == FILL_ADAPTIVE) zoom = adaptiveZoom(g_decodeBuf, imgW, imgH);
+        Serial.printf("[Fill] mode %d, zoom %.2f\n", fillMode, zoom);
+
+        int side = (int)(EPD_WIDTH * zoom + 0.5f);
+        if (side > EPD_HEIGHT) side = EPD_HEIGHT;
+        int artY0 = (EPD_HEIGHT - side) / 2;
+        if (artY0 < 0) artY0 = 0;
+
+        // Sample the sleeve into a `side` x `side` square, cropped to the panel
+        // width and clipped vertically to the panel.
+        float sc = (float)side / imgW;
+        int cropX = (side - EPD_WIDTH) / 2;
+        int yStart = (artY0 < 0) ? -artY0 : 0;
+        for (int y = 0; y < side; y++) {
+            int cy = artY0 + y;
+            if (cy < 0 || cy >= EPD_HEIGHT) continue;
+            int sy = constrain((int)(y / sc), 0, imgH - 1);
+            for (int x = 0; x < EPD_WIDTH; x++) {
+                int sx = constrain((int)((x + cropX) / sc), 0, imgW - 1);
+                const uint8_t* sp = &g_decodeBuf[((size_t)sy * imgW + sx) * 3];
+                uint8_t* dp = &scaledBuf[((size_t)cy * EPD_WIDTH + x) * 3];
+                dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2];
+            }
+        }
+        (void)yStart;
+
+        if (side < EPD_HEIGHT) extendEdges(scaledBuf, EPD_WIDTH, EPD_HEIGHT, artY0, side);
+    } else {
 
     // Compute edge color for background fill (used as fallback)
     uint8_t bgR, bgG, bgB;
@@ -659,6 +872,8 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
             scaledBuf[di + 2] = g_decodeBuf[si + 2];
         }
     }
+    }
+
     heap_caps_free(g_decodeBuf);
     g_decodeBuf = nullptr;
 
