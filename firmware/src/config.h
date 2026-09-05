@@ -81,18 +81,36 @@
 // These RGB values represent what the e-ink pigments LOOK LIKE, not ideal RGB.
 // The dither matches against these values and diffuses error against them, so
 // their accuracy directly determines output quality — see DITHERING.md.
+//
+// Measured from a RAW capture of the calibration card (simulator/
+// calibrate_from_photo.py --corners), anchored on the card's own black and
+// white chips. Two captures in different lighting agreed with each other far
+// more closely than either agreed with the previous hand-tuned values, which
+// understated all three saturated pigments.
+//
+// Adopting the measurement makes the panel BOLDER, not tamer. That is
+// counter-intuitive — a more saturated model should need less ink to hit a
+// target — but measured across a spread of real covers the chromatic share of
+// placed pigment rose on 8 of 10 (mean 32.9% -> 34.6%, Fitz and The Tantrums
+// 43.1% -> 51.3%). Re-measure with simulator/palette_ab.py before assuming
+// otherwise.
+//
+// Caveat worth keeping: both captures came from the same camera, so a
+// consistent colour bias in it cannot be ruled out from photographs alone. If
+// the panel ever looks over-saturated, this is the first thing to re-test —
+// ideally with a second camera.
 struct PaletteColor {
     uint8_t r, g, b;
     uint8_t index;
 };
 
 static const PaletteColor PALETTE[EPD_COLORS] = {
-    {0x10, 0x10, 0x12, 0}, // Black  (near-black charcoal)
-    {0xD8, 0xDA, 0xD4, 1}, // White  (light grey, slight cool tint)
-    {0x30, 0x66, 0x58, 2}, // Green  (dark teal-green)
-    {0x38, 0x68, 0xC0, 3}, // Blue   (medium-bright, saturated)
-    {0x9C, 0x30, 0x2C, 4}, // Red    (dark brick-crimson)
-    {0xC8, 0xB8, 0x30, 5}, // Yellow (warm golden)
+    {0x0D, 0x0A, 0x10, 0}, // Black  (near-black charcoal)
+    {0xE0, 0xE0, 0xD9, 1}, // White  (light grey, slight warm tint)
+    {0x1F, 0x6C, 0x45, 2}, // Green  (deep leaf-green)
+    {0x00, 0x5D, 0xAB, 3}, // Blue   (strong mid-blue)
+    {0xBD, 0x0F, 0x05, 4}, // Red    (vivid scarlet)
+    {0xFF, 0xDA, 0x1B, 5}, // Yellow (bright golden)
 };
 
 // ─── Render profiles ───
