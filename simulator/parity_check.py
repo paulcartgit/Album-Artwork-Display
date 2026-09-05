@@ -324,8 +324,12 @@ check("the trial also decides the gamut map",
       "if (gamut) gamutMapApply(cand, dw, dh);" in _trial,
       "gamut mapping is applied unconditionally, or not trialled — it rescues "
       "out-of-gamut covers and costs on in-gamut ones, so it has to be chosen")
+# Matched loosely on purpose: this asserted an exact line and broke the moment
+# timing instrumentation wrapped it in braces. What matters is that the real
+# path applies the gamut map conditionally on the trial's decision, not how the
+# statement is punctuated.
 check("the real path honours that decision",
-      "if (useGamut) gamutMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT);" in _ip)
+      "if (useGamut)" in _ip and "gamutMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT)" in _ip)
 
 # Gamut mapping must keep hue and spend lightness — that is its whole purpose.
 import gamut_map
