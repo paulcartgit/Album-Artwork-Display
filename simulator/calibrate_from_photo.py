@@ -149,8 +149,14 @@ def locate_panel(img, debug=False):
         return inter / max(1, min(a["x1"] - a["x0"], b["x1"] - b["x0"]))
 
     def similar_width(a, b):
+        # Asymmetric on purpose. A band can come out NARROWER than its
+        # neighbours when part of it dips below the saturation threshold —
+        # measured on a RAW frame, one band read 429px against 633px for the
+        # others, and a symmetric 0.7 bound dropped it, leaving too few blobs
+        # to group. A band never comes out wider, so the upper bound stays
+        # tight and still rejects a picture frame spanning the whole image.
         wa = a["x1"] - a["x0"]; wb = b["x1"] - b["x0"]
-        return 0.7 <= (wa / max(1, wb)) <= 1.4
+        return 0.5 <= (wa / max(1, wb)) <= 1.35
 
     row_pitch = CAL["row_h"] + CAL["row_gap"]
     first_sat_row = 2                      # green is the first saturated row
@@ -171,11 +177,31 @@ def locate_panel(img, debug=False):
         if len(group) < 3:
             continue
 
+        group.sort(key=lambda b: b["y0"])
         gx0 = min(b["x0"] for b in group); gx1 = max(b["x1"] for b in group)
         gy0 = min(b["y0"] for b in group); gy1 = max(b["y1"] for b in group)
 
+        # Work out which rows these blobs are BEFORE judging the aspect. Not
+        # every band is always detected — a dim one can fall below the
+        # saturation threshold — and assuming the group always spans rows 2..5
+        # made the implied panel too short, so a correct match was rejected on
+        # aspect. This has to agree with the span used for the homography
+        # below; when it did not, valid photos were silently refused.
+        heights = [b["y1"] - b["y0"] for b in group]
+        unit = min(heights)
+        spans = [max(1, int(round(hh / unit))) for hh in heights]
+        rowi = first_sat_row
+        for sp in spans[:-1]:
+            rowi += sp
+        bottom = rowi + spans[-1] - 1
+        if bottom > last_sat_row:
+            continue
+
+        gfy0 = (CAL["margin_y"] + first_sat_row * row_pitch) / EPD_HEIGHT
+        gfy1 = (CAL["margin_y"] + bottom * row_pitch + CAL["row_h"]) / EPD_HEIGHT
+
         panel_w = (gx1 - gx0) / (fx1 - fx0)
-        panel_h = (gy1 - gy0) / (fy1 - fy0)
+        panel_h = (gy1 - gy0) / (gfy1 - gfy0)
         if panel_w <= 0 or panel_h <= 0:
             continue
         aspect = panel_w / panel_h
@@ -186,16 +212,15 @@ def locate_panel(img, debug=False):
             continue
 
         total = sum(b["area"] for b in group)
-        candidates.append((total, group, gx0, gy0, panel_w, panel_h, aspect))
+        candidates.append((total, group, gx0, gy0, panel_w, panel_h, aspect, bottom))
 
     if not candidates:
         if debug:
             print("  locate_panel: no blob group matched the card's geometry")
         return None
 
-    total, group, gx0, gy0, panel_w, panel_h, aspect = max(candidates,
-                                                           key=lambda c: c[0])
-    group.sort(key=lambda b: b["y0"])
+    total, group, gx0, gy0, panel_w, panel_h, aspect, bottom_row = max(
+        candidates, key=lambda c: c[0])
 
     # Corner points of the topmost and bottommost saturated bands. Using the
     # extremes of the actual mask (not the bounding box) means a tilted or
@@ -332,24 +357,34 @@ def sample_row(img, index):
 
     Black is the mean of the two black halves (top-left and bottom-right) and
     white the mean of the two white halves (bottom-left and top-right). Both
-    means land on the pigment's own centroid in x and y, so a smooth
-    illumination gradient or lens vignetting affects references and pigment
-    identically and drops out of the correction.
+    means land on the pigment's own centroid in x and y, so a LINEAR
+    illumination gradient affects references and pigment identically and drops
+    out of the correction.
+
+    That only holds while the gradient is linear. A lamp off to one side casts
+    a shadow across one edge, and then the two-sided mean sits below the level
+    the centre is actually lit at — which reads as the pigment reflecting more
+    light than white, and looks exactly like a camera boosting saturation. So
+    the per-side white levels come back too, for the caller to compare.
     """
     refs_n, pigment_n = row_regions_normalised(index)
 
     blacks, whites, boxes = [], [], []
+    side = {"left": [], "right": []}
     for idx, fbox in refs_n:
         v, px = sample_box(img, fbox)
         boxes.append(px)
         (blacks if idx == 0 else whites).append(v)
+        if idx == 1:
+            side["left" if fbox[0] < 0.5 else "right"].append(v)
 
     pigment, pig_box = sample_box(img, pigment_n)
     boxes.append(pig_box)
 
     black = np.mean(blacks, axis=0)
     white = np.mean(whites, axis=0)
-    return (black, pigment, white), boxes
+    sides = (float(np.mean(side["left"])), float(np.mean(side["right"])))
+    return (black, pigment, white, sides), boxes
 
 
 def anchor_row(pigment, photo_black, photo_white):
@@ -440,9 +475,10 @@ def main():
         print(f"  rectified to {img.size[0]}x{img.size[1]} "
               f"(perspective corrected)")
 
-    raw, values, all_boxes, refs = [], [], [], []
+    raw, values, all_boxes, refs, side_levels = [], [], [], [], []
     for i in range(len(PALETTE_RGB)):
-        (black, pigment, white), boxes = sample_row(img, i)
+        (black, pigment, white, sides), boxes = sample_row(img, i)
+        side_levels.append(sides)
         raw.append(pigment)
         refs.append((black, white))
         all_boxes.append(boxes)
@@ -537,17 +573,42 @@ def main():
         if over:
             impossible.append((name, "".join(over), int(max(excess))))
 
+    # Left-vs-right white imbalance. The whole per-row correction assumes the
+    # flanking chips bracket the centre; a side-lit panel breaks that, and it
+    # is invisible to the row-to-row "white uniformity" figure above because it
+    # runs ACROSS the card, not down it.
+    imbalance = max(abs(l - r) / max(l, r, 1.0) for l, r in side_levels)
+    side_lit = imbalance > 0.15
+
     problems = []
     if impossible:
         detail = ", ".join(f"{n} ({ch} by {e})" for n, ch, e in impossible)
+        if side_lit:
+            problems.append(
+                f"Physically impossible readings: {detail}. The likely cause is "
+                f"the lighting, not the camera: the white chips differ by "
+                f"{imbalance * 100:.0f}% between the left and right of the card, "
+                f"so one edge is in shadow. The correction assumes the two "
+                f"flanking chips bracket the level the centre is lit at, and "
+                f"when one is shadowed their mean sits too low — every pigment "
+                f"then reads too bright. Re-shoot with the light square on "
+                f"(diffuse light, or an overcast window in front of the panel, "
+                f"not a lamp off to one side).")
+        else:
+            problems.append(
+                f"Physically impossible readings: {detail}. The lighting is even "
+                f"({imbalance * 100:.0f}% left-right), so this is the camera "
+                f"enhancing saturation or contrast. The black and white "
+                f"references are neutral, so this correction CANNOT detect or "
+                f"undo it — the chromatic values below are biased and should not "
+                f"be used. Shoot RAW (phone ProRAW or a manual camera app) to "
+                f"get a frame without that processing.")
+    elif side_lit:
         problems.append(
-            f"Physically impossible readings: {detail}. No pigment can reflect "
-            f"more light than the white pigment in any channel, so the camera is "
-            f"enhancing saturation or contrast. The black and white references "
-            f"are neutral, so this correction CANNOT detect or undo it — the "
-            f"chromatic values below are biased and should not be used. "
-            f"Shoot RAW (phone ProRAW or a manual camera app) to get a frame "
-            f"without that processing.")
+            f"The white chips differ by {imbalance * 100:.0f}% between the left "
+            f"and right of the card, so the panel is lit from one side. The "
+            f"readings survived the plausibility check, but light the panel more "
+            f"evenly before trusting them to a few levels.")
 
     if min_span < 90:
         problems.append(
