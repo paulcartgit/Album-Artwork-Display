@@ -26,7 +26,14 @@
 // ═══════════════════════════════════════════════════════════
 
 #define TONEMAP_SCALES      3
-#define TONEMAP_TRIAL_DIV   2       // trial at half resolution in each axis
+// Trial at a quarter in each axis: sixteen times less work than full
+// resolution, and measured no less accurate than a half. On real covers both
+// agree with a full-resolution decision on 7 of 9, and they disagree on
+// DIFFERENT covers, so neither is systematically better. It matters because
+// six trial renders at a half were costing 29 seconds on the device — nearly
+// as much as the panel refresh itself, and most of the minute Paul was
+// waiting for artwork to appear after a track change.
+#define TONEMAP_TRIAL_DIV   4
 #define TONEMAP_HUE_WEIGHT  0.15f   // dE is in Lab units, hue in degrees
 
 static constexpr float TONEMAP_SCALE[TONEMAP_SCALES] = { 1.00f, 0.90f, 0.80f };

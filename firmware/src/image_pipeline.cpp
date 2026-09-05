@@ -963,16 +963,27 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
     bool useGamut = false;
     esp_task_wdt_reset();
-    toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
-                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
-                                      profile, &useGamut));
+    const unsigned long tTrial = millis();
+    const float chosenScale = chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
+                                                   profile, &useGamut);
+    activityLogf("Trial renders %.1fs — chose x%.2f, gamut %s",
+                 (millis() - tTrial) / 1000.0f, chosenScale, useGamut ? "on" : "off");
+    const unsigned long tTone = millis();
+    toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT, chosenScale);
+    activityLogf("Tone map %.1fs", (millis() - tTone) / 1000.0f);
     // After the tone map, so the gamut is judged at the lightness the image
     // will actually be shown at, and before enhancement, so contrast and
     // gamma act on colours the panel can hold.
     esp_task_wdt_reset();
-    if (useGamut) gamutMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+    if (useGamut) {
+        const unsigned long tG = millis();
+        gamutMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+        activityLogf("Gamut map %.1fs", (millis() - tG) / 1000.0f);
+    }
     esp_task_wdt_reset();
+    const unsigned long tEnh = millis();
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
+    activityLogf("Sharpen and contrast %.1fs", (millis() - tEnh) / 1000.0f);
     esp_task_wdt_reset();
 
     if (!g_canvasProbe)
@@ -993,7 +1004,10 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         return PIPE_RESOURCE_FAILED;
     }
 
+    const unsigned long tDither = millis();
     ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT, profile);
+    activityLogf("Dither %.1fs", (millis() - tDither) / 1000.0f);
+    esp_task_wdt_reset();
 
     // Render text directly onto packed buffer (after dithering for crisp text)
     if (showText) {
@@ -1007,7 +1021,11 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     heap_caps_free(scaledBuf);
 
     // 5. Push to display
-    displayShowImage(packedBuf);
+    {
+        const unsigned long tPanel = millis();
+        displayShowImage(packedBuf);
+        activityLogf("Panel refresh %.1fs", (millis() - tPanel) / 1000.0f);
+    }
     heap_caps_free(packedBuf);
 
     return PIPE_OK;
@@ -1049,7 +1067,11 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
     ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT, profile);
     heap_caps_free(scaledBuf);
 
-    displayShowImage(packedBuf);
+    {
+        const unsigned long tPanel = millis();
+        displayShowImage(packedBuf);
+        activityLogf("Panel refresh %.1fs", (millis() - tPanel) / 1000.0f);
+    }
     heap_caps_free(packedBuf);
 
     Serial.println("[Pipeline] Placeholder displayed");
@@ -1359,8 +1381,11 @@ bool pipelineProcessFile(const char* path) {
         if (cached) {
             if (sdRenderCacheLoad(path, renderSignature(), cached)) {
                 Serial.printf("[Pipeline] Cache hit for %s\n", path);
+                activityLog("Cached render reused — straight to the panel");
                 esp_task_wdt_reset();
+                const unsigned long tPanel = millis();
                 displayShowImage(cached);
+                activityLogf("Panel refresh %.1fs", (millis() - tPanel) / 1000.0f);
                 heap_caps_free(cached);
                 sdSetLastShown(path);
                 return true;
@@ -1434,7 +1459,11 @@ void pipelineShowTestPattern() {
         Serial.printf("[Test] Band %d: %s (index %d, y %d-%d)\n", c, COLOR_NAMES[c], c, yStart, yEnd - 1);
     }
 
-    displayShowImage(packedBuf);
+    {
+        const unsigned long tPanel = millis();
+        displayShowImage(packedBuf);
+        activityLogf("Panel refresh %.1fs", (millis() - tPanel) / 1000.0f);
+    }
     heap_caps_free(packedBuf);
     Serial.println("[Test] Color test pattern displayed");
 }

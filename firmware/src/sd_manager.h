@@ -67,3 +67,5 @@ bool sdHistorySetRelease(const char* artist, const char* album, const char* summ
 // rather than searching again every time the record comes round.
 bool sdHistoryGetCoverChoice(const char* artist, const char* album, String& url);
 bool sdHistorySetCoverChoice(const char* artist, const char* album, const char* url);
+
+
