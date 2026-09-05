@@ -59,12 +59,14 @@ from firmware_config import CONFIG_H, PALETTE_RGB, PALETTE_NAMES, EPD_WIDTH, EPD
 
 # Must match the CAL_* constants in firmware/src/image_pipeline.h
 CAL = dict(rows=6, margin_x=10, margin_y=20, row_h=120, row_gap=8,
-           chip_w=70, chip_gap=10, patch_w=300, keyline=2, quarters=4)
+           chip_w=70, chip_gap=10, patch_w=300, keyline=2, halves=2)
 
-# K / W / W / K down each reference column — must match QUARTER_IDX in
-# image_pipeline.cpp. The ordering is what puts both reference means on the
-# pigment's centroid; changing it silently degrades the correction.
-QUARTER_IDX = (0, 1, 1, 0)
+# Left column runs black over white; the right column mirrors it, white over
+# black. Must match pipelineShowCalibrationCard(). The mirroring is what puts
+# both reference means on the pigment's centroid; changing it silently degrades
+# the correction.
+LEFT_HALVES = (0, 1)
+RIGHT_HALVES = (1, 0)
 
 # Fraction of each region to average over (centre crop), so a slightly off
 # crop or a non-square photo doesn't pull in the keyline or the white field.
@@ -79,7 +81,7 @@ def verify_geometry_matches_firmware():
         "CAL_MARGIN_Y": CAL["margin_y"], "CAL_ROW_H": CAL["row_h"],
         "CAL_ROW_GAP": CAL["row_gap"], "CAL_CHIP_W": CAL["chip_w"],
         "CAL_CHIP_GAP": CAL["chip_gap"], "CAL_PATCH_W": CAL["patch_w"],
-        "CAL_CHIP_QUARTERS": CAL["quarters"],
+        "CAL_CHIP_HALVES": CAL["halves"],
     }
     for name, value in expected.items():
         m = re.search(rf"#define\s+{name}\s+(\d+)", header)
@@ -89,26 +91,141 @@ def verify_geometry_matches_firmware():
                      f"Update CAL in {Path(__file__).name}.")
 
 
+
+# ═══════════════════════════════════════════════════════════
+# Locating the panel in a photograph
+# ═══════════════════════════════════════════════════════════
+
+def _saturation_mask(arr):
+    mx = arr.max(axis=2).astype(np.float64)
+    mn = arr.min(axis=2).astype(np.float64)
+    sat = np.divide(mx - mn, np.maximum(mx, 1e-6))
+    return (sat > 0.28) & (mx > 45)
+
+
+def locate_panel(img, debug=False):
+    """
+    Find the panel in a wider photo, using the card's own geometry.
+
+    Rows 2-5 (green, blue, red, yellow) are the only strongly saturated things
+    on the card, they share an x-range, and they are evenly spaced. Looking for
+    exactly that signature is what stops it locking onto something else
+    colourful in the room — which, photographing a frame on a desk, there
+    invariably is.
+
+    Returns a crop box in pixels, or None if it can't find a confident match.
+    """
+    from scipy import ndimage
+
+    arr = np.asarray(img.convert("RGB"))
+    h, w = arr.shape[:2]
+    mask = _saturation_mask(arr)
+
+    labels, n = ndimage.label(mask)
+    if n == 0:
+        return None
+
+    min_area = (w * h) * 0.0008
+    blobs = []
+    for sl, idx in zip(ndimage.find_objects(labels), range(1, n + 1)):
+        ys, xs = sl
+        area = int((labels[sl] == idx).sum())
+        if area < min_area:
+            continue
+        blobs.append(dict(x0=xs.start, x1=xs.stop, y0=ys.start, y1=ys.stop, area=area))
+    if len(blobs) < 3:
+        return None
+
+    # Group blobs that share an x-range AND a similar width. The x-overlap
+    # test alone is not enough: a picture frame around the panel is often
+    # saturated too, and it fully contains the bands in x, so it happily joins
+    # the group and blows the estimate up. Requiring a comparable width rejects
+    # it, because the bands are a known fraction of the panel and the frame is
+    # much wider.
+    def x_overlap(a, b):
+        lo = max(a["x0"], b["x0"]); hi = min(a["x1"], b["x1"])
+        inter = max(0, hi - lo)
+        return inter / max(1, min(a["x1"] - a["x0"], b["x1"] - b["x0"]))
+
+    def similar_width(a, b):
+        wa = a["x1"] - a["x0"]; wb = b["x1"] - b["x0"]
+        return 0.7 <= (wa / max(1, wb)) <= 1.4
+
+    row_pitch = CAL["row_h"] + CAL["row_gap"]
+    first_sat_row = 2                      # green is the first saturated row
+    last_sat_row = len(PALETTE_RGB) - 1    # yellow is the last
+
+    fx0 = (CAL["margin_x"] + CAL["chip_w"] + CAL["chip_gap"]) / EPD_WIDTH
+    fx1 = fx0 + CAL["patch_w"] / EPD_WIDTH
+    fy0 = (CAL["margin_y"] + first_sat_row * row_pitch) / EPD_HEIGHT
+    fy1 = (CAL["margin_y"] + last_sat_row * row_pitch + CAL["row_h"]) / EPD_HEIGHT
+    expected_aspect = EPD_WIDTH / EPD_HEIGHT
+
+    candidates = []
+    for seed in blobs:
+        group = [b for b in blobs
+                 if x_overlap(seed, b) > 0.75 and similar_width(seed, b)]
+        # Adjacent bands sometimes merge (red into yellow), so accept 3 as well
+        # as the nominal 4.
+        if len(group) < 3:
+            continue
+
+        gx0 = min(b["x0"] for b in group); gx1 = max(b["x1"] for b in group)
+        gy0 = min(b["y0"] for b in group); gy1 = max(b["y1"] for b in group)
+
+        panel_w = (gx1 - gx0) / (fx1 - fx0)
+        panel_h = (gy1 - gy0) / (fy1 - fy0)
+        if panel_w <= 0 or panel_h <= 0:
+            continue
+        aspect = panel_w / panel_h
+
+        # The panel is 480x800. Selecting on aspect rather than raw area is what
+        # makes this robust: a wrong grouping almost always gets the shape wrong.
+        if not (0.75 * expected_aspect < aspect < 1.35 * expected_aspect):
+            continue
+
+        total = sum(b["area"] for b in group)
+        candidates.append((total, group, gx0, gy0, panel_w, panel_h, aspect))
+
+    if not candidates:
+        if debug:
+            print("  locate_panel: no blob group matched the card's geometry")
+        return None
+
+    total, group, x0, y0, panel_w, panel_h, aspect = max(candidates, key=lambda c: c[0])
+    panel_x = x0 - fx0 * panel_w
+    panel_y = y0 - fy0 * panel_h
+
+    if debug:
+        print(f"  locate_panel: {len(group)} saturated bands, "
+              f"panel = ({panel_x:.0f},{panel_y:.0f}) {panel_w:.0f}x{panel_h:.0f}, "
+              f"aspect {aspect:.2f}")
+
+    return (int(round(panel_x)), int(round(panel_y)),
+            int(round(panel_x + panel_w)), int(round(panel_y + panel_h)))
+
+
 def row_regions_normalised(index):
     """
-    Boxes for one row, as panel fractions. Reference columns are quartered
-    K/W/W/K on each side; the pigment spans the full row height between them.
+    Boxes for one row, as panel fractions. The left reference column is black
+    over white and the right mirrors it; the pigment spans the full row height
+    between them.
     Returns (reference boxes with their true index, pigment box).
     """
     x_left  = CAL["margin_x"]
     x_patch = x_left + CAL["chip_w"] + CAL["chip_gap"]
     x_right = x_patch + CAL["patch_w"] + CAL["chip_gap"]
     y0 = CAL["margin_y"] + index * (CAL["row_h"] + CAL["row_gap"])
-    quarter = CAL["row_h"] // CAL["quarters"]
+    half = CAL["row_h"] // CAL["halves"]
 
     def box(x0, w, yy0, hh):
         return (x0 / EPD_WIDTH, yy0 / EPD_HEIGHT,
                 (x0 + w) / EPD_WIDTH, (yy0 + hh) / EPD_HEIGHT)
 
     refs = []
-    for x in (x_left, x_right):
-        for q, idx in enumerate(QUARTER_IDX):
-            refs.append((idx, box(x, CAL["chip_w"], y0 + q * quarter, quarter)))
+    for x, order in ((x_left, LEFT_HALVES), (x_right, RIGHT_HALVES)):
+        for q, idx in enumerate(order):
+            refs.append((idx, box(x, CAL["chip_w"], y0 + q * half, half)))
 
     pigment = box(x_patch, CAL["patch_w"], y0, CAL["row_h"])
     return refs, pigment
@@ -131,10 +248,11 @@ def sample_row(img, index):
     """
     Returns ((black, pigment, white), boxes).
 
-    Black is the mean of the four black quarters and white the mean of the four
-    white quarters. Both means land on the pigment's own centroid in x and y, so
-    a smooth illumination gradient or lens vignetting affects references and
-    pigment identically and drops out of the correction.
+    Black is the mean of the two black halves (top-left and bottom-right) and
+    white the mean of the two white halves (bottom-left and top-right). Both
+    means land on the pigment's own centroid in x and y, so a smooth
+    illumination gradient or lens vignetting affects references and pigment
+    identically and drops out of the correction.
     """
     refs_n, pigment_n = row_regions_normalised(index)
 
@@ -206,6 +324,9 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="Report the difference from the current palette, don't emit new values")
     ap.add_argument("--preview", help="Write an image showing where it sampled")
+    ap.add_argument("--crop", help="Manual crop as x0,y0,x1,y1 (skips auto-detection)")
+    ap.add_argument("--no-auto-crop", action="store_true",
+                    help="Assume the photo is already cropped to the panel")
     ap.add_argument("--anchor", choices=["row", "none"], default="row",
                     help="row (default): correct each pigment against its own "
                          "black/white chips. none: report raw photographed values")
@@ -215,6 +336,22 @@ def main():
 
     img = Image.open(args.photo).convert("RGB")
     print(f"Photo: {img.size[0]}x{img.size[1]}")
+    full = img
+
+    if args.crop:
+        box = tuple(int(v) for v in args.crop.split(","))
+        img = img.crop(box)
+        print(f"  cropped to {box} -> {img.size[0]}x{img.size[1]}")
+    elif not args.no_auto_crop:
+        box = locate_panel(img, debug=True)
+        if box is None:
+            sys.exit("Could not locate the calibration card in this photo.\n"
+                     "Check the card is actually on screen (Debug -> Palette "
+                     "Calibration Card), that the whole panel is visible, and "
+                     "that it is roughly square-on.\n"
+                     "You can also pass --crop x0,y0,x1,y1 manually.")
+        img = img.crop(box)
+        print(f"  auto-cropped to {box} -> {img.size[0]}x{img.size[1]}")
 
     raw, values, all_boxes, refs = [], [], [], []
     for i in range(len(PALETTE_RGB)):
@@ -264,14 +401,45 @@ def main():
               f"{kl:3d}/{wl:3d}           #{r1:02X}{g1:02X}{b1:02X}      "
               f"#{cr:02X}{cg:02X}{cb:02X}    {delta:3d}{flag}")
 
-    # Illumination uniformity: how much the white references vary down the card.
+    # ── Shot quality ──
+    # These two numbers decide whether the result is worth acting on, so print
+    # them before the palette rather than after.
+    black_levels = [float(np.mean(k)) for k, _ in refs]
     white_levels = [float(np.mean(w)) for _, w in refs]
+    spans = [w - k for k, w in zip(black_levels, white_levels)]
+    min_span = min(spans)
     spread = max(white_levels) - min(white_levels)
-    print(f"\n  Illumination across the card: white refs {min(white_levels):.0f}"
-          f"-{max(white_levels):.0f} (spread {spread:.0f})")
+    black_lift = max(black_levels) - min(black_levels)
+
+    print(f"\n  Shot quality")
+    print(f"    black->white span : {min_span:.0f}-{max(spans):.0f} levels")
+    print(f"    white uniformity  : {min(white_levels):.0f}-{max(white_levels):.0f} "
+          f"(spread {spread:.0f})")
+    print(f"    black uniformity  : {min(black_levels):.0f}-{max(black_levels):.0f} "
+          f"(lift {black_lift:.0f})")
+
+    problems = []
+    if min_span < 90:
+        problems.append(
+            f"Low contrast (span {min_span:.0f}). The correction has to scale by "
+            f"{(216 - 16) / max(min_span, 1):.1f}x, which amplifies noise by the "
+            f"same factor. Get more light on the panel, or move it closer so the "
+            f"camera exposes for it rather than the background.")
+    if black_lift > 20:
+        problems.append(
+            f"The blacks lift by {black_lift:.0f} across the card while the whites "
+            f"barely move. That is veiling glare — light bouncing off the glass — "
+            f"not a lighting gradient. Angle the panel away from any bright window "
+            f"or lamp until the black patches look genuinely black.")
     if spread > 25:
-        print("  That is a large gradient. Per-row anchoring corrects for it, but "
-              "more even lighting will give a better result.")
+        problems.append(
+            f"Uneven lighting (white spread {spread:.0f}). Per-row anchoring "
+            f"corrects for this, but evener light gives a better result.")
+
+    for p_ in problems:
+        print(f"\n  ! {p_}")
+    if not problems:
+        print("    -> good shot; these numbers are worth acting on")
 
     for w in sanity_check(values):
         print(f"\n  WARNING: {w}")

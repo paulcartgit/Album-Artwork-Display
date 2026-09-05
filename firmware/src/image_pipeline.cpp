@@ -1142,21 +1142,17 @@ void pipelineShowCalibrationCard() {
     const int xLeft  = CAL_MARGIN_X;
     const int xPatch = xLeft + CAL_CHIP_W + CAL_CHIP_GAP;
     const int xRight = xPatch + CAL_PATCH_W + CAL_CHIP_GAP;
-    const int quarter = CAL_ROW_H / CAL_CHIP_QUARTERS;
-
-    // K / W / W / K down each column, so the two black quarters and the two
-    // white quarters each average to the row's vertical centre — the pigment's
-    // own centroid. See the comment in image_pipeline.h.
-    static const uint8_t QUARTER_IDX[CAL_CHIP_QUARTERS] = { 0, 1, 1, 0 };
+    const int half = CAL_ROW_H / CAL_CHIP_HALVES;
 
     for (int c = 0; c < EPD_COLORS; c++) {
         int y0 = CAL_MARGIN_Y + c * (CAL_ROW_H + CAL_ROW_GAP);
 
-        for (int q = 0; q < CAL_CHIP_QUARTERS; q++) {
-            int qy = y0 + q * quarter;
-            fillRect(xLeft,  qy, CAL_CHIP_W, quarter, QUARTER_IDX[q]);
-            fillRect(xRight, qy, CAL_CHIP_W, quarter, QUARTER_IDX[q]);
-        }
+        // Mirrored: black over white on the left, white over black on the
+        // right, so each reference averages to the pigment's own centroid.
+        fillRect(xLeft,  y0,        CAL_CHIP_W, half, 0);
+        fillRect(xLeft,  y0 + half, CAL_CHIP_W, half, 1);
+        fillRect(xRight, y0,        CAL_CHIP_W, half, 1);
+        fillRect(xRight, y0 + half, CAL_CHIP_W, half, 0);
 
         fillRect(xPatch, y0, CAL_PATCH_W, CAL_ROW_H, (uint8_t)c);
     }

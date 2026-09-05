@@ -7,6 +7,12 @@
 //   swiftc -O snap.swift -o snap
 //   ./snap out.jpg [warmupSeconds]
 //
+// Note: exposure and white-balance cannot be driven manually here.
+// AVCaptureDevice's exposureTargetBias and related controls are iOS-only; on
+// macOS the built-in camera exposes automatically and that is that. If the
+// panel comes out underexposed, the fix is physical — fill more of the frame
+// with it, and keep bright windows out of shot.
+//
 // The warm-up matters: laptop webcams need a second or two of frames before
 // auto-exposure and auto-white-balance settle, and a photo taken before then
 // is useless as a colour reference.
@@ -64,6 +70,7 @@ guard session.canAddOutput(output) else { fail("cannot add camera output") }
 session.addOutput(output)
 
 session.startRunning()
+
 Thread.sleep(forTimeInterval: warmup)   // let AE/AWB settle
 
 grabber.lock.lock()

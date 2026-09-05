@@ -228,6 +228,10 @@ void webServerInit() {
         doc["art_url"]    = g_app.lastArtUrl;
         doc["ip"]         = WiFi.localIP().toString();
         doc["uptime"]     = millis() / 1000;
+        if (g_app.displayHoldUntil != 0) {
+            long remaining = (long)(g_app.displayHoldUntil - millis());
+            doc["display_hold_sec"] = (remaining > 0) ? remaining / 1000 : 0;
+        }
 
         // Timing: next Sonos poll
         unsigned long now = millis();

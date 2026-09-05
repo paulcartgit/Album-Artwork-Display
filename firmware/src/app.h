@@ -34,6 +34,11 @@ struct AppContext {
     // Sonos poll timing
     unsigned long lastPollTime;
 
+    // While set, the state machine leaves the panel alone.  Test and
+    // calibration patterns are useless if the idle gallery paints over them a
+    // second later — which is exactly what used to happen.
+    unsigned long displayHoldUntil;
+
     // Vinyl identification back-off
     unsigned long lastNoMatchTime;
     unsigned long lastVinylMatchTime;

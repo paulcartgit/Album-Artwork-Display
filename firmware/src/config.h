@@ -66,6 +66,7 @@
 #define VINYL_RETRY_DELAY_MS        15000       // 15s between no-match retries
 #define VINYL_MAX_RETRIES           3           // retries before entering cooldown (first cycle)
 #define IDLE_GALLERY_INTERVAL_MS    300000      // 5 min — rotate gallery images when idle
+#define DISPLAY_HOLD_MS             1800000     // 30 min — keep a test/calibration pattern on screen
 
 // ─── 6-Color Palette (calibrated to GDEP073E01 actual pigment appearance) ───
 // These RGB values represent what the e-ink pigments LOOK LIKE, not ideal RGB.

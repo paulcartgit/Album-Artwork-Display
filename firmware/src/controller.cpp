@@ -62,6 +62,14 @@ static void showFallbackImage();
 static void resetVinylBackoff();
 static void serviceRequests();
 
+// Keep whatever is on the panel there, so a test or calibration pattern
+// survives long enough to be photographed.  Released by a forced refresh.
+static void holdDisplay() {
+    g_app.displayHoldUntil = millis() + DISPLAY_HOLD_MS;
+    activityLogf("Display held for %lu min — Force Display Refresh to release",
+                 (unsigned long)DISPLAY_HOLD_MS / 60000);
+}
+
 // ═══════════════════════════════════════════════════════════
 void controllerSetup() {
     Serial.begin(115200);
@@ -242,6 +250,16 @@ void controllerLoop() {
         activityLog("Button pressed → re-identifying vinyl");
     }
 
+    // A test or calibration pattern is on screen — leave it alone.
+    if (g_app.displayHoldUntil != 0) {
+        if ((long)(now - g_app.displayHoldUntil) < 0) {
+            delay(100);
+            return;
+        }
+        g_app.displayHoldUntil = 0;
+        activityLog("Display hold expired — resuming normal operation");
+    }
+
     if (now - g_app.lastPollTime < g_app.settings.sonos_poll_ms) {
         delay(100);
         return;
@@ -344,6 +362,7 @@ static void serviceRequests() {
         g_req.testColors = false;
         activityLog("Test color pattern requested");
         pipelineShowTestPattern();
+        holdDisplay();
         return;
     }
 
@@ -351,12 +370,14 @@ static void serviceRequests() {
         g_req.testDither = false;
         activityLog("Dither test pattern requested");
         pipelineShowDitherTest();
+        holdDisplay();
         return;
     }
 
     if (g_req.testCalibration) {
         g_req.testCalibration = false;
         pipelineShowCalibrationCard();
+        holdDisplay();
         return;
     }
 
@@ -388,6 +409,7 @@ static void serviceRequests() {
 
     if (g_req.forceRefresh) {
         g_req.forceRefresh = false;
+        g_app.displayHoldUntil = 0;   // an explicit refresh releases the hold
         g_lastTrackHash = "";
         g_app.lastArtUrl = "";
         g_lastIdleSwap = 0;

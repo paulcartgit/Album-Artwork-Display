@@ -32,29 +32,33 @@ void pipelineShowCalibrationCard();
 // One row per pigment. Each row carries a black AND a white reference on BOTH
 // sides, each side chip split into a black half (top) and a white half (bottom):
 //
-//     [K]                              [K]
-//     [W] [===== pigment 0 =====]      [W]
-//     [W]                              [W]
-//     [K]                              [K]
+//     [K] [===== pigment 0 =====] [W]
+//     [W]                          [K]
+//     [K] [===== pigment 1 =====] [W]
+//     [W]                          [K]
 //     ... one such row per pigment
 //
-// Each reference column is quartered K/W/W/K, on BOTH sides of the pigment.
-// That geometry is the whole point: averaging the two black quarters and the
-// two white quarters puts BOTH references at exactly the same centroid as the
-// pigment they flank — same x (left and right averaged), same y (top and bottom
-// averaged). Any smooth illumination gradient or lens vignetting therefore
-// affects the references and the pigment identically, and cancels out.
+// Each row has a reference column on BOTH sides: black over white on the left,
+// white over black on the right. That mirroring is the whole point. Averaging
+// the two black halves puts the black reference at the row's exact centre in
+// both x (left and right) and y (top and bottom) — the pigment's own centroid —
+// and likewise for white. Any smooth illumination gradient or lens vignetting
+// therefore affects references and pigment identically, and cancels out.
 //
 // Get this wrong and the correction is worse than none: references only at the
 // row edges over-correct a pigment sampled from the centre, and references
 // stacked above/below it skew under a vertical gradient.
+//
+// Halves rather than quarters because the photo may be low resolution. At a
+// typical webcam distance the panel spans a few hundred pixels, so a 30px chip
+// lands on ~17px and lens blur bleeds black into white; 60px chips survive it.
 #define CAL_ROWS        6   // one per palette entry
 #define CAL_MARGIN_X   10
 #define CAL_MARGIN_Y   20
 #define CAL_ROW_H     120
 #define CAL_ROW_GAP     8
 #define CAL_CHIP_W     70   // reference column width (each side)
-#define CAL_CHIP_QUARTERS 4  // K / W / W / K down each column
+#define CAL_CHIP_HALVES   2  // K/W down the left column, W/K down the right
 #define CAL_CHIP_GAP   10
 #define CAL_PATCH_W   300   // the pigment itself
 #define CAL_KEYLINE     2   // outline thickness, drawn OUTSIDE each rectangle
