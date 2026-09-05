@@ -16,6 +16,7 @@ This scores the render against the source it came from:
           a lightness shift and hide it.
   worst   the blocks that are furthest off, so a local failure in a face or a
           head of hair cannot average away against a large flat background.
+  noise   grain that survives being looked at, from surviving_noise() below.
 """
 import numpy as np
 from PIL import Image
@@ -89,3 +90,35 @@ def report(name, source_rgb, render_rgb):
     print(f"  {name:24s} dE {m['dE']:5.1f}  worst5% {m['dE_p95']:5.1f}  "
           f"hue {m['hue']:5.1f}deg  chroma lost {m['chroma_loss']:+5.1f}")
     return m
+
+
+def surviving_noise(render_rgb, target_rgb, sigma=1.6):
+    """
+    How much dither grain a viewer actually sees.
+
+    Counting pixels that differ from all four neighbours seems like the
+    obvious measure and is badly wrong: a perfect checkerboard scores 100% and
+    looks perfectly smooth. On this panel that matters more than it sounds,
+    because purple can only be made by alternating red and blue — there is no
+    magenta pigment — so the most regular, best-looking rendering of a purple
+    region is also the one where every pixel differs from every neighbour.
+    Judged that way, gamut mapping looked like it had tripled the noise when
+    it had in fact cut it by more than half.
+
+    So blur both images and measure what is left. A regular pattern averages
+    away; clumped error diffusion leaves low-frequency blotches, and those are
+    what reads as grain. On a synthetic control, a checkerboard scores 0.25
+    and random dots at the same density score 13.5.
+    """
+    r = np.arange(-4, 5)
+    k = np.exp(-r ** 2 / (2 * sigma ** 2))
+    k /= k.sum()
+
+    def blur(a):
+        p = np.pad(a, ((4, 4), (4, 4), (0, 0)), mode="edge")
+        o = sum(w * p[i:i + a.shape[0], 4:4 + a.shape[1]] for i, w in enumerate(k))
+        p = np.pad(o, ((0, 0), (4, 4), (0, 0)), mode="edge")
+        return sum(w * p[:, i:i + a.shape[1]] for i, w in enumerate(k))
+
+    return float(np.std(blur(np.asarray(render_rgb, float)) -
+                        blur(np.asarray(target_rgb, float))))

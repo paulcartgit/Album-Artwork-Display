@@ -25,6 +25,7 @@ import numpy as np
 from PIL import Image
 
 import eink
+import fidelity
 from firmware_config import (
     CONFIG_H, EPD_WIDTH, EPD_HEIGHT, EPD_COLORS, PALETTE_RGB, RENDER_PROFILES,
 )
@@ -340,6 +341,22 @@ check("gamut mapping preserves hue",
 check("gamut mapping pulls an out-of-gamut colour in", _b[0] < _a[0],
       f"L* {_a[0]:.0f} -> {_b[0]:.0f}")
 _grey = np.full((8, 8, 3), (128, 128, 128), np.uint8)
+# The grain measure has to tell a regular pattern from a clumped one, because
+# on this panel the best rendering of purple is a red/blue checkerboard and a
+# naive count of "pixels unlike their neighbours" condemns it.
+_h = _w = 120
+_chk = (np.indices((_h, _w)).sum(0) % 2)[..., None].astype(bool)
+_rnd = (np.random.default_rng(0).random((_h, _w)) < 0.5)[..., None]
+_red = np.array(PALETTE_RGB[4], float)
+_blue = np.array(PALETTE_RGB[3], float)
+_mid = ((_red + _blue) / 2)[None, None, :] * np.ones((_h, _w, 1))
+_n_chk = fidelity.surviving_noise(np.where(_chk, _red, _blue), _mid)
+_n_rnd = fidelity.surviving_noise(np.where(_rnd, _red, _blue), _mid)
+check("the grain measure prefers a regular pattern to a clumped one",
+      _n_chk < 1.0 < _n_rnd,
+      f"checkerboard {_n_chk:.2f}, random {_n_rnd:.2f} — a measure that cannot "
+      f"separate these will reject the only way this panel can make purple")
+
 check("an in-gamut colour is left alone",
       np.array_equal(gamut_map.map_image(_grey), _grey))
 
