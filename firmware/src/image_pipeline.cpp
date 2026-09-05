@@ -5,6 +5,9 @@
 #include "gamut.h"
 #include "cover_match.h"
 #include "cover_variants.h"
+#include <esp_task_wdt.h>
+
+
 
 // Last pre-dither canvas, downsampled, so the simulator can be compared against
 // what the device actually fed the dither rather than against a guess at it.
@@ -36,6 +39,27 @@ static const size_t JPEG_INITIAL_ALLOC = 64 * 1024;
 static const size_t JPEG_MAX_DOWNLOAD  = 2 * 1024 * 1024;
 
 // ─── TJpg_Decoder callback state ───
+// Everything that changes what a given JPEG renders to. A cached frame is only
+// reused when this matches, so recalibrating the palette, switching profile or
+// fill mode, or changing the algorithm all invalidate the cache rather than
+// leaving stale frames that quietly disagree with fresh ones.
+//
+// Bump RENDER_ALGO_VERSION whenever the pipeline changes shape.
+#define RENDER_ALGO_VERSION 4
+
+static uint32_t renderSignature() {
+    uint32_t h = 2166136261u;               // FNV-1a
+    auto mix = [&h](uint8_t b) { h ^= b; h *= 16777619u; };
+    for (int i = 0; i < EPD_COLORS; i++) {
+        mix(PALETTE[i].r); mix(PALETTE[i].g); mix(PALETTE[i].b);
+    }
+    mix((uint8_t)g_app.settings.render_profile);
+    mix((uint8_t)g_app.settings.fill_mode);
+    mix((uint8_t)g_app.settings.show_track_info);
+    mix((uint8_t)RENDER_ALGO_VERSION);
+    return h;
+}
+
 static uint8_t* g_decodeBuf = nullptr;
 static int g_decodeW = 0;
 static int g_decodeH = 0;
@@ -354,6 +378,13 @@ static float chooseLightnessScale(const uint8_t* rgb, int w, int h,
     for (int k = 0; k < TONEMAP_SCALES * 2; k++) {
         const float scale = TONEMAP_SCALE[k % TONEMAP_SCALES];
         const bool gamut = (k >= TONEMAP_SCALES);
+        // Each stage below is a full-image pass with a Lab round trip or a
+        // dither in it. The loop task only feeds the watchdog between passes,
+        // so a render that got heavy enough — six trial candidates, plus tone
+        // mapping and gamut mapping at full resolution, plus the 25s panel
+        // refresh — tripped the 90s timeout and reset the frame. Feed it
+        // between stages rather than hoping the total stays under.
+        esp_task_wdt_reset();
         memcpy(cand, small, npix * 3);
         toneMapApply(cand, dw, dh, scale);
         if (gamut) gamutMapApply(cand, dw, dh);
@@ -931,14 +962,18 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     // 3.5. Pre-dither enhancement (sharpen + contrast + gamma)
     const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
     bool useGamut = false;
+    esp_task_wdt_reset();
     toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
                  chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
                                       profile, &useGamut));
     // After the tone map, so the gamut is judged at the lightness the image
     // will actually be shown at, and before enhancement, so contrast and
     // gamma act on colours the panel can hold.
+    esp_task_wdt_reset();
     if (useGamut) gamutMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+    esp_task_wdt_reset();
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
+    esp_task_wdt_reset();
 
     if (!g_canvasProbe)
         g_canvasProbe = (uint8_t*)heap_caps_malloc(pipelineCanvasProbeSize()
@@ -1256,7 +1291,17 @@ bool pipelineProcessUrl(const char* url,
     // obscure reissue on the wall in place of the famous cover.
     if (g_app.settings.cover_variants && artist && artist[0] && album && album[0]) {
         String better;
-        if (coverChooseVariant(artist, album, jpegBuf, jpegSize, better)) {
+        // Remembered per album. The search is a MusicBrainz query plus several
+        // Cover Art Archive downloads and assessments, and its answer never
+        // changes — including when the answer is "nothing better", which is
+        // stored as an empty string so it is not searched for again either.
+        bool known = sdHistoryGetCoverChoice(artist, album, better);
+        if (!known) {
+            if (!coverChooseVariant(artist, album, jpegBuf, jpegSize, better))
+                better = "";
+            sdHistorySetCoverChoice(artist, album, better.c_str());
+        }
+        if (better.length()) {
             size_t altSize = 0;
             uint8_t* altBuf = downloadJpeg(better.c_str(), altSize);
             if (altBuf && altSize) {
@@ -1302,6 +1347,28 @@ bool pipelineProcessUrl(const char* url,
 }
 
 bool pipelineProcessFile(const char* path) {
+    // A cached frame short-circuits everything: the decode, the fill, six
+    // trial renders, the tone map, the gamut map, the enhancement and the
+    // dither all produce the same bytes they produced last time. Only the 25s
+    // panel refresh is unavoidable. This is the path the idle rotation, a
+    // history tap and the boot restore all take, so it is nearly all of the
+    // repeat work the frame was doing.
+    {
+        const size_t packedSize = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
+        uint8_t* cached = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
+        if (cached) {
+            if (sdRenderCacheLoad(path, renderSignature(), cached)) {
+                Serial.printf("[Pipeline] Cache hit for %s\n", path);
+                esp_task_wdt_reset();
+                displayShowImage(cached);
+                heap_caps_free(cached);
+                sdSetLastShown(path);
+                return true;
+            }
+            heap_caps_free(cached);
+        }
+    }
+
     File f = SD_MMC.open(path, FILE_READ);
     if (!f) {
         Serial.printf("[Pipeline] Cannot open %s\n", path);
@@ -1332,6 +1399,13 @@ bool pipelineProcessFile(const char* path) {
 
     PipelineResult res = processJpegBuffer(jpegBuf, fSize);
     heap_caps_free(jpegBuf);
+
+    // Keep the result so the next showing of this cover is just a panel push.
+    if (res == PIPE_OK && displayCurrentFrame()) {
+        sdRenderCacheSave(path, renderSignature(), displayCurrentFrame());
+        sdSetLastShown(path);
+    }
+
     return res == PIPE_OK;
 }
 

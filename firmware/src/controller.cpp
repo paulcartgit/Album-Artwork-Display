@@ -334,15 +334,23 @@ void controllerLoop() {
     // nothing to serve until the next track change.
     if (g_restorePending) {
         g_restorePending = false;
-        String last = sdHistoryNewestFile();
+        // What was actually last on the panel, falling back to the newest
+        // entry only if that has never been recorded (an SD card written by an
+        // older firmware).
+        String last = sdGetLastShown();
+        if (!last.length()) last = sdHistoryNewestFile();
         if (!last.length()) {
             activityLog("No history to restore after restart");
         } else if (pipelineProcessFile(last.c_str())) {
+            // Metadata only — the MusicBrainz lookup would add up to ten
+            // seconds of network to a pass that has just spent twenty-five on
+            // a panel refresh, and enrichRelease is called again on the next
+            // real track anyway.
             String artist, album;
             if (sdHistoryLookup(last.substring(9).c_str(), artist, album)) {
                 g_app.currentArtist = artist;
                 g_app.currentAlbum  = album;
-                enrichRelease(artist, album);
+                sdHistoryGetRelease(artist.c_str(), album.c_str(), g_app.releaseInfo);
             }
             activityLog("Restored the last cover after restart");
         } else {

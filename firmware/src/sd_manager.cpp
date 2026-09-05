@@ -313,6 +313,9 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
     obj["on"] = true;
 
     writeIndex(doc);
+    // Saving to history means this is what went on the panel, so it is also
+    // what should come back after a restart.
+    sdSetLastShown(fpath.c_str());
     Serial.printf("[History] Saved: %s (%s — %s)\n", fname, artist, title);
     return true;
 }
@@ -358,6 +361,7 @@ bool sdHistorySetPinned(const char* file, bool pinned) {
 }
 
 bool sdHistoryDelete(const char* file) {
+    sdRenderCacheDrop(file);
     if (!file || !file[0]) return false;
     JsonDocument doc;
     if (!readIndex(doc)) return false;
@@ -411,6 +415,85 @@ static void rebuildShuffleBag() {
     }
     g_shufflePos = 0;
 }
+
+// ─── Rendered frame cache ───
+
+#define RENDER_CACHE_MAGIC 0x50464331u   /* "PFC1" */
+
+static String cachePath(const char* file) {
+    if (!file || !*file) return "";
+    String name(file);
+    const int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    const int dot = name.lastIndexOf('.');
+    if (dot > 0) name = name.substring(0, dot);
+    return "/history/" + name + ".pf";
+}
+
+bool sdRenderCacheLoad(const char* file, uint32_t signature, uint8_t* packed) {
+    const size_t bytes = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
+    String path = cachePath(file);
+    if (!path.length() || !packed) return false;
+    File f = SD_MMC.open(path, FILE_READ);
+    if (!f) return false;
+    uint32_t magic = 0, sig = 0;
+    const bool headerOk = f.read((uint8_t*)&magic, 4) == 4 &&
+                          f.read((uint8_t*)&sig, 4) == 4 &&
+                          magic == RENDER_CACHE_MAGIC && sig == signature &&
+                          f.size() == bytes + 8;
+    if (!headerOk) { f.close(); return false; }
+    const bool ok = f.read(packed, bytes) == (int)bytes;
+    f.close();
+    return ok;
+}
+
+bool sdRenderCacheSave(const char* file, uint32_t signature, const uint8_t* packed) {
+    const size_t bytes = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
+    String path = cachePath(file);
+    if (!path.length() || !packed) return false;
+    // Temp then rename, so a reset mid-write cannot leave a truncated frame
+    // that passes the header check.
+    String tmp = path + ".tmp";
+    File f = SD_MMC.open(tmp, FILE_WRITE);
+    if (!f) return false;
+    const uint32_t magic = RENDER_CACHE_MAGIC;
+    bool ok = f.write((const uint8_t*)&magic, 4) == 4 &&
+              f.write((const uint8_t*)&signature, 4) == 4 &&
+              f.write(packed, bytes) == bytes;
+    f.close();
+    if (!ok) { SD_MMC.remove(tmp); return false; }
+    SD_MMC.remove(path);
+    return SD_MMC.rename(tmp, path);
+}
+
+void sdRenderCacheDrop(const char* file) {
+    String path = cachePath(file);
+    if (path.length()) SD_MMC.remove(path);
+}
+
+
+#define LAST_SHOWN_PATH "/last_shown.txt"
+
+bool sdSetLastShown(const char* path) {
+    if (!path || !*path) return false;
+    File f = SD_MMC.open(LAST_SHOWN_PATH, FILE_WRITE);
+    if (!f) return false;
+    f.print(path);
+    f.close();
+    return true;
+}
+
+String sdGetLastShown() {
+    File f = SD_MMC.open(LAST_SHOWN_PATH, FILE_READ);
+    if (!f) return "";
+    String p = f.readStringUntil('\n');
+    f.close();
+    p.trim();
+    // Only worth restoring if the artwork is still there.
+    if (!p.length() || !SD_MMC.exists(p)) return "";
+    return p;
+}
+
 
 String sdHistoryNewestFile() {
     JsonDocument doc;
@@ -470,6 +553,34 @@ bool sdHistorySetRelease(const char* artist, const char* album, const char* summ
     for (JsonObject obj : doc.as<JsonArray>()) {
         if (strcmp(obj["f"] | "", fname.c_str()) != 0) continue;
         obj["rel"] = summary ? summary : "";
+        return writeIndex(doc);
+    }
+    return false;
+}
+
+
+bool sdHistoryGetCoverChoice(const char* artist, const char* album, String& url) {
+    String fname = releaseKeyFile(artist, album);
+    if (!fname.length()) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", fname.c_str()) != 0) continue;
+        if (!obj["cov"].is<const char*>()) return false;   // never searched
+        url = obj["cov"].as<const char*>();
+        return true;                                       // "" means "nothing better"
+    }
+    return false;
+}
+
+bool sdHistorySetCoverChoice(const char* artist, const char* album, const char* url) {
+    String fname = releaseKeyFile(artist, album);
+    if (!fname.length()) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", fname.c_str()) != 0) continue;
+        obj["cov"] = url ? url : "";
         return writeIndex(doc);
     }
     return false;
