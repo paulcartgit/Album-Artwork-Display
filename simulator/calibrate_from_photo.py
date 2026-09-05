@@ -132,7 +132,8 @@ def locate_panel(img, debug=False):
         area = int((labels[sl] == idx).sum())
         if area < min_area:
             continue
-        blobs.append(dict(x0=xs.start, x1=xs.stop, y0=ys.start, y1=ys.stop, area=area))
+        blobs.append(dict(x0=xs.start, x1=xs.stop, y0=ys.start, y1=ys.stop,
+                          area=area, label=idx))
     if len(blobs) < 3:
         return None
 
@@ -192,17 +193,72 @@ def locate_panel(img, debug=False):
             print("  locate_panel: no blob group matched the card's geometry")
         return None
 
-    total, group, x0, y0, panel_w, panel_h, aspect = max(candidates, key=lambda c: c[0])
-    panel_x = x0 - fx0 * panel_w
-    panel_y = y0 - fy0 * panel_h
+    total, group, gx0, gy0, panel_w, panel_h, aspect = max(candidates,
+                                                           key=lambda c: c[0])
+    group.sort(key=lambda b: b["y0"])
+
+    # Corner points of the topmost and bottommost saturated bands. Using the
+    # extremes of the actual mask (not the bounding box) means a tilted or
+    # perspective-distorted panel still yields true corners.
+    def blob_corners(b):
+        sub = labels[b["y0"]:b["y1"], b["x0"]:b["x1"]] == b["label"]
+        ys, xs = np.nonzero(sub)
+        xs = xs + b["x0"]; ys = ys + b["y0"]
+        ssum = xs + ys
+        sdif = xs - ys
+        return dict(tl=(xs[np.argmin(ssum)], ys[np.argmin(ssum)]),
+                    br=(xs[np.argmax(ssum)], ys[np.argmax(ssum)]),
+                    tr=(xs[np.argmax(sdif)], ys[np.argmax(sdif)]),
+                    bl=(xs[np.argmin(sdif)], ys[np.argmin(sdif)]))
+
+    top = blob_corners(group[0])       # green band
+    bottom = blob_corners(group[-1])   # yellow band (or red+yellow merged)
+
+    # Their positions in panel coordinates are known exactly.
+    x_patch_l = CAL["margin_x"] + CAL["chip_w"] + CAL["chip_gap"]
+    x_patch_r = x_patch_l + CAL["patch_w"]
+    y_top = CAL["margin_y"] + first_sat_row * row_pitch
+    y_bot = CAL["margin_y"] + last_sat_row * row_pitch + CAL["row_h"]
+
+    src = [top["tl"], top["tr"], bottom["br"], bottom["bl"]]
+    dst = [(x_patch_l, y_top), (x_patch_r, y_top),
+           (x_patch_r, y_bot), (x_patch_l, y_bot)]
 
     if debug:
-        print(f"  locate_panel: {len(group)} saturated bands, "
-              f"panel = ({panel_x:.0f},{panel_y:.0f}) {panel_w:.0f}x{panel_h:.0f}, "
-              f"aspect {aspect:.2f}")
+        print(f"  locate_panel: {len(group)} saturated bands, aspect {aspect:.2f}, "
+              f"corners {[(int(a), int(b)) for a, b in src]}")
 
-    return (int(round(panel_x)), int(round(panel_y)),
-            int(round(panel_x + panel_w)), int(round(panel_y + panel_h)))
+    return src, dst
+
+
+def _perspective_coeffs(dst_quad, src_quad):
+    """
+    Coefficients for PIL's PERSPECTIVE transform, which maps each OUTPUT pixel
+    back to a source pixel. dst_quad is in output (panel) space, src_quad the
+    matching points in the photo.
+    """
+    A, B = [], []
+    for (xd, yd), (xs_, ys_) in zip(dst_quad, src_quad):
+        A.append([xd, yd, 1, 0, 0, 0, -xs_ * xd, -xs_ * yd])
+        B.append(xs_)
+        A.append([0, 0, 0, xd, yd, 1, -ys_ * xd, -ys_ * yd])
+        B.append(ys_)
+    coeffs, *_ = np.linalg.lstsq(np.array(A, dtype=np.float64),
+                                 np.array(B, dtype=np.float64), rcond=None)
+    return coeffs
+
+
+def rectify_panel(img, src_quad, dst_quad):
+    """
+    Warp the photographed panel onto a flat EPD_WIDTH x EPD_HEIGHT canvas.
+
+    A plain rectangular crop cannot do this: a frame standing on a desk leans
+    back, so the panel photographs foreshortened (measured 0.72 against the
+    true 0.60 aspect) and every sampling box drifts progressively down the card.
+    """
+    coeffs = _perspective_coeffs(dst_quad, src_quad)
+    return img.transform((EPD_WIDTH, EPD_HEIGHT), Image.PERSPECTIVE,
+                         coeffs, Image.BICUBIC)
 
 
 def row_regions_normalised(index):
@@ -327,6 +383,9 @@ def main():
     ap.add_argument("--crop", help="Manual crop as x0,y0,x1,y1 (skips auto-detection)")
     ap.add_argument("--no-auto-crop", action="store_true",
                     help="Assume the photo is already cropped to the panel")
+    ap.add_argument("--force", action="store_true",
+                    help="Emit a palette even when the readings fail the "
+                         "physical-plausibility check")
     ap.add_argument("--anchor", choices=["row", "none"], default="row",
                     help="row (default): correct each pigment against its own "
                          "black/white chips. none: report raw photographed values")
@@ -343,15 +402,17 @@ def main():
         img = img.crop(box)
         print(f"  cropped to {box} -> {img.size[0]}x{img.size[1]}")
     elif not args.no_auto_crop:
-        box = locate_panel(img, debug=True)
-        if box is None:
+        found = locate_panel(img, debug=True)
+        if found is None:
             sys.exit("Could not locate the calibration card in this photo.\n"
                      "Check the card is actually on screen (Debug -> Palette "
-                     "Calibration Card), that the whole panel is visible, and "
-                     "that it is roughly square-on.\n"
+                     "Calibration Card) and that the whole panel is visible, "
+                     "including the yellow row at the bottom.\n"
                      "You can also pass --crop x0,y0,x1,y1 manually.")
-        img = img.crop(box)
-        print(f"  auto-cropped to {box} -> {img.size[0]}x{img.size[1]}")
+        src_quad, dst_quad = found
+        img = rectify_panel(img, src_quad, dst_quad)
+        print(f"  rectified to {img.size[0]}x{img.size[1]} "
+              f"(perspective corrected)")
 
     raw, values, all_boxes, refs = [], [], [], []
     for i in range(len(PALETTE_RGB)):
@@ -418,7 +479,35 @@ def main():
     print(f"    black uniformity  : {min(black_levels):.0f}-{max(black_levels):.0f} "
           f"(lift {black_lift:.0f})")
 
+    # ── Validity check the references cannot see ──
+    # A reflective panel cannot bounce more light in any channel than its own
+    # white pigment does. If a photographed pigment exceeds its row's white
+    # reference, the camera is boosting saturation or contrast — and because
+    # black and white are ACHROMATIC, the correction above is completely blind
+    # to that. It will happily produce confident, wrong, over-saturated values.
+    impossible = []
+    for i, name in enumerate(PALETTE_NAMES):
+        pig = raw[i]
+        white_ref = refs[i][1]
+        excess = pig - white_ref
+        # White's own row compares a surface against itself; allow the noise floor.
+        limit = 12 if i == 1 else 6
+        over = [c for c, e in zip("RGB", excess) if e > limit]
+        if over:
+            impossible.append((name, "".join(over), int(max(excess))))
+
     problems = []
+    if impossible:
+        detail = ", ".join(f"{n} ({ch} by {e})" for n, ch, e in impossible)
+        problems.append(
+            f"Physically impossible readings: {detail}. No pigment can reflect "
+            f"more light than the white pigment in any channel, so the camera is "
+            f"enhancing saturation or contrast. The black and white references "
+            f"are neutral, so this correction CANNOT detect or undo it — the "
+            f"chromatic values below are biased and should not be used. "
+            f"Shoot RAW (phone ProRAW or a manual camera app) to get a frame "
+            f"without that processing.")
+
     if min_span < 90:
         problems.append(
             f"Low contrast (span {min_span:.0f}). The correction has to scale by "
@@ -453,6 +542,14 @@ def main():
 
     if args.check:
         return
+
+    if impossible:
+        print("\nNot emitting a palette: the readings above are physically "
+              "impossible, so they would make the display worse, not better.\n"
+              "Re-shoot with a camera whose colour processing can be disabled, "
+              "or pass --force if you know what you are doing.")
+        if not args.force:
+            return
 
     print(f"\nPaste this over the PALETTE[] block in {CONFIG_H}:\n")
     print(format_palette_block(values))
