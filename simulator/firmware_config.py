@@ -94,6 +94,33 @@ PALETTE_HEX = ["#%02X%02X%02X" % c for c in PALETTE_RGB]
 assert len(PALETTE_RGB) == EPD_COLORS, (
     f"config.h declares EPD_COLORS={EPD_COLORS} but PALETTE has {len(PALETTE_RGB)} entries")
 
+def _parse_fill_policy():
+    """
+    Constants from firmware/src/fill_policy.h.
+
+    The fill algorithm exists in both C++ and Python, and they have already
+    disagreed once — the device cropped a sleeve the simulator said to leave
+    alone, because the two sampled at different resolutions. Reading the
+    thresholds from the header removes at least that class of drift.
+    """
+    path = CONFIG_H.parent / "fill_policy.h"
+    if not path.exists():
+        raise FileNotFoundError(f"Cannot find {path}")
+    text = path.read_text()
+    out = {}
+    for name in ("FILL_MAX_ZOOM", "FILL_CUT_LIMIT", "FILL_SCAN_SIZE"):
+        m = re.search(rf"#define\s+{name}\s+([0-9.]+)f?", text)
+        if not m:
+            raise ValueError(f"{name} not found in fill_policy.h")
+        out[name] = float(m.group(1))
+    return out
+
+
+FILL = _parse_fill_policy()
+FILL_MAX_ZOOM = FILL["FILL_MAX_ZOOM"]
+FILL_CUT_LIMIT = FILL["FILL_CUT_LIMIT"]
+FILL_SCAN_SIZE = int(FILL["FILL_SCAN_SIZE"])
+
 DEFAULT_PROFILE = 1  # PROFILE_NATURAL
 
 

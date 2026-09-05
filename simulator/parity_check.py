@@ -152,6 +152,66 @@ check("render() produces a full 480x800 canvas", out.size == (EPD_WIDTH, EPD_HEI
 
 
 # ═══════════════════════════════════════════════════════════
+print("\nArtwork fill")
+# ═══════════════════════════════════════════════════════════
+
+import fill_modes as fmod
+
+fill_h = (SRC / "fill_policy.h").read_text()
+check("fill thresholds come from fill_policy.h",
+      fmod.CUT_LIMIT == float(re.search(r"FILL_CUT_LIMIT\s+([0-9.]+)f", fill_h).group(1)))
+
+m = re.search(r"VIRTUAL_PAIR|fillAdaptiveZoom", fill_h)
+check("firmware still walks the zoom steps",
+      "static const float STEPS[]" in fill_h and "1.45f" in fill_h)
+
+# The row stride must round UP, or a sleeve between 128 and 256 rows tall is
+# scanned only to row 128 and type below that is invisible. That shipped once.
+check("firmware scans the full height (stride rounds up)",
+      "(h + MAX_ROWS - 1) / MAX_ROWS" in fill_h)
+
+# The percentile is taken from a DESCENDING sort, so it indexes near the front.
+# Indexing at 0.96*n returned a near-minimum and cropped through type.
+check("firmware takes the percentile from the correct end",
+      "(n - 1) * 0.04f" in fill_h)
+
+# Behaviour, mirroring firmware/test/test_native
+def _noise(n, seed):
+    rng = np.random.default_rng(seed)
+    v = 90 + rng.integers(0, 64, (n, n))
+    return np.dstack([v, v, v ^ 0x10]).astype(np.uint8)
+
+def _band(a, y0, y1, seed=5):
+    rng = np.random.default_rng(seed)
+    a = a.copy()
+    bar = rng.integers(0, 2, (y1 - y0, a.shape[1])) * 255
+    for c in range(3):
+        a[y0:y1, :, c] = bar
+    return a
+
+photo = Image.fromarray(_noise(300, 7))
+typed = Image.fromarray(_band(_noise(300, 7), 40, 70))
+check("photographic sleeve reaches a full bleed",
+      fmod.adaptive_zoom(photo) == fmod.FILL_MAX_ZOOM,
+      f"got {fmod.adaptive_zoom(photo)}")
+check("sleeve with type across it is not cropped",
+      fmod.adaptive_zoom(typed) == 1.0,
+      f"got {fmod.adaptive_zoom(typed)}")
+check("severity separates the two",
+      fmod.cut_severity(typed, 1.3) > fmod.CUT_LIMIT > fmod.cut_severity(photo, 1.3),
+      f"typed={fmod.cut_severity(typed,1.3):.1f} photo={fmod.cut_severity(photo,1.3):.1f}")
+
+# Same artwork at different sizes must score alike — the device and the
+# simulator disagreed precisely because this was not true.
+small = Image.fromarray(_band(_noise(200, 11), 30, 45))
+big   = Image.fromarray(_band(_noise(700, 11), 105, 157))
+sa, sb = fmod.cut_severity(small, 1.3), fmod.cut_severity(big, 1.3)
+check("severity is resolution independent",
+      sa > fmod.CUT_LIMIT and sb > fmod.CUT_LIMIT and abs(sa - sb) < 0.65 * max(sa, sb),
+      f"200px={sa:.1f} 700px={sb:.1f}")
+
+
+# ═══════════════════════════════════════════════════════════
 print()
 if FAILURES:
     print(f"PARITY CHECK FAILED — {len(FAILURES)} problem(s):")

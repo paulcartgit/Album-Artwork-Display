@@ -76,12 +76,14 @@ Once connected, visit **http://nowplaying.local** (or the device IP):
 Current track info, artwork preview, and activity log. Buttons to force a Sonos check or trigger a manual listen (Shazam identify). Auto-refreshes every 3 seconds.
 
 ### Settings
-- **Wi-Fi** — Scan for networks, change WiFi credentials (reboots to reconnect)
-- **Sonos** — Scan and select a speaker by room name
-- **Shazam** — RapidAPI key for vinyl identification
-- **Timing** — Sonos poll interval (5–60s), vinyl re-identify interval (1–30 min), no-match cooldown (1–15 min), idle gallery rotation (1–30 min)
-- **Display** — Track info overlay toggle, background fill mode (auto/blur/solid), background style (darken/wash out), render profile (Punchy/Natural/Soft)
+- **Speaker** — Scan and select a Sonos speaker by room name
+- **Network** — Change Wi-Fi credentials (reboots to reconnect)
+- **The picture** — Fill mode, render profile, track-info overlay, background treatment
+- **Panel care** — Minimum interval between redraws, quiet hours, UTC offset
+- **Timing** — Sonos poll interval, vinyl re-identify interval, no-match cooldown, idle rotation
+- **Vinyl** — RapidAPI Shazam key
 - **Security** — Optional portal password (username `admin`). Off by default; with no password, anyone on your network can change the Wi-Fi settings
+- **Frame / Diagnostics / Firmware** — Device facts, test patterns, and over-the-air update
 
 ### History
 Gallery grid of all saved album covers (up to 100), split into **Pinned** and **History** sections:
@@ -89,8 +91,43 @@ Gallery grid of all saved album covers (up to 100), split into **Pinned** and **
 - **Pin** a cover to keep it permanently (exempt from the 100-entry cap)
 - **Delete** unwanted entries
 
-### Debug
-Device IP, uptime, force display refresh, test color pattern, dither test pattern, download last audio recording, and **firmware update** — upload a new `firmware.bin` over the network instead of unmounting the frame.
+### What the frame is showing
+The main screen shows the **actual bitmap on the panel**, read back from the
+device — not the source artwork. That is the only way to see how something
+rendered: the dithering, the crop, the fill decision. Tap it to compare against
+the original. It is also available directly:
+
+```
+curl -s http://nowplaying.local/api/display/current.bmp -o panel.bmp
+```
+
+## Filling the Screen
+
+Album art is square; the panel is 480×800. Fitting the square to the width
+covers 60% of the screen, and cover-cropping to fill it discards 40% of the
+sleeve horizontally — which usually slices through the artist's name.
+
+**Adaptive** (the default) enlarges each sleeve as far as it can before the crop
+lines start cutting into the artwork's own detail, then blends whatever is left
+out to the edges by mirroring and blurring past recognition. Photographic
+sleeves reach a full bleed; sleeves with type across them are left uncropped.
+The alternatives are **Never crop**, **Always fill**, and the original
+**Centred square**, which is also used whenever the artist/album overlay is on.
+
+## Panel Care
+
+A full refresh takes 20–25 seconds and e-ink panels have a finite refresh life.
+The frame enforces a minimum interval between redraws (45 s by default) so
+skipping through a playlist does not repaint on every track, counts its redraws,
+and can be silenced overnight with **quiet hours** — e-ink holds its image with
+no power, so a paused frame still looks like a picture.
+
+## Release Details
+
+For anything with an album name, the frame looks up the pressing on MusicBrainz
+— year, label and catalogue number — and shows it under the track. Results are
+cached per album in the history index, so a record is looked up once and never
+again. No API key is needed.
 
 ## Album Art History
 
@@ -111,6 +148,9 @@ Additional behaviours:
 - **Idle debounce** — Requires 2 consecutive idle polls before transitioning from playing to idle (prevents false transitions during track changes)
 - **Escalating cooldown** — After Shazam retries are exhausted, cooldown duration escalates progressively, capped at 30 minutes
 - **Speaker rediscovery** — After 3 consecutive Sonos failures, re-discovers the speaker by room name via UPnP/SOAP topology API
+- **Group coordinator** — When the speaker is grouped, the coordinator carries the group's transport state, so that is what gets polled
+- **Push updates** — Subscribes to Sonos UPnP events, so track changes appear within a second or two; polling continues underneath as the fallback
+- **Watchdog** — A hung I2C bus or SD write reboots the frame rather than leaving it dead until it is unplugged
 - **Blocking refresh** — A panel refresh takes ~15s and blocks the state machine for its duration, yielding throughout so Wi-Fi and the web portal stay responsive
 - **Physical button** — BTN_KEY triggers immediate re-identification (resets all cooldowns)
 
@@ -158,6 +198,11 @@ firmware/               ESP32-S3 PlatformIO firmware
 │   ├── sd_manager.cpp/h    SD card: settings, wifi config, art history
 │   ├── wifi_manager.cpp/h  WiFi STA connection + AP mode for setup
 │   ├── identify.cpp/h      Record → mono → auto-gain → Shazam → display
+│   ├── metadata_client.cpp/h   MusicBrainz release lookup (year, label, cat no.)
+│   ├── power.cpp/h         AXP2101 battery reporting
+│   ├── upnp_events.cpp/h   GENA NOTIFY receiver (raw listener; NOTIFY is not
+│   │                       a method ESPAsyncWebServer parses)
+│   ├── fill_policy.h       How far to enlarge artwork before the crop bites
 │   ├── activity_log.h      Circular activity log for web UI
 │   ├── backoff.h           Vinyl retry/cooldown escalation policy
 │   ├── history_policy.h    History eviction and timestamp rules
@@ -173,6 +218,10 @@ simulator/              Python simulator (runs without hardware)
 ├── eink.py             Port of the firmware rendering pipeline
 ├── firmware_config.py  Reads the palette + profiles from firmware/src/config.h
 ├── parity_check.py     Fails CI if the simulator drifts from the firmware
+├── fill_modes.py       Fill strategies, for comparing them on real covers
+├── panel_probe.py      Push test frames to the panel and read them back
+├── panel_compare.py    Source vs prediction vs photograph, side by side
+├── calibrate_from_photo.py  Regenerate the palette from a photo of the card
 ├── vinyl_sim.py        Full simulator with web UI
 ├── dither_preview.py   Standalone render preview tool
 ├── requirements.txt    Python dependencies

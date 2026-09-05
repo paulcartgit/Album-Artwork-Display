@@ -4,7 +4,7 @@
 // for camera permission the first time; that prompt is attributed to whichever
 // app launched this.
 //
-//   swiftc -O snap.swift -o snap
+//   ./build-snap.sh    (a bare binary will NOT get camera access — see that script)
 //   ./snap out.jpg [warmupSeconds]
 //
 // Note: exposure and white-balance cannot be driven manually here.

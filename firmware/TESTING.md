@@ -26,7 +26,8 @@ Shazam is only needed for vinyl record identification. Digital Sonos playback (S
 
 ## Part 1 — Test Locally Without the Device
 
-The dithering algorithm, Sonos XML parsing, and URL encoding logic are all tested natively on your Mac — no board needed.
+The dithering, artwork fill policy, album-art history rules, vinyl back-off policy and
+Sonos XML parsing are all tested natively on your Mac — no board needed.
 
 ### Run the tests
 
@@ -41,7 +42,9 @@ python3 -m platformio test -e native -v
 |--------|-------|------------------|
 | **Dithering** | Palette mapping | Solid black/white/red map to correct palette index, pixel packing (high/low nibble), all output indices are valid (0–5) |
 | **XML parsing** | Tag extraction | Sonos SOAP responses, DIDL-Lite entity decoding, line-in URI detection, missing/empty tag handling |
-| **URL encoding** | Percent encoding | Spaces → `%20`, colons → `%3A`, safe chars pass through, UTF-8 bytes encoded, empty string |
+| **Fill policy** | Crop severity, adaptive zoom | Photographic sleeves reach a full bleed; sleeves with type across them are never cropped; the scan covers the full height and is resolution-independent |
+| **History policy** | Eviction, timestamps | Oldest unpinned goes first; legacy `millis()` entries sort oldest; a new entry is never the eviction target |
+| **Back-off policy** | Retry and cooldown escalation | Full retries on the first cycle, one thereafter; cooldown grows and is capped without overflow |
 
 ### Build the ESP32 firmware (without flashing)
 
@@ -267,3 +270,46 @@ python3 -m platformio run --target clean
 | Shazam returns no match | Ensure the mic is picking up audio. Check serial for `[Audio] Recorded X bytes` |
 | History thumbnails don't load | Check serial for errors. Images are served from SD — ensure card is working |
 | Display shows "No images / Play some music!" | No history yet — play some tracks to build up the cover art cache |
+
+
+---
+
+## Checking the Frame Without Standing In Front Of It
+
+The device serves the exact bitmap it is displaying, so rendering can be judged
+without a camera:
+
+```bash
+curl -s http://nowplaying.local/api/display/current.bmp -o panel.bmp
+```
+
+It is an indexed 4bpp BMP using the calibrated palette, so it decodes to
+precisely the six pigment colours — no reflections, no white balance, no camera
+processing. The portal shows the same thing on its main screen.
+
+For side-by-side work against real artwork, and for pushing test frames to the
+panel:
+
+```bash
+cd simulator
+python panel_compare.py 9badda0b.jpg      # source | prediction | photograph
+python panel_probe.py                     # push tiled/variant frames
+```
+
+Both take the device address from `$NOWPLAYING`, defaulting to
+`http://nowplaying.local`. `panel_probe.py` needs the webcam helper, built with
+`tools/build-snap.sh` — it must be an app bundle, because macOS denies camera
+access to a bare binary without ever prompting.
+
+## Verifying the Palette
+
+See [DITHERING.md](../DITHERING.md#verifying-the-palette-against-the-real-panel).
+Short version: **Settings → Diagnostics → Palette calibration card**, photograph
+it, then
+
+```bash
+cd simulator && python calibrate_from_photo.py photo.jpg --check --preview check.png
+```
+
+The tool refuses to emit a palette from a photograph whose readings are
+physically impossible, which is what a camera's saturation processing produces.

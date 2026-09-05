@@ -13,16 +13,17 @@ import numpy as np
 from PIL import Image
 
 import eink
-from firmware_config import EPD_WIDTH, EPD_HEIGHT
+from firmware_config import (EPD_WIDTH, EPD_HEIGHT,
+                             FILL_MAX_ZOOM, FILL_CUT_LIMIT, FILL_SCAN_SIZE)
 
-FIT, COVER, SMART, BLEED, ADAPTIVE = range(5)
-NAMES = {FIT:"Fit (current)", COVER:"Cover crop", SMART:"Smart crop",
+FIT, COVER, BLEED, ADAPTIVE = range(4)
+NAMES = {FIT:"Fit (centred square)", COVER:"Cover crop",
          BLEED:"Bleed", ADAPTIVE:"Adaptive"}
 
-# Fraction of the width a cover-crop would discard, and how much detail is
-# allowed to sit in it before cropping is judged too destructive.
+# Fraction of the width a cover-crop would discard. The thresholds come from
+# firmware/src/fill_policy.h so the two implementations cannot drift.
 CROP_LOSS = 1.0 - EPD_WIDTH / EPD_HEIGHT          # 0.40 for this panel
-CUT_LIMIT = 7.0
+CUT_LIMIT = FILL_CUT_LIMIT
 
 
 def _cover_scaled(src):
@@ -31,23 +32,6 @@ def _cover_scaled(src):
     s = max(EPD_WIDTH / w, EPD_HEIGHT / h)
     return src.resize((max(EPD_WIDTH, int(w * s + .5)),
                        max(EPD_HEIGHT, int(h * s + .5))), Image.LANCZOS)
-
-
-def _saliency_columns(img):
-    """
-    Per-column interest, for choosing a crop window.
-
-    Deliberately crude: local contrast plus colour saturation, summed down each
-    column. It is not trying to find faces — it is trying to avoid slicing
-    through the busiest part of a sleeve, which is usually where the type is.
-    """
-    a = np.asarray(img.convert("RGB"), dtype=np.float64)
-    lum = 0.299*a[:,:,0] + 0.587*a[:,:,1] + 0.114*a[:,:,2]
-    gx = np.abs(np.diff(lum, axis=1, prepend=lum[:, :1]))
-    gy = np.abs(np.diff(lum, axis=0, prepend=lum[:1, :]))
-    mx, mn = a.max(axis=2), a.min(axis=2)
-    sat = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0)
-    return (gx + gy + sat * 40).sum(axis=0)
 
 
 def _mirror_extend(art, out_h):
@@ -117,7 +101,7 @@ def adaptive_zoom(src):
     across it stops early and keeps its type.
     """
     best = 1.0
-    for z in (1.0, 1.1, 1.2, 1.3, 1.45, EPD_HEIGHT / EPD_WIDTH):
+    for z in (1.0, 1.1, 1.2, 1.3, 1.45, FILL_MAX_ZOOM):
         if cut_severity(src, z) < CUT_LIMIT:
             best = z
         else:
@@ -152,39 +136,6 @@ def cut_severity(src, zoom):
     return float(np.percentile(per_row, 96) / max(gx.mean(), 1e-6))
 
 
-def crop_cost(src):
-    """
-    How badly a cover-crop would damage this sleeve.
-
-    The first attempt measured how much *detail* the crop removes, and it did
-    not discriminate at all — every cover scored near 1.0, so sleeves that
-    cropping visibly ruins came out looking safe. Wrong question. What matters
-    is not how much is discarded but whether the cut passes through something
-    continuous: an artist name spanning the sleeve survives being darkened at
-    the edges, and does not survive being sliced in half.
-
-    So measure the detail lying along the two cut lines, relative to the sleeve
-    as a whole. A cut through a wall or a sky is cheap; a cut through type is
-    not.
-    """
-    big = _cover_scaled(src)
-    a = np.asarray(big.convert("RGB"), dtype=np.float64)
-    lum = 0.299*a[:,:,0] + 0.587*a[:,:,1] + 0.114*a[:,:,2]
-    gx = np.abs(np.diff(lum, axis=1, prepend=lum[:, :1]))
-
-    w = lum.shape[1]
-    keep = int(w * EPD_WIDTH / EPD_HEIGHT)
-    side = (w - keep) // 2
-    if side < 4:
-        return 0.0
-
-    band = max(3, w // 100)          # a few pixels either side of each cut
-    cuts = np.concatenate([gx[:, side-band:side+band],
-                          gx[:, w-side-band:w-side+band]], axis=1)
-    overall = gx.mean()
-    return float(cuts.mean() / max(overall, 1e-6))
-
-
 def build(src, mode, bg_style=1, zoom=1.0):
     """Return an EPD_WIDTH x EPD_HEIGHT RGB array, before enhancement/dither."""
     src = src.convert("RGB")
@@ -201,14 +152,9 @@ def build(src, mode, bg_style=1, zoom=1.0):
         # across the top is ruined by it.
         return build(src, BLEED, bg_style, zoom=adaptive_zoom(src))
 
-    if mode in (COVER, SMART):
+    if mode == COVER:
         big = _cover_scaled(src)
-        if mode == COVER:
-            x = (big.size[0] - EPD_WIDTH) // 2
-        else:
-            col = _saliency_columns(big)
-            win = np.convolve(col, np.ones(EPD_WIDTH), mode="valid")
-            x = int(np.argmax(win))
+        x = (big.size[0] - EPD_WIDTH) // 2
         y = (big.size[1] - EPD_HEIGHT) // 2
         return np.asarray(big.crop((x, y, x + EPD_WIDTH, y + EPD_HEIGHT)), dtype=np.uint8)
 

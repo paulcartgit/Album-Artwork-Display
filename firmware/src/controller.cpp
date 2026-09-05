@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <esp_heap_caps.h>
-#include <XPowersLib.h>
 #include <WiFi.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
@@ -21,6 +20,7 @@
 #include "backoff.h"
 #include "upnp_events.h"
 #include "metadata_client.h"
+#include "power.h"
 
 // ─── Shared state (declared in app.h) ───
 AppContext  g_app = {};
@@ -184,22 +184,8 @@ void controllerSetup() {
     Wire.setClock(400000);
 
     // Power management (AXP2101) — must be before display/SD init
-    XPowersAXP2101 pmu;
-    if (pmu.begin(Wire, AXP2101_ADDR, I2C_SDA, I2C_SCL)) {
-        pmu.setDC1Voltage(3300);
-        pmu.enableDC1();
-        pmu.setALDO1Voltage(3300);
-        pmu.enableALDO1();
-        pmu.setALDO2Voltage(3300);
-        pmu.enableALDO2();
-        pmu.setALDO3Voltage(3300);
-        pmu.enableALDO3();
-        pmu.setALDO4Voltage(3300);
-        pmu.enableALDO4();
-        Serial.println("[BOOT] PMIC initialized — power rails enabled");
-    } else {
-        Serial.println("[BOOT] PMIC init failed!");
-    }
+    powerBegin();
+
     delay(100); // let rails stabilize
 
     // LED indicators

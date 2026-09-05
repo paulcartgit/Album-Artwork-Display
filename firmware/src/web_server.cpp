@@ -238,6 +238,7 @@ void webServerInit() {
         doc["reset_reason"] = (int)esp_reset_reason();
         doc["free_heap"]  = ESP.getFreeHeap();
         doc["quiet"]      = inQuietHours();
+
         if (g_app.displayHoldUntil != 0) {
             long remaining = (long)(g_app.displayHoldUntil - millis());
             doc["display_hold_sec"] = (remaining > 0) ? remaining / 1000 : 0;

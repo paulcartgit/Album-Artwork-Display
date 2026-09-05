@@ -16,6 +16,7 @@ the frame not to have moved since.
 """
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -29,7 +30,8 @@ import eink
 import calibrate_from_photo as cal
 from firmware_config import EPD_WIDTH, EPD_HEIGHT, RENDER_PROFILES
 
-DEVICE = "http://192.168.86.67"
+# Override with:  NOWPLAYING=http://192.168.1.50 python panel_probe.py
+DEVICE = os.environ.get("NOWPLAYING", "http://nowplaying.local")
 SNAP = Path(__file__).resolve().parent.parent / "tools" / "Snap.app"
 GEOM = Path("/tmp/panel_geom.json")
 OUT = Path("/tmp/compare")

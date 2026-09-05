@@ -25,5 +25,6 @@ simulator/test_*.wav
 __pycache__/
 *.pyc
 
-# Compiled helper tools
+# Compiled helper tools — build with:  swiftc -O tools/snap.swift -o tools/snap
 tools/snap
+tools/Snap.app/

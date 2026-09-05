@@ -887,7 +887,7 @@ function start(){
   timer = setInterval(() => { tick(); if(openName === 'settings') loadLog(); }, 3000);
 }
 function stop(){ if(timer) clearInterval(timer); timer = null; }
-// Don't poll a device that may be on battery while the tab is hidden.
+// No need to poll the frame while nobody is looking at this page.
 document.addEventListener('visibilitychange', () => document.hidden ? stop() : start());
 start();
 </script>
