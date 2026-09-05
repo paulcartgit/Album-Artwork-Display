@@ -19,7 +19,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 :root{
   --bg:#0a0a0b; --surface:#161618; --surface-2:#1f1f22; --surface-3:#2a2a2e;
   --line:rgba(255,255,255,.09); --line-strong:rgba(255,255,255,.16);
-  --text:#f4f4f5; --dim:#a1a1aa; --faint:#6b6b73;
+  --text:#f4f4f5; --dim:#a1a1aa; --faint:#8a8a93;
   --accent:#fafafa; --on-accent:#0a0a0b;
   --live:#4ade80; --warn:#fbbf24; --danger:#f87171;
   --r:14px; --r-sm:10px;
@@ -31,9 +31,9 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
   :root{
     --bg:#f7f7f8; --surface:#fff; --surface-2:#f0f0f2; --surface-3:#e5e5e8;
     --line:rgba(0,0,0,.08); --line-strong:rgba(0,0,0,.14);
-    --text:#18181b; --dim:#63636b; --faint:#9a9aa2;
+    --text:#18181b; --dim:#63636b; --faint:#6e6e77;
     --accent:#18181b; --on-accent:#fff;
-    --live:#16a34a; --warn:#b45309; --danger:#dc2626;
+    --live:#15803d; --warn:#b45309; --danger:#dc2626;
     --shadow:0 1px 2px rgba(0,0,0,.06),0 8px 24px rgba(0,0,0,.08);
   }
 }
@@ -49,6 +49,15 @@ body{
 button,input,select{font:inherit;color:inherit}
 button{background:none;border:0;padding:0;cursor:pointer}
 a{color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.btn:focus-visible,.tile:focus-visible,nav button:focus-visible,
+.row.tap:focus-visible,.opt:focus-visible{outline-offset:-2px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important}
+}
 
 /* ── Shell ── */
 .wrap{max-width:640px;margin:0 auto;padding:0 20px}
@@ -144,7 +153,7 @@ input[type=text],input[type=password],select{
 }
 input:focus,select:focus{border-color:var(--line-strong)}
 select{appearance:none;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23a1a1aa' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238a8a93' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
   background-repeat:no-repeat;background-position:right 13px center;padding-right:34px}
 .sw{position:relative;width:46px;height:28px;flex:none;margin-left:auto}
 .sw input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
@@ -263,6 +272,7 @@ details .body{padding:0 16px 14px}
 <section class="view active" id="v-now">
   <div class="art-wrap">
     <img class="art skeleton" id="art" alt="" hidden>
+    <span class="sr" id="artDesc" aria-live="polite"></span>
     <div class="art placeholder skeleton" id="artPlaceholder">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
         <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/>
@@ -317,7 +327,7 @@ details .body{padding:0 16px 14px}
   <div class="label">Speaker</div>
   <div class="card">
     <div class="row col">
-      <select id="fSpeaker"></select>
+      <select id="fSpeaker" aria-label="Sonos speaker"></select>
       <button class="btn" id="btnScanSonos" onclick="scanSonos()">Scan for speakers</button>
     </div>
   </div>
@@ -330,8 +340,8 @@ details .body{padding:0 16px 14px}
   </div>
   <div class="card" id="wifiPanel" hidden style="margin-top:10px">
     <div class="row col">
-      <select id="fSsid"><option value="">Select a network…</option></select>
-      <input type="password" id="fWifiPw" placeholder="Password" autocomplete="off">
+      <select id="fSsid" aria-label="Wi-Fi network"><option value="">Select a network…</option></select>
+      <input type="password" id="fWifiPw" aria-label="Wi-Fi password" placeholder="Password" autocomplete="off">
       <div class="actions">
         <button class="btn" onclick="scanWifi()" id="btnScanWifi">Scan</button>
         <button class="btn primary" onclick="saveWifi()" id="btnSaveWifi">Connect</button>
@@ -345,7 +355,7 @@ details .body{padding:0 16px 14px}
   <div class="card">
     <div class="row col">
       <span class="k">Shazam API key</span>
-      <input type="password" id="fShazam" placeholder="Not set" autocomplete="off">
+      <input type="password" id="fShazam" aria-label="Shazam API key" placeholder="Not set" autocomplete="off">
     </div>
   </div>
   <p class="hint">A RapidAPI Shazam key lets the device identify records playing through
@@ -354,30 +364,30 @@ details .body{padding:0 16px 14px}
   <div class="label">Timing</div>
   <div class="card">
     <div class="row col"><span class="k">Check Sonos every</span>
-      <div class="slider"><input type="range" id="tPoll" min="5" max="60" step="5">
+      <div class="slider"><input type="range" id="tPoll" aria-label="Sonos check interval" min="5" max="60" step="5">
         <span class="val" id="tPollV"></span></div></div>
     <div class="row col"><span class="k">Re-identify vinyl every</span>
-      <div class="slider"><input type="range" id="tVinyl" min="1" max="30">
+      <div class="slider"><input type="range" id="tVinyl" aria-label="Vinyl re-identify interval" min="1" max="30">
         <span class="val" id="tVinylV"></span></div></div>
     <div class="row col"><span class="k">Pause after failed matches</span>
-      <div class="slider"><input type="range" id="tCool" min="1" max="15">
+      <div class="slider"><input type="range" id="tCool" aria-label="Pause after failed matches" min="1" max="15">
         <span class="val" id="tCoolV"></span></div></div>
     <div class="row col"><span class="k">Rotate artwork when idle</span>
-      <div class="slider"><input type="range" id="tIdle" min="1" max="30">
+      <div class="slider"><input type="range" id="tIdle" aria-label="Idle rotation interval" min="1" max="30">
         <span class="val" id="tIdleV"></span></div></div>
   </div>
 
   <div class="label">Display</div>
   <div class="card">
     <div class="row"><span class="k">Show artist and album</span>
-      <label class="sw"><input type="checkbox" id="fTrackInfo"><span></span></label></div>
+      <label class="sw"><input type="checkbox" id="fTrackInfo" aria-label="Show artist and album on the display"><span></span></label></div>
     <div class="row col"><span class="k">Background</span>
-      <select id="fBgMode">
+      <select id="fBgMode" aria-label="Background">
         <option value="2">Automatic</option><option value="1">Blurred artwork</option>
         <option value="0">Solid colour</option></select></div>
     <div class="row col"><span class="k">Background tone</span>
-      <select id="fBgStyle"><option value="0">Darken</option><option value="1">Lighten</option></select></div>
-    <div class="row col"><span class="k">Render profile</span><select id="fProfile"></select></div>
+      <select id="fBgStyle" aria-label="Background tone"><option value="0">Darken</option><option value="1">Lighten</option></select></div>
+    <div class="row col"><span class="k">Render profile</span><select id="fProfile" aria-label="Render profile"></select></div>
   </div>
   <p class="hint">The render profile controls sharpening, contrast and how aggressively colour
   is dithered. <b>Punchy</b> suits bold graphic sleeves, <b>Soft</b> suits photographic ones.
@@ -386,7 +396,7 @@ details .body{padding:0 16px 14px}
   <div class="label">Security</div>
   <div class="card">
     <div class="row col"><span class="k">Portal password</span>
-      <input type="password" id="fPortalPw" placeholder="None" autocomplete="off"></div>
+      <input type="password" id="fPortalPw" aria-label="Portal password" placeholder="None" autocomplete="off"></div>
   </div>
   <p class="hint">Sets a password on this portal, with username <b>admin</b>. Without one,
   anyone on your network can change these settings.</p>
@@ -422,7 +432,7 @@ details .body{padding:0 16px 14px}
   <div class="label">Firmware</div>
   <div class="card">
     <div class="row col">
-      <input type="file" id="fw" accept=".bin">
+      <input type="file" id="fw" aria-label="Firmware file" accept=".bin">
       <button class="btn" onclick="upload()" id="btnUpload">Install update</button>
       <div id="fwProg" hidden><div class="bar"><i id="fwBar"></i></div>
         <div class="hint" id="fwMsg" style="margin-top:8px"></div></div>
@@ -436,7 +446,7 @@ details .body{padding:0 16px 14px}
 </main>
 
 <nav>
-  <button class="active" data-view="now" onclick="go('now')">
+  <button class="active" data-view="now" aria-current="page" onclick="go('now')">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
       <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>Now Playing</button>
   <button data-view="lib" onclick="go('lib')">
@@ -454,13 +464,13 @@ details .body{padding:0 16px 14px}
 </nav>
 
 <div id="scrim" onclick="closeSheet()"></div>
-<div class="sheet" id="sheet">
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
   <div class="grip"></div>
   <h3 id="sheetTitle"></h3>
   <p class="sub" id="sheetSub"></p>
   <div class="opts" id="sheetOpts"></div>
 </div>
-<div id="toasts"></div>
+<div id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
 
 <script>
 "use strict";
@@ -501,7 +511,11 @@ let view = 'now';
 function go(v){
   view = v;
   $$('.view').forEach(s => s.classList.toggle('active', s.id === 'v-' + v));
-  $$('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+  $$('nav button').forEach(b => {
+    const on = b.dataset.view === v;
+    b.classList.toggle('active', on);
+    if(on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
   window.scrollTo(0, 0);
   if(v === 'lib') loadLibrary();
   if(v === 'set') loadSettings();
@@ -543,6 +557,8 @@ async function tick(){
                          $('#artPlaceholder').hidden = true; };
     img.onerror = () => { img.hidden = true; $('#artPlaceholder').hidden = false; };
     img.src = d.art_url;
+    $('#artDesc').textContent = d.artist
+      ? 'Artwork for ' + d.artist + (d.album ? ', ' + d.album : '') : '';
   } else if(!d.art_url){
     lastArt = null; $('#art').hidden = true; $('#artPlaceholder').hidden = false;
   }
@@ -556,7 +572,7 @@ async function tick(){
   else if(d.next_vinyl_check_sec > 0)
     bits.push('Next vinyl check in ' + Math.ceil(d.next_vinyl_check_sec/60) + ' min');
   else if(d.next_poll_sec > 0) bits.push('Next check in ' + d.next_poll_sec + 's');
-  $('#npMeta').textContent = bits.join('');
+  $('#npMeta').textContent = bits[0] || '';
 
   $('#dIp').textContent = d.ip || '—';
   $('#dUp').textContent = fmtUptime(d.uptime || 0);
@@ -607,12 +623,22 @@ async function loadLibrary(force){
 
 function tile(i){
   const on = i.on !== false;
-  return '<div class="tile' + (on ? '' : ' off') + '" onclick="openSheet(\'' + i.f + '\')">'
+  const name = [i.a, i.al || i.t].filter(Boolean).join(' \u2014 ');
+  // data-f plus delegation, rather than interpolating a device-supplied
+  // filename into an onclick attribute nested inside string literals.
+  return '<button class="tile' + (on ? '' : ' off') + '" data-f="' + esc(i.f) + '"'
+       + ' aria-label="' + esc(name || i.f) + (on ? '' : ', excluded from rotation') + '">'
        + '<img data-src="/api/history/image?f=' + encodeURIComponent(i.f) + '" alt="">'
-       + (i.pin ? '<div class="badge"><svg viewBox="0 0 24 24" fill="currentColor">'
+       + (i.pin ? '<div class="badge"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
                 + '<path d="M16 3v6l3 3v2h-6v7l-1 1-1-1v-7H5v-2l3-3V3z"/></svg></div>' : '')
-       + '</div>';
+       + '</button>';
 }
+document.addEventListener('click', e => {
+  const t = e.target.closest('.tile[data-f]');
+  if(t) openSheet(t.dataset.f);
+  const o = e.target.closest('.opt[data-action]');
+  if(o) libAct(o.dataset.action);
+});
 
 let sheetFile = null;
 function openSheet(f){
@@ -636,14 +662,16 @@ function openSheet(f){
   $('#sheet').classList.add('show');
 }
 function opt(action, text, path, danger){
-  return '<button class="opt' + (danger ? ' danger' : '') + '" onclick="libAct(\'' + action + '\')">'
+  return '<button class="opt' + (danger ? ' danger' : '') + '" data-action="' + action + '">'
        + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
-       + 'stroke-linecap="round" stroke-linejoin="round">' + path + '</svg>' + text + '</button>';
+       + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + path + '</svg>'
+       + text + '</button>';
 }
 function closeSheet(){
   $('#scrim').classList.remove('show');
   $('#sheet').classList.remove('show');
 }
+addEventListener('keydown', e => { if(e.key === 'Escape') closeSheet(); });
 
 async function libAct(action){
   const f = sheetFile, it = libItems.find(i => i.f === f);
@@ -672,8 +700,7 @@ async function libAct(action){
 
 /* ── Settings ───────────────────────────────────────────── */
 let setLoaded = false;
-const SLIDERS = [['tPoll','s',1000],['tVinyl',' min',60000],
-                 ['tCool',' min',60000],['tIdle',' min',60000]];
+const SLIDERS = [['tPoll','s'],['tVinyl',' min'],['tCool',' min'],['tIdle',' min']];
 SLIDERS.forEach(([id, suffix]) => {
   const el = $('#' + id);
   el.addEventListener('input', () => { $('#' + id + 'V').textContent = el.value + suffix; });
