@@ -663,13 +663,43 @@ static void extendEdges(uint8_t* canvas, int w, int h, int artY0, int artH) {
             washTop[x*3]=rt/n; washTop[x*3+1]=gt/n; washTop[x*3+2]=bt/n;
             washBot[x*3]=rb/n; washBot[x*3+1]=gb/n; washBot[x*3+2]=bb/n;
         }
+
+        // Smear the wash sideways. It is sampled per column over rows that
+        // include whatever type the sleeve carries near its edge, so a column
+        // under a letter averages darker than its neighbours and the wash
+        // itself keeps a trace of the text. Blurring across x removes that
+        // while leaving the left-to-right colour change that makes the
+        // extension look like a continuation.
+        const int WASH_BLUR = 48;
+        uint8_t* tmp = (uint8_t*)malloc((size_t)w * 3);
+        if (tmp) {
+            for (uint8_t* wash : { washTop, washBot }) {
+                memcpy(tmp, wash, (size_t)w * 3);
+                for (int x = 0; x < w; x++)
+                    for (int c = 0; c < 3; c++) {
+                        int sum = 0, n2 = 0;
+                        for (int k = -WASH_BLUR; k <= WASH_BLUR; k++) {
+                            const int xx = x + k;
+                            if (xx < 0 || xx >= w) continue;
+                            sum += tmp[xx * 3 + c]; n2++;
+                        }
+                        wash[x * 3 + c] = (uint8_t)(sum / (n2 ? n2 : 1));
+                    }
+            }
+            free(tmp);
+        }
     }
 
     const int BANDS = 6;
     for (int i = 0; i < BANDS; i++) {
         float f0 = (float)i / BANDS, f1 = (float)(i + 1) / BANDS;
         int radius = (int)(10 + 30 * powf(f1, 1.2f));
-        float t = powf(f1, 0.8f);      // pull toward the flat wash with distance
+        // Reach the wash quickly. The ghost that survives is the one nearest
+        // the join, because that band kept three quarters of the mirrored
+        // content — an exponent of 0.8 only reached 24% wash in the first
+        // band. The wash is the artwork's own edge colour, so converging on
+        // it sooner improves the join rather than compromising it.
+        float t = powf(f1, 0.35f);
 
         int ty1 = artY0 - (int)(artY0 * f0), ty0 = artY0 - (int)(artY0 * f1);
         int by0 = artY1 + (int)((h - artY1) * f0), by1 = artY1 + (int)((h - artY1) * f1);
