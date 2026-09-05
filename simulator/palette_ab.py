@@ -37,7 +37,7 @@ def run(pal, files):
     out = {}
     for f in files:
         art = Image.open(f"gallery/{f}").convert("RGB")
-        canvas = fill_modes.build(art, 1, bg_style=1)
+        canvas = fill_modes.build(art, fill_modes.ADAPTIVE, bg_style=1)
         canvas = eink.enhance_for_eink(canvas, 1)
         _, idx = eink.dither(canvas, 1)
         out[f] = np.asarray(idx).copy()

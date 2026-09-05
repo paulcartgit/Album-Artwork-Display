@@ -12,6 +12,9 @@ time (see firmware_config.py) so they cannot drift.  parity_check.py asserts
 the rest.
 """
 
+import os
+import warnings
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -148,6 +151,27 @@ def build_edge_map(rgb):
 # ═══════════════════════════════════════════════════════════
 
 def dither(rgb_img, profile_index=DEFAULT_PROFILE):
+    """
+    Dither to palette indices. Runs the FIRMWARE's dither.cpp via
+    native_dither, so the simulator cannot drift from the device — the Python
+    version below was never exactly equal to it (float32 against float64
+    through the error diffusion put them ~13% of pixels apart, about the same
+    as a +/-1 level change to the input) and it is ~16x slower.
+
+    Set EINK_PYTHON_DITHER=1 to force the reference implementation.
+    """
+    if not os.environ.get("EINK_PYTHON_DITHER"):
+        try:
+            import native_dither
+            idx = native_dither.dither(rgb_img, profile_index)
+            return index_to_image(idx), idx
+        except Exception as exc:                      # toolchain missing, etc.
+            warnings.warn(f"native dither unavailable ({exc}); "
+                          f"falling back to the Python reference")
+    return dither_python(rgb_img, profile_index)
+
+
+def dither_python(rgb_img, profile_index=DEFAULT_PROFILE):
     """
     rgb_img: PIL Image or HxWx3 array.
     Returns (PIL Image rendered in pigment colours, HxW index array).

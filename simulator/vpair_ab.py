@@ -17,7 +17,7 @@ def run(pairs, files):
     out={}
     for f in files:
         art=Image.open(f"gallery/{f}").convert("RGB")
-        c=eink.enhance_for_eink(fill_modes.build(art,1,bg_style=1),1)
+        c=eink.enhance_for_eink(fill_modes.build(art, fill_modes.ADAPTIVE, bg_style=1),1)
         _,i=eink.dither(c,1); out[f]=np.asarray(i).copy()
     return out
 # Covers that must appear in every comparison, whatever the tonal sampling

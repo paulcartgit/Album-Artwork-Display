@@ -9,7 +9,7 @@ CHROMATIC = [i for i in range(len(PALETTE_RGB)) if i not in (0, 1)]
 
 
 def render(art, strength):
-    canvas = fill_modes.build(art, 1, bg_style=1)
+    canvas = fill_modes.build(art, fill_modes.ADAPTIVE, bg_style=1)
     prof = dict(eink.profile(1))
     prof["auto_level"] = strength
     lo, hi = eink.auto_level_window(canvas, strength)

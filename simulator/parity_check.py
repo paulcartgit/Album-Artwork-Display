@@ -16,6 +16,7 @@ tests assert.
 Run:  python parity_check.py
 """
 
+import pathlib
 import re
 import sys
 from pathlib import Path
@@ -38,6 +39,10 @@ def check(label, condition, detail=""):
     else:
         print(f"  FAIL {label}" + (f" — {detail}" if detail else ""))
         FAILURES.append(label)
+
+
+def read_sim(name):
+    return (pathlib.Path(__file__).resolve().parent / name).read_text()
 
 
 def read(name):
@@ -256,6 +261,34 @@ sa, sb = fmod.cut_severity(small, 1.3), fmod.cut_severity(big, 1.3)
 check("severity is resolution independent",
       sa > fmod.CUT_LIMIT and sb > fmod.CUT_LIMIT and abs(sa - sb) < 0.65 * max(sa, sb),
       f"200px={sa:.1f} 700px={sb:.1f}")
+
+
+# ═══════════════════════════════════════════════════════════
+print("\nDither implementation")
+# ═══════════════════════════════════════════════════════════
+import native_dither
+
+check("simulator runs the firmware's own dither",
+      "native_dither" in read_sim("eink.py"),
+      "eink.dither has stopped delegating to dither.cpp — the simulator is "
+      "back to reimplementing it, and can drift from the device again")
+
+_probe = np.zeros((32, 32, 3), np.uint8)
+_probe[:, :16] = (200, 60, 90)
+_probe[:, 16:] = (40, 90, 190)
+try:
+    _native = native_dither.dither(_probe, 1)
+    check("the firmware dither builds and runs on the desktop", True)
+    check("it emits only real palette indices", int(_native.max()) < EPD_COLORS,
+          f"max index {int(_native.max())}")
+    _py = eink.dither_python(_probe, 1)[1]
+    agree = float((np.asarray(_py) == _native).mean())
+    # They will never be identical: float32 in the firmware against float64
+    # here, accumulated through error diffusion. Close is the requirement.
+    check("the Python reference still broadly agrees with it", agree > 0.75,
+          f"only {agree*100:.1f}% of pixels match — the two have diverged")
+except Exception as _e:
+    check("the firmware dither builds and runs on the desktop", False, str(_e))
 
 
 # ═══════════════════════════════════════════════════════════
