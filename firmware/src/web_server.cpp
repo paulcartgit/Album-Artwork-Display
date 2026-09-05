@@ -16,6 +16,7 @@
 #include <SD_MMC.h>
 #include <WiFi.h>
 #include <Update.h>
+#include <esp_heap_caps.h>
 
 // ═══════════════════════════════════════════════════════════
 // Request-body accumulation
@@ -472,6 +473,42 @@ void webServerInit() {
             req->send(404, "application/json", "{\"error\":\"not found\"}");
         }
     });
+
+    // ─── Push a pre-dithered frame straight to the panel ───
+    // Body is exactly (EPD_WIDTH * EPD_HEIGHT) / 2 bytes of packed 4bpp palette
+    // indices, high nibble first — the same layout ditherFloydSteinberg emits.
+    // Buffered in PSRAM because it is 192 KB and the request arrives in chunks.
+    server.on("/api/display/raw", HTTP_POST,
+        [](AsyncWebServerRequest* req) {
+            if (g_req.rawFrameLen != (size_t)(EPD_WIDTH * EPD_HEIGHT) / 2) {
+                req->send(400, "application/json",
+                          "{\"error\":\"wrong frame size\"}");
+                return;
+            }
+            g_req.showRaw = true;
+            req->send(200, "application/json", "{\"ok\":true}");
+        },
+        nullptr,
+        [](AsyncWebServerRequest* req, uint8_t* data, size_t len,
+           size_t index, size_t total) {
+            if (!requireAuth(req)) return;
+            const size_t expected = (size_t)(EPD_WIDTH * EPD_HEIGHT) / 2;
+            if (index == 0) {
+                if (total != expected) {
+                    g_req.rawFrameLen = 0;
+                    return;
+                }
+                if (!g_req.rawFrame) {
+                    g_req.rawFrame = (uint8_t*)heap_caps_malloc(expected, MALLOC_CAP_SPIRAM);
+                }
+                g_req.rawFrameLen = 0;
+                if (!g_req.rawFrame) return;
+            }
+            if (!g_req.rawFrame || index + len > expected) return;
+            memcpy(g_req.rawFrame + index, data, len);
+            if (index + len == total) g_req.rawFrameLen = total;
+        }
+    );
 
     // ─── Display one specific history entry ───
     // Renders through the full pipeline and holds it, so a fixed set of covers

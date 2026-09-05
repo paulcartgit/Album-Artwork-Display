@@ -542,3 +542,82 @@ then put the same covers on the panel and photograph them under the light the
 frame actually lives in. Comparing against the *same* covers each time is what
 makes slow, subtle regressions visible; comparing against whatever happens to be
 playing does not.
+
+
+---
+
+## What Testing on the Real Panel Showed
+
+The rendering was tested against real album artwork on the actual device, by
+pushing pre-dithered frames straight to the panel (`/api/display/raw`) and
+photographing the result. Frames carry black and white reference patches beside
+the artwork, and the same image is tiled at several positions.
+
+Both details matter. E-ink is **reflective**, so a photograph records pigment
+reflectance multiplied by whatever light is falling on the panel — and the panel
+(facing a window) is lit differently from the desk around it, so white-balancing
+against the surroundings corrects for the wrong illuminant. References have to
+be *on the panel*. Tiling then shows whether the panel or the lighting varies
+across its surface. It doesn't: six tiles of the same cover photographed
+consistently.
+
+### The dither integrates to neutral
+
+The most important measurement. A flat grey, dithered and then integrated back
+(which is what the eye and the camera both do at viewing distance), comes out
+neutral to within 1–2 levels:
+
+| Source grey | Integrated result | Cast |
+|---|---|---|
+| 30 | (29, 29, 30) | 1 |
+| 50 | (50, 50, 51) | 1 |
+| 70 | (70, 70, 70) | 0 |
+| 100 | (99, 99, 100) | 1 |
+
+So when the panel shows a colour cast in greys — and it does, around 13 levels
+in the dark end — **the dithering is not the cause**. The error is in the
+calibrated palette: the pigment values the dither aims at do not quite match
+what the panel produces. That points back at calibration, not at the algorithm.
+
+Raising the shadow chroma-suppression threshold (currently luminance 8) was
+tested as a fix and made neutrality slightly *worse* at every level. Left alone.
+
+### A real asymmetry that turned out not to matter
+
+The chroma penalty is one-directional. It stops achromatic entries stealing
+chromatic pixels, but nothing stops the reverse: for a neutral mid-grey,
+
+| Entry | L\* | Chroma | Distance |
+|---|---|---|---|
+| **Green** | 39.3 | 21.9 | **682** ← wins |
+| White | 86.7 | 3.2 | 1110 |
+| Black | 4.7 | 1.2 | 2387 |
+
+Green wins on lightness alone, and a mid-grey patch dithers to 68% chromatic
+pigment. A symmetric penalty was implemented and tested.
+
+Two findings came out of it, both worth keeping:
+
+1. **Penalising on the current pixel's chroma does nothing.** Error diffusion
+   makes every pixel chromatic within a step or two, so the penalty never
+   engages. It has to key on the *source* pixel's chroma. Done that way it
+   works cleanly: a mid-grey drops from 68% to 36% chromatic while skin (75%)
+   and a saturated blue (100%) are untouched.
+
+2. **It does not matter on real artwork.** Across 24 covers from the device's
+   own history, the change shifted more than 8% of pixels on exactly one, and
+   averaged 1.8 percentage points. On the panel, six strengths side by side were
+   visually indistinguishable.
+
+So it was not shipped, and the implementation was removed rather than left
+sitting in the code as an unused option. The reasoning is recorded here because
+the asymmetry is real and someone will notice it again.
+
+### The speckle is doing useful work
+
+The obvious reading of coloured speckle in a neutral area is that something is
+wrong. It isn't: with six pigments, an intermediate grey is *made* from a
+balanced mix of chromatic pixels that integrates to neutral, and the neutrality
+table above shows it does so almost exactly. Restricting the dither toward
+black and white makes the remaining chromatic choices cluster on green — fewer
+coloured pixels, more visible tint.

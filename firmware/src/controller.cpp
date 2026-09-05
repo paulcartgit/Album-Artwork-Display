@@ -381,6 +381,18 @@ static void serviceRequests() {
         return;
     }
 
+    if (g_req.showRaw) {
+        g_req.showRaw = false;
+        if (g_req.rawFrame && g_req.rawFrameLen == (EPD_WIDTH * EPD_HEIGHT) / 2) {
+            activityLog("Displaying pushed frame");
+            displayShowImage(g_req.rawFrame);
+            holdDisplay();
+        } else {
+            activityLogf("Pushed frame wrong size (%u)", (unsigned)g_req.rawFrameLen);
+        }
+        return;
+    }
+
     if (g_req.showHistory) {
         g_req.showHistory = false;
         String path = String("/history/") + g_req.showHistoryFile;

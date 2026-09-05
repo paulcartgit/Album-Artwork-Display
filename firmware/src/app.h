@@ -71,6 +71,14 @@ struct AppRequests {
     // a fixed set of covers rather than whatever happens to be playing.
     volatile bool showHistory;
     char showHistoryFile[24];
+
+    // A pre-dithered 4bpp frame pushed straight from a host, bypassing the
+    // pipeline. Lets test composites (tiled artwork, reference patches) be
+    // built off-device, and lets the simulator's own output be put on the panel
+    // to check the port against the real thing.
+    volatile bool showRaw;
+    uint8_t* rawFrame;
+    volatile size_t rawFrameLen;
     volatile bool forceListen;
     volatile bool reboot;
 };
