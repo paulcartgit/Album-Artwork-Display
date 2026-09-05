@@ -125,7 +125,15 @@ void displayShowImage(const uint8_t* packedBuffer) {
 
     // Keep a copy so the portal can serve exactly what the panel shows.
     size_t packedSize = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
-    if (!g_lastFrame) g_lastFrame = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
+    if (!g_lastFrame) {
+        g_lastFrame = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
+        // Silence here cost an evening: when this allocation lost a race for
+        // PSRAM the guard below simply skipped buildPng(), so the portal
+        // served 404 and the log said nothing at all.
+        if (!g_lastFrame)
+            activityLogf("Frame copy alloc failed (%u free PSRAM) — portal has no image",
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    }
     if (g_lastFrame) { memcpy(g_lastFrame, packedBuffer, packedSize); buildPng(); }
 
     memset(native, 0x11, nativeSize); // white fill (index 1)

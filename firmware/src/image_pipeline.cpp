@@ -314,13 +314,16 @@ static float chooseLightnessScale(const uint8_t* rgb, int w, int h,
     const int dw = w / TONEMAP_TRIAL_DIV, dh = h / TONEMAP_TRIAL_DIV;
     const size_t npix = (size_t)dw * dh;
 
+    // cand is reused to hold the unpacked render: the candidate pixels are
+    // finished with the moment they have been dithered. One 280 KB buffer
+    // fewer matters — the display's own frame copy competes for this PSRAM,
+    // and when it lost, the portal silently served no image at all.
     uint8_t* small  = (uint8_t*)heap_caps_malloc(npix * 3, MALLOC_CAP_SPIRAM);
     uint8_t* cand   = (uint8_t*)heap_caps_malloc(npix * 3, MALLOC_CAP_SPIRAM);
-    uint8_t* shown  = (uint8_t*)heap_caps_malloc(npix * 3, MALLOC_CAP_SPIRAM);
     uint8_t* packed = (uint8_t*)heap_caps_malloc(npix / 2 + 1, MALLOC_CAP_SPIRAM);
-    if (!small || !cand || !shown || !packed) {
-        heap_caps_free(small); heap_caps_free(cand);
-        heap_caps_free(shown); heap_caps_free(packed);
+    uint8_t* shown  = cand;
+    if (!small || !cand || !packed) {
+        heap_caps_free(small); heap_caps_free(cand); heap_caps_free(packed);
         Serial.println("[Pipeline] Tone-map alloc failed, leaving lightness alone");
         return 1.0f;
     }
@@ -350,8 +353,7 @@ static float chooseLightnessScale(const uint8_t* rgb, int w, int h,
         if (k == 0 || score < bestScore) { bestScore = score; best = TONEMAP_SCALE[k]; }
     }
 
-    heap_caps_free(small); heap_caps_free(cand);
-    heap_caps_free(shown); heap_caps_free(packed);
+    heap_caps_free(small); heap_caps_free(cand); heap_caps_free(packed);
     Serial.printf("[Pipeline] tone map chose x%.2f\n", best);
     return best;
 }

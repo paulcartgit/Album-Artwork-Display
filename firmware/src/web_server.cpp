@@ -238,6 +238,7 @@ void webServerInit() {
         doc["refreshes"]  = displayRefreshCount();
         doc["reset_reason"] = (int)esp_reset_reason();
         doc["free_heap"]  = ESP.getFreeHeap();
+        doc["free_psram"] = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         doc["quiet"]      = inQuietHours();
 
         if (g_app.displayHoldUntil != 0) {
