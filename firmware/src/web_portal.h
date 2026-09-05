@@ -85,7 +85,11 @@ button{background:none;border:0;padding:0;cursor:pointer}
 
 /* ── The frame: the hero ── */
 .stage{padding:14px 0 0}
-.frame{position:relative;display:block;width:100%;aspect-ratio:480/800;max-height:70vh;margin:0 auto;
+/* Constrain the WIDTH and let aspect-ratio derive the height. Clamping the
+   height with max-height while width stayed at 100% simply broke the ratio —
+   the frame rendered nearly square on a short viewport. 0.6 is 480/800. */
+.frame{position:relative;display:block;width:100%;max-width:min(100%, 60vh);
+  aspect-ratio:480/800;margin:0 auto;
   padding:0;border:0;cursor:pointer;
   border-radius:var(--r);overflow:hidden;background:var(--surface-2);
   box-shadow:0 2px 6px rgba(0,0,0,.35),0 18px 50px rgba(0,0,0,.4);
