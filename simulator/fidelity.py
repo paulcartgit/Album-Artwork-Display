@@ -32,20 +32,46 @@ def _blocks(a, n=BLOCK):
     return a.reshape(h // n, n, w // n, n, 3).mean(axis=(1, 3))
 
 
-def score(source_rgb, render_rgb):
+def _adapt(ls, lr):
+    """
+    Best global lightness fit of the render to the source.
+
+    A viewer adapts to how bright the panel is. Its white is a dull grey, so
+    every render is dimmer than the artwork, and a metric that charges for
+    that charges the same amount however good the picture is — it made Help!,
+    which is almost purely a uniform dimming and looks fine, score worse than
+    covers with visible hue faults. Fit and remove one global gain and offset
+    on L*, the way adaptation does, and what is left is the error the eye
+    actually keeps seeing.
+    """
+    x, y = lr[:, 0], ls[:, 0]
+    n = len(x)
+    if n < 2 or np.allclose(x, x[0]):
+        return lr
+    gain, offset = np.polyfit(x, y, 1)
+    gain = float(np.clip(gain, 0.5, 2.0))       # a fit, not a rescue
+    out = lr.copy()
+    out[:, 0] = np.clip(x * gain + offset, 0, 100)
+    return out
+
+
+def score(source_rgb, render_rgb, adapt=True):
     """source_rgb and render_rgb must already be the same size."""
     s = _blocks(np.asarray(source_rgb, dtype=np.float64))
     r = _blocks(np.asarray(render_rgb, dtype=np.float64))
 
     ls = eink.rgb_to_lab(s.reshape(-1, 3))
     lr = eink.rgb_to_lab(r.reshape(-1, 3))
+    lr_raw = lr
+    if adapt:
+        lr = _adapt(ls, lr)
 
     dE = np.sqrt(((ls - lr) ** 2).sum(axis=1))
 
     # Hue angle, weighted by how colourful the SOURCE is: a hue error in a
     # near-grey block is meaningless, one in saturated hair is the whole story.
     cs = np.sqrt(ls[:, 1] ** 2 + ls[:, 2] ** 2)
-    cr = np.sqrt(lr[:, 1] ** 2 + lr[:, 2] ** 2)
+    cr = np.sqrt(lr_raw[:, 1] ** 2 + lr_raw[:, 2] ** 2)
     hs = np.degrees(np.arctan2(ls[:, 2], ls[:, 1]))
     hr = np.degrees(np.arctan2(lr[:, 2], lr[:, 1]))
     dh = np.abs((hs - hr + 180.0) % 360.0 - 180.0)
