@@ -3,6 +3,9 @@
 #include <esp_heap_caps.h>
 #include <XPowersLib.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h>
+#include <esp_system.h>
+#include <ctime>
 
 #include "controller.h"
 #include "app.h"
@@ -42,6 +45,29 @@ static const int SONOS_UNREACHABLE_BEFORE_REDISCOVER = 3;
 static volatile bool g_buttonReIdentify = false;
 static void IRAM_ATTR onKeyPress() {
     g_buttonReIdentify = true;
+}
+
+// ─── Panel care ───
+
+// Quiet hours: leave the panel alone overnight. E-ink holds its image with no
+// power, so this costs nothing to look at and halves the refresh count over the
+// life of the frame.
+bool inQuietHours() {
+    if (g_app.settings.quiet_start_hour == g_app.settings.quiet_end_hour) return false;
+    time_t now = time(nullptr);
+    if (now < 1600000000) return false;          // clock not set yet
+    int hour = (int)(((now / 3600) + g_app.settings.utc_offset_hours) % 24 + 24) % 24;
+    int a = g_app.settings.quiet_start_hour, b = g_app.settings.quiet_end_hour;
+    return (a < b) ? (hour >= a && hour < b)     // e.g. 01:00-07:00
+                   : (hour >= a || hour < b);    // wraps midnight, e.g. 23:00-07:00
+}
+
+// Refuse to repaint too soon. Without this, skipping through a playlist
+// repaints on every track, and each full refresh is 20-25s of panel wear.
+static bool refreshTooSoon() {
+    unsigned long last = displayLastRefreshMs();
+    if (last == 0) return false;
+    return (millis() - last) < g_app.settings.min_refresh_ms;
 }
 
 // Escalating cooldown duration based on the current level
@@ -191,8 +217,25 @@ void controllerSetup() {
     webServerInit();
 
     // ── Ready ──
+    // ── Watchdog ──
+    // The loop blocks for the whole panel refresh, so the timeout has to clear
+    // that comfortably. Without one, a wedged I2C bus or a hung SD write leaves
+    // the frame dead until someone unplugs it.
+    esp_task_wdt_config_t wdt = {
+        .timeout_ms = WATCHDOG_TIMEOUT_S * 1000,
+        .idle_core_mask = 0,
+        .trigger_panic = true
+    };
+    if (esp_task_wdt_reconfigure(&wdt) == ESP_OK || esp_task_wdt_init(&wdt) == ESP_OK) {
+        esp_task_wdt_add(NULL);
+        Serial.printf("[BOOT] Watchdog armed (%ds)\n", WATCHDOG_TIMEOUT_S);
+    } else {
+        Serial.println("[BOOT] Watchdog init failed");
+    }
+
     g_app.state = STATE_IDLE;
     digitalWrite(LED_GREEN, HIGH);
+    Serial.printf("[BOOT] Reset reason: %d\n", (int)esp_reset_reason());
     Serial.println("[BOOT] Ready — entering main loop");
     displayShowMessage("Ready\nnowplaying.local");
     delay(3000);
@@ -200,6 +243,8 @@ void controllerSetup() {
 
 // ═══════════════════════════════════════════════════════════
 void controllerLoop() {
+    esp_task_wdt_reset();
+
     if (g_app.state == STATE_ERROR) {
         delay(10000);
         return;
@@ -248,6 +293,21 @@ void controllerLoop() {
         resetVinylBackoff();
         g_app.lastPollTime = 0; // force immediate poll
         activityLog("Button pressed → re-identifying vinyl");
+    }
+
+    // Overnight, leave the panel alone entirely.
+    if (inQuietHours()) {
+        static bool announced = false;
+        if (!announced) {
+            activityLogf("Quiet hours (%02d:00-%02d:00) — display paused",
+                         g_app.settings.quiet_start_hour, g_app.settings.quiet_end_hour);
+            announced = true;
+        }
+        delay(1000);
+        return;
+    } else {
+        static bool wasQuiet = false;
+        if (wasQuiet) { activityLog("Quiet hours ended"); wasQuiet = false; }
     }
 
     // A test or calibration pattern is on screen — leave it alone.
@@ -547,6 +607,13 @@ static void handleDigital(const SonosTrackInfo& track) {
         return;
     }
 
+    if (refreshTooSoon()) {
+        activityLogf("Skipping repaint — panel refreshed %lus ago (floor %lus)",
+                     (millis() - displayLastRefreshMs()) / 1000,
+                     (unsigned long)g_app.settings.min_refresh_ms / 1000);
+        return;
+    }
+
     activityLog("Downloading artwork...");
     const char* overlayArtist = g_app.settings.show_track_info ? track.artist.c_str() : nullptr;
     const char* overlayAlbum  = g_app.settings.show_track_info ? track.album.c_str()  : nullptr;
@@ -577,6 +644,7 @@ static void handlePlaying() {
 static void handleIdle() {
     unsigned long now = millis();
     if (g_lastIdleSwap != 0 && (now - g_lastIdleSwap) < g_app.settings.idle_gallery_ms) return;
+    if (refreshTooSoon()) return;
     g_lastIdleSwap = now;
 
     showFallbackImage();

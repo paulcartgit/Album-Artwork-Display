@@ -66,6 +66,15 @@
 #define VINYL_RETRY_DELAY_MS        15000       // 15s between no-match retries
 #define VINYL_MAX_RETRIES           3           // retries before entering cooldown (first cycle)
 #define IDLE_GALLERY_INTERVAL_MS    300000      // 5 min — rotate gallery images when idle
+
+// ─── Panel care ───
+// Spectra 6 panels have a finite refresh life and each full update takes 20-25s.
+// Skipping quickly through a playlist would otherwise repaint on every track.
+#define MIN_REFRESH_INTERVAL_MS     45000       // 45s floor between refreshes
+
+// The main loop blocks for the whole panel refresh, so the watchdog has to
+// tolerate that plus a slow artwork download.
+#define WATCHDOG_TIMEOUT_S          90
 #define DISPLAY_HOLD_MS             1800000     // 30 min — keep a test/calibration pattern on screen
 
 // ─── 6-Color Palette (calibrated to GDEP073E01 actual pigment appearance) ───
@@ -127,12 +136,8 @@ enum FillMode {
     FILL_COVER    = 3   // always fill completely, cropping whatever it takes
 };
 
-// Enlarging beyond this covers the panel outright (800/480).
-#define FILL_MAX_ZOOM   1.6667f
-// Peak detail allowed along the crop lines, relative to the sleeve overall,
-// before adaptive stops enlarging. Calibrated against real sleeves: type
-// running across a cover scores 27-42, photographic sleeves 2-6.
-#define FILL_CUT_LIMIT  7.0f
+// Zoom limits and the crop-severity threshold live in fill_policy.h,
+// which is unit-tested.
 
 inline const RenderProfile& renderProfile(uint8_t id) {
     return RENDER_PROFILES[(id < PROFILE_COUNT) ? id : PROFILE_NATURAL];
@@ -164,6 +169,10 @@ struct Settings {
     uint8_t bg_style;        // 0 = darken background, 1 = wash out (lighten)
     uint8_t render_profile;  // RenderProfileId — 1 (Natural) by default
     uint8_t fill_mode;       // FillMode — how artwork fills the portrait panel
+    uint32_t min_refresh_ms; // floor between panel refreshes (protects the panel)
+    uint8_t quiet_start_hour;// local hour to stop refreshing (0-23)
+    uint8_t quiet_end_hour;  // local hour to resume (equal values = never quiet)
+    int8_t  utc_offset_hours;// for quiet hours; NTP gives us UTC
     // Web portal access control (empty password = no auth)
     char portal_password[64];
 };

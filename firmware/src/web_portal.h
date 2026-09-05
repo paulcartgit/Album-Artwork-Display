@@ -103,6 +103,11 @@ header.scrolled{border-bottom-color:var(--line)}
   background:linear-gradient(90deg,var(--surface-2) 25%,var(--surface-3) 50%,var(--surface-2) 75%);
   background-size:200% 100%;animation:shimmer 1.4s linear infinite
 }
+.seg{display:flex;gap:2px;background:var(--surface-2);border:1px solid var(--line);
+  border-radius:9px;padding:2px;margin:0 auto 14px;width:fit-content}
+.segbtn{padding:6px 14px;border-radius:7px;font-size:13px;color:var(--dim);
+  transition:background .15s var(--ease),color .15s var(--ease)}
+.segbtn.active{background:var(--surface-3);color:var(--text)}
 .track{text-align:center;margin-bottom:24px;min-height:76px}
 .track h1{font-size:22px;font-weight:600;letter-spacing:-.02em;margin:0 0 4px;line-height:1.25}
 .track p{margin:0;color:var(--dim);font-size:15px}
@@ -270,6 +275,10 @@ details .body{padding:0 16px 14px}
 
 <!-- ══ NOW PLAYING ══ -->
 <section class="view active" id="v-now">
+  <div class="seg" role="group" aria-label="Artwork view">
+    <button class="segbtn active" id="segPanel" onclick="setArtView('panel')">On the display</button>
+    <button class="segbtn" id="segSource" onclick="setArtView('source')">Source</button>
+  </div>
   <div class="art-wrap">
     <img class="art skeleton" id="art" alt="" hidden>
     <span class="sr" id="artDesc" aria-live="polite"></span>
@@ -406,6 +415,27 @@ details .body{padding:0 16px 14px}
   is dithered. <b>Punchy</b> suits bold graphic sleeves, <b>Soft</b> suits photographic ones.
   Changes apply to the next artwork.</p>
 
+  <div class="label">Panel care</div>
+  <div class="card">
+    <div class="row col"><span class="k">Minimum time between repaints</span>
+      <div class="slider"><input type="range" id="tMinRef" min="0" max="180" step="15"
+        aria-label="Minimum time between repaints">
+        <span class="val" id="tMinRefV"></span></div></div>
+    <div class="row col"><span class="k">Quiet hours</span>
+      <div class="slider">
+        <select id="fQuietStart" aria-label="Quiet hours start"></select>
+        <select id="fQuietEnd" aria-label="Quiet hours end"></select>
+      </div></div>
+    <div class="row col"><span class="k">Hours ahead of UTC</span>
+      <div class="slider"><input type="range" id="tUtc" min="-12" max="14" step="1"
+        aria-label="Hours ahead of UTC">
+        <span class="val" id="tUtcV"></span></div></div>
+  </div>
+  <p class="hint">Each full repaint takes 20&ndash;25 seconds and e-ink panels have a finite
+  refresh life, so skipping through a playlist would otherwise repaint on every track. During
+  quiet hours the display is left alone entirely &mdash; e-ink holds its image with no power.
+  Set both to the same hour to disable.</p>
+
   <div class="label">Security</div>
   <div class="card">
     <div class="row col"><span class="k">Portal password</span>
@@ -426,6 +456,9 @@ details .body{padding:0 16px 14px}
     <div class="row"><span class="k">Address</span><span class="v" id="dIp">—</span></div>
     <div class="row"><span class="k">Uptime</span><span class="v" id="dUp">—</span></div>
     <div class="row"><span class="k">State</span><span class="v" id="dState">—</span></div>
+    <div class="row"><span class="k">Panel refreshes</span><span class="v" id="dRefresh">—</span></div>
+    <div class="row"><span class="k">Free memory</span><span class="v" id="dHeap">—</span></div>
+    <div class="row"><span class="k">Last restart</span><span class="v" id="dReset">—</span></div>
   </div>
 
   <div class="label">Diagnostics</div>
@@ -540,7 +573,35 @@ addEventListener('scroll', () => {
 /* ── Now Playing ────────────────────────────────────────── */
 const STATE_TEXT = {BOOT:'Starting', IDLE:'Idle', DIGITAL:'Playing', VINYL:'Vinyl',
                     ERROR:'Error', SETUP:'Setup'};
-let lastArt = null;
+// esp_reset_reason() values
+const RESET = {1:'Power on', 3:'Software restart', 4:'Watchdog (panic)',
+               5:'Interrupt watchdog', 6:'Task watchdog', 7:'Watchdog',
+               8:'Deep sleep', 9:'Brownout', 12:'CPU reset'};
+let lastArt = null, artView = 'panel', panelSeq = 0;
+
+// The source artwork says nothing about how it actually rendered — the dither,
+// the crop, the fill decision. The device can hand back the exact frame on the
+// panel, so show that by default and keep the original a tap away.
+function setArtView(v){
+  artView = v;
+  $('#segPanel').classList.toggle('active', v === 'panel');
+  $('#segSource').classList.toggle('active', v === 'source');
+  lastArt = null;
+  refreshArt(true);
+}
+
+function refreshArt(force){
+  const img = $('#art');
+  if(artView === 'panel'){
+    const url = '/api/display/current.bmp?v=' + panelSeq;
+    if(!force && img.dataset.shown === url) return;
+    img.dataset.shown = url;
+    img.onload = () => { img.hidden = false; img.classList.remove('skeleton');
+                         $('#artPlaceholder').hidden = true; };
+    img.onerror = () => { img.hidden = true; $('#artPlaceholder').hidden = false; };
+    img.src = url;
+  }
+}
 
 function fmtUptime(s){
   const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
@@ -563,7 +624,15 @@ async function tick(){
   $('#npArtist').textContent = d.artist || ' ';
   $('#npAlbum').textContent  = d.album  || ' ';
 
-  if(d.art_url && d.art_url !== lastArt){
+  if(artView === 'panel'){
+    // Only refetch when the panel has actually repainted.
+    if(d.refreshes !== undefined && d.refreshes !== panelSeq){
+      panelSeq = d.refreshes;
+      refreshArt(true);
+    } else if(!$('#art').dataset.shown){
+      refreshArt(true);
+    }
+  } else if(d.art_url && d.art_url !== lastArt){
     lastArt = d.art_url;
     const img = $('#art');
     img.onload = () => { img.hidden = false; img.classList.remove('skeleton');
@@ -572,7 +641,7 @@ async function tick(){
     img.src = d.art_url;
     $('#artDesc').textContent = d.artist
       ? 'Artwork for ' + d.artist + (d.album ? ', ' + d.album : '') : '';
-  } else if(!d.art_url){
+  } else if(artView === 'source' && !d.art_url){
     lastArt = null; $('#art').hidden = true; $('#artPlaceholder').hidden = false;
   }
 
@@ -589,7 +658,10 @@ async function tick(){
 
   $('#dIp').textContent = d.ip || '—';
   $('#dUp').textContent = fmtUptime(d.uptime || 0);
-  $('#dState').textContent = STATE_TEXT[st] || st;
+  $('#dState').textContent = (STATE_TEXT[st] || st) + (d.quiet ? ' · quiet hours' : '');
+  if(d.refreshes !== undefined) $('#dRefresh').textContent = d.refreshes.toLocaleString();
+  if(d.free_heap !== undefined) $('#dHeap').textContent = Math.round(d.free_heap/1024) + ' KB';
+  if(d.reset_reason !== undefined) $('#dReset').textContent = RESET[d.reset_reason] || ('code ' + d.reset_reason);
 }
 
 async function loadLog(){
@@ -713,7 +785,8 @@ async function libAct(action){
 
 /* ── Settings ───────────────────────────────────────────── */
 let setLoaded = false;
-const SLIDERS = [['tPoll','s'],['tVinyl',' min'],['tCool',' min'],['tIdle',' min']];
+const SLIDERS = [['tPoll','s'],['tVinyl',' min'],['tCool',' min'],['tIdle',' min'],
+                 ['tMinRef','s'],['tUtc','h']];
 SLIDERS.forEach(([id, suffix]) => {
   const el = $('#' + id);
   el.addEventListener('input', () => { $('#' + id + 'V').textContent = el.value + suffix; });
@@ -746,6 +819,16 @@ async function loadSettings(force){
 
     $('#fTrackInfo').checked = !!d.show_track_info;
     $('#fFill').value    = d.fill_mode !== undefined ? d.fill_mode : 1;
+    set('tMinRef', Math.round((d.min_refresh_ms || 45000)/1000), 's');
+    set('tUtc', d.utc_offset_hours || 0, 'h');
+    for(const id of ['fQuietStart','fQuietEnd']){
+      const sel = $('#' + id);
+      if(!sel.options.length)
+        sel.innerHTML = Array.from({length:24}, (_,i) =>
+          '<option value="' + i + '">' + String(i).padStart(2,'0') + ':00</option>').join('');
+    }
+    $('#fQuietStart').value = d.quiet_start_hour || 0;
+    $('#fQuietEnd').value   = d.quiet_end_hour || 0;
     $('#fBgMode').value  = d.bg_mode !== undefined ? d.bg_mode : 2;
     $('#fBgStyle').value = d.bg_style !== undefined ? d.bg_style : 0;
 
@@ -830,6 +913,10 @@ async function saveSettings(){
     idle_gallery_ms: +$('#tIdle').value * 60000,
     show_track_info: $('#fTrackInfo').checked,
     fill_mode: +$('#fFill').value,
+    min_refresh_ms: +$('#tMinRef').value * 1000,
+    quiet_start_hour: +$('#fQuietStart').value,
+    quiet_end_hour: +$('#fQuietEnd').value,
+    utc_offset_hours: +$('#tUtc').value,
     bg_mode: +$('#fBgMode').value,
     bg_style: +$('#fBgStyle').value,
     render_profile: +($('#fProfile').value || 1)

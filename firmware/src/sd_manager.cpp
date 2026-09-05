@@ -16,6 +16,58 @@ bool sdInit() {
     if (!SD_MMC.exists("/history")) {
         SD_MMC.mkdir("/history");
     }
+
+    // Recover from a power cut between removing the old file and renaming the
+    // new one: the temporary is complete, so promote it.
+    static const char* ATOMIC[] = {"/config.json", "/settings.json",
+                                   "/history/index.json"};
+    for (const char* path : ATOMIC) {
+        String tmp = String(path) + ".tmp";
+        if (!SD_MMC.exists(tmp)) continue;
+        if (SD_MMC.exists(path)) {
+            SD_MMC.remove(tmp);        // the real file survived; drop the leftover
+        } else {
+            Serial.printf("[SD] Recovering %s from interrupted write\n", path);
+            SD_MMC.rename(tmp, path);
+        }
+    }
+    return true;
+}
+
+// ─── Atomic file replacement ───
+// FILE_WRITE truncates the target the moment it opens. Lose power during the
+// write — and the history index is rewritten on every track change — and the
+// file is gone, taking the whole library and every pin with it. Write to a
+// temporary alongside it, flush, then swap: a failure leaves the previous file
+// completely intact.
+static bool sdWriteJsonAtomic(const char* path, const JsonDocument& doc) {
+    String tmp = String(path) + ".tmp";
+    SD_MMC.remove(tmp);
+
+    File f = SD_MMC.open(tmp, FILE_WRITE);
+    if (!f) {
+        Serial.printf("[SD] Cannot open %s\n", tmp.c_str());
+        return false;
+    }
+    size_t written = serializeJson(doc, f);
+    f.flush();
+    size_t size = f.size();
+    f.close();
+
+    // A short write means the card filled up or failed; keep the old file.
+    if (written == 0 || size != written) {
+        Serial.printf("[SD] Short write on %s (%u of %u) — keeping previous\n",
+                      tmp.c_str(), (unsigned)size, (unsigned)written);
+        SD_MMC.remove(tmp);
+        return false;
+    }
+
+    SD_MMC.remove(path);
+    if (!SD_MMC.rename(tmp, path)) {
+        Serial.printf("[SD] Rename %s failed\n", tmp.c_str());
+        SD_MMC.remove(tmp);
+        return false;
+    }
     return true;
 }
 
@@ -24,13 +76,7 @@ bool sdWriteWifiConfig(const WifiConfig& cfg) {
     doc["ssid"]     = cfg.ssid;
     doc["password"] = cfg.password;
 
-    File f = SD_MMC.open("/config.json", FILE_WRITE);
-    if (!f) {
-        Serial.println("[SD] Failed to write config.json");
-        return false;
-    }
-    serializeJson(doc, f);
-    f.close();
+    if (!sdWriteJsonAtomic("/config.json", doc)) return false;
     Serial.println("[SD] config.json written");
     return true;
 }
@@ -66,6 +112,10 @@ bool sdReadSettings(Settings& settings) {
     settings.bg_style = 0; // darken
     settings.render_profile = PROFILE_NATURAL;
     settings.fill_mode = FILL_ADAPTIVE;
+    settings.min_refresh_ms = MIN_REFRESH_INTERVAL_MS;
+    settings.quiet_start_hour = 0;
+    settings.quiet_end_hour = 0;      // equal = quiet hours disabled
+    settings.utc_offset_hours = 0;
 
     File f = SD_MMC.open("/settings.json", FILE_READ);
     if (!f) return false;
@@ -97,6 +147,10 @@ bool sdReadSettings(Settings& settings) {
     settings.render_profile = doc["render_profile"] | (uint8_t)PROFILE_NATURAL;
     settings.fill_mode = doc["fill_mode"] | (uint8_t)FILL_ADAPTIVE;
     if (settings.fill_mode > FILL_COVER) settings.fill_mode = FILL_ADAPTIVE;
+    settings.min_refresh_ms = doc["min_refresh_ms"] | (uint32_t)MIN_REFRESH_INTERVAL_MS;
+    settings.quiet_start_hour = doc["quiet_start_hour"] | 0;
+    settings.quiet_end_hour = doc["quiet_end_hour"] | 0;
+    settings.utc_offset_hours = doc["utc_offset_hours"] | 0;
     if (settings.render_profile >= PROFILE_COUNT) settings.render_profile = PROFILE_NATURAL;
     strlcpy(settings.portal_password, doc["portal_password"] | "", sizeof(settings.portal_password));
     return true;
@@ -116,13 +170,13 @@ bool sdWriteSettings(const Settings& settings) {
     doc["bg_style"] = settings.bg_style;
     doc["render_profile"] = settings.render_profile;
     doc["fill_mode"] = settings.fill_mode;
+    doc["min_refresh_ms"] = settings.min_refresh_ms;
+    doc["quiet_start_hour"] = settings.quiet_start_hour;
+    doc["quiet_end_hour"] = settings.quiet_end_hour;
+    doc["utc_offset_hours"] = settings.utc_offset_hours;
     doc["portal_password"] = settings.portal_password;
 
-    File f = SD_MMC.open("/settings.json", FILE_WRITE);
-    if (!f) return false;
-    serializeJson(doc, f);
-    f.close();
-    return true;
+    return sdWriteJsonAtomic("/settings.json", doc);
 }
 
 bool sdFileExists(const char* path) {
@@ -186,11 +240,7 @@ static int historyPruneTarget(JsonArray arr) {
 }
 
 static bool writeIndex(const JsonDocument& doc) {
-    File f = SD_MMC.open(HISTORY_INDEX, FILE_WRITE);
-    if (!f) return false;
-    serializeJson(doc, f);
-    f.close();
-    return true;
+    return sdWriteJsonAtomic(HISTORY_INDEX, doc);
 }
 
 bool sdHistorySave(const char* artist, const char* title, const char* album,

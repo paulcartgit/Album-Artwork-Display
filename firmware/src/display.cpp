@@ -7,6 +7,7 @@
 #include <GxEPD2_7C.h>
 #include <SPI.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 
 // Page buffer: HEIGHT/4 = 120 rows. Each row = 800 pixels × 4bpp / 8 = 400 bytes.
 // Page buffer total = 120 × 400 = 48,000 bytes — fits in SRAM.
@@ -16,6 +17,16 @@ static GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT / 4> epd
 
 // Set for the duration of a refresh so other tasks can see the panel is busy.
 static volatile bool g_refreshing = false;
+static uint32_t g_refreshCount = 0;
+static unsigned long g_lastRefreshMs = 0;
+
+static uint8_t* g_lastFrame = nullptr;   // packed 4bpp copy of what is on screen
+
+const uint8_t* displayCurrentFrame() { return g_lastFrame; }
+
+uint32_t displayRefreshCount() { return g_refreshCount; }
+void displaySetRefreshCount(uint32_t n) { g_refreshCount = n; }
+unsigned long displayLastRefreshMs() { return g_lastRefreshMs; }
 
 bool displayIsBusy() {
     return g_refreshing;
@@ -32,6 +43,9 @@ bool displayInit() {
 
 // Callback invoked during GxEPD2's busy-wait polling — keeps WiFi alive
 static void busyYieldCallback(const void*) {
+    // The main loop is blocked in here for the whole 20-25s refresh, so the
+    // watchdog has to be fed from inside it.
+    esp_task_wdt_reset();
     delay(10);
     yield();
 }
@@ -54,6 +68,7 @@ static void waitUntilPanelIdle() {
                           PANEL_SETTLE_TIMEOUT_MS);
             return;
         }
+        esp_task_wdt_reset();
         delay(50);
         yield();
     }
@@ -79,6 +94,12 @@ void displayShowImage(const uint8_t* packedBuffer) {
     }
 
     g_refreshing = true;
+
+    // Keep a copy so the portal can serve exactly what the panel shows.
+    size_t packedSize = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
+    if (!g_lastFrame) g_lastFrame = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
+    if (g_lastFrame) memcpy(g_lastFrame, packedBuffer, packedSize);
+
     memset(native, 0x11, nativeSize); // white fill (index 1)
 
     // Rotate portrait → native landscape
@@ -113,7 +134,9 @@ void displayShowImage(const uint8_t* packedBuffer) {
     waitUntilPanelIdle();
 
     g_refreshing = false;
-    Serial.println("[Display] Refresh complete");
+    g_refreshCount++;
+    g_lastRefreshMs = millis();
+    Serial.printf("[Display] Refresh complete (%u total)\n", g_refreshCount);
 }
 
 void displayShowMessage(const char* msg) {
@@ -156,6 +179,8 @@ void displayShowMessage(const char* msg) {
     } while (epd.nextPage());
     waitUntilPanelIdle();
     g_refreshing = false;
+    g_refreshCount++;
+    g_lastRefreshMs = millis();
     Serial.printf("[Display] Message: %s\n", msg);
 }
 

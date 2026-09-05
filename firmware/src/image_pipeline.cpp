@@ -4,6 +4,7 @@
 #include "display.h"
 #include "sd_manager.h"
 #include "activity_log.h"
+#include "fill_policy.h"
 #include "app.h"
 
 #include <HTTPClient.h>
@@ -510,75 +511,6 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
 // lines start passing through the sleeve's own detail.
 // ═══════════════════════════════════════════════════════════
 
-// Peak detail lying along the two vertical crop lines at a given zoom,
-// relative to the sleeve overall.
-//
-// Averaging down the cut was tried first and is wrong: a band of type is a
-// small fraction of the height, so its contribution washes out and sleeves
-// that cropping visibly ruins score as safe. A high percentile asks the right
-// question — is there ANY row where the cut goes through something strong.
-static float cutSeverity(const uint8_t* rgb, int w, int h, float zoom) {
-    if (zoom <= 1.0f) return 0.0f;
-
-    // Work in source coordinates: the crop keeps a centred fraction 1/zoom.
-    int keep = (int)(w / zoom + 0.5f);
-    int x0 = (w - keep) / 2;
-    int x1 = x0 + keep;
-    if (x0 < 2 || x1 >= w - 2) return 0.0f;
-
-    const int SAMPLES = 160;                 // enough rows to find a type band
-    int step = (h > SAMPLES) ? h / SAMPLES : 1;
-
-    float total = 0.0f; int totalN = 0;
-    static float rowPeak[SAMPLES];
-    int n = 0;
-
-    for (int y = 0; y < h && n < SAMPLES; y += step) {
-        const uint8_t* row = &rgb[(size_t)y * w * 3];
-        float peak = 0.0f;
-        for (int x = 1; x < w; x++) {
-            float l1 = 0.299f*row[(x-1)*3] + 0.587f*row[(x-1)*3+1] + 0.114f*row[(x-1)*3+2];
-            float l0 = 0.299f*row[x*3]     + 0.587f*row[x*3+1]     + 0.114f*row[x*3+2];
-            float g = fabsf(l0 - l1);
-            total += g; totalN++;
-            if (x >= x0 - 2 && x <= x0 + 2) { if (g > peak) peak = g; }
-            if (x >= x1 - 2 && x <= x1 + 2) { if (g > peak) peak = g; }
-        }
-        rowPeak[n++] = peak;
-    }
-    if (n == 0 || totalN == 0) return 0.0f;
-
-    // 96th percentile of the per-row peaks, by partial selection.
-    // The selection below sorts DESCENDING, so the 96th percentile sits near
-    // the FRONT of the array, not at 0.96*n. Indexing at 0.96*n returned a
-    // near-minimum instead — severity came out tiny, every sleeve looked safe
-    // to crop, and the panel duly sliced "THE BEATLES" in half.
-    int idx = (int)((n - 1) * 0.04f);
-    if (idx >= n) idx = n - 1;
-    if (idx < 0)  idx = 0;
-    for (int i = 0; i <= idx; i++) {
-        int best = i;
-        for (int j = i + 1; j < n; j++) if (rowPeak[j] > rowPeak[best]) best = j;
-        float t = rowPeak[i]; rowPeak[i] = rowPeak[best]; rowPeak[best] = t;
-    }
-    float mean = total / totalN;
-    return rowPeak[idx] / fmaxf(mean, 0.001f);
-}
-
-static float adaptiveZoom(const uint8_t* rgb, int w, int h) {
-    static const float STEPS[] = {1.0f, 1.1f, 1.2f, 1.3f, 1.45f, FILL_MAX_ZOOM};
-    float best = 1.0f;
-    for (int i = 0; i < 6; i++) {
-        float sev = cutSeverity(rgb, w, h, STEPS[i]);
-        if (sev < FILL_CUT_LIMIT) best = STEPS[i];
-        else {
-            Serial.printf("[Fill] zoom %.2f severity %.1f — stopping\n", STEPS[i], sev);
-            break;
-        }
-    }
-    return best;
-}
-
 // Horizontal + vertical box blur over a band of rows, in place.
 static void blurBand(uint8_t* canvas, int w, int y0, int y1, int radius) {
     if (radius < 1 || y1 - y0 < 1) return;
@@ -745,7 +677,7 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     if (fillMode != FILL_FIT) {
         float zoom = 1.0f;
         if (fillMode == FILL_COVER)         zoom = FILL_MAX_ZOOM;
-        else if (fillMode == FILL_ADAPTIVE) zoom = adaptiveZoom(g_decodeBuf, imgW, imgH);
+        else if (fillMode == FILL_ADAPTIVE) zoom = fillAdaptiveZoom(g_decodeBuf, imgW, imgH);
         Serial.printf("[Fill] mode %d, zoom %.2f\n", fillMode, zoom);
 
         int side = (int)(EPD_WIDTH * zoom + 0.5f);

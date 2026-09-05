@@ -9,6 +9,7 @@
 #include "xml_utils.h"
 #include "backoff.h"
 #include "history_policy.h"
+#include "fill_policy.h"
 #include "dither.h"
 
 // Include the implementation directly for native test builds
@@ -169,6 +170,104 @@ void test_dither_zero_size_is_safe(void) {
     uint8_t packed[1] = {0x5A};
     ditherFloydSteinberg(rgb, packed, 0, 0);
     TEST_ASSERT_EQUAL_HEX8(0x5A, packed[0]); // untouched
+}
+
+// ═══════════════════════════════════════════════════════════
+// Artwork fill policy
+// ═══════════════════════════════════════════════════════════
+
+// Synthetic stand-ins for the two cases that matter. Real sleeves measured
+// with the same code: photographic covers score ~2, covers with the artist's
+// name running across them score 17-44, against a limit of 7.
+static void fillNoise(uint8_t* rgb, int w, int h, unsigned seed) {
+    unsigned s = seed;
+    for (int i = 0; i < w * h; i++) {
+        s = s * 1103515245u + 12345u;
+        uint8_t v = 90 + ((s >> 16) & 0x3F);   // gentle texture, no hard edges
+        rgb[i*3] = v; rgb[i*3+1] = v; rgb[i*3+2] = (uint8_t)(v ^ 0x10);
+    }
+}
+
+// A hard-edged band spanning the full width, standing in for type across a
+// sleeve. It sits exactly where a crop would cut, which is what the metric
+// exists to notice.
+//
+// The contrast is per-pixel rather than a regular stripe. A fixed period
+// interacts with wherever the cut happens to land — at one image size the cut
+// fell inside a stripe, where the gradient is zero, and the band vanished from
+// the measurement. Real type has edges at every scale; the fixture should too.
+static void addBar(uint8_t* rgb, int w, int h, int y0, int y1) {
+    unsigned s = 0x9E3779B9u;
+    for (int y = y0; y < y1 && y < h; y++)
+        for (int x = 0; x < w; x++) {
+            s = s * 1103515245u + 12345u;
+            int i = (y * w + x) * 3;
+            uint8_t v = ((s >> 20) & 1) ? 255 : 0;
+            rgb[i] = v; rgb[i+1] = v; rgb[i+2] = v;
+        }
+}
+
+void test_fill_photographic_can_crop(void) {
+    const int W = 300, H = 300;
+    static uint8_t rgb[W*H*3];
+    fillNoise(rgb, W, H, 7);
+    TEST_ASSERT_LESS_THAN_FLOAT(FILL_CUT_LIMIT, fillCutSeverity(rgb, W, H, 1.3f));
+    TEST_ASSERT_EQUAL_FLOAT(FILL_MAX_ZOOM, fillAdaptiveZoom(rgb, W, H));
+}
+
+void test_fill_type_across_sleeve_is_protected(void) {
+    const int W = 300, H = 300;
+    static uint8_t rgb[W*H*3];
+    fillNoise(rgb, W, H, 7);
+    addBar(rgb, W, H, 40, 70);
+    TEST_ASSERT_GREATER_THAN_FLOAT(FILL_CUT_LIMIT, fillCutSeverity(rgb, W, H, 1.3f));
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, fillAdaptiveZoom(rgb, W, H));
+}
+
+// The percentile bug that shipped: the selection sorts descending, so indexing
+// at 0.96*n returns a near-MINIMUM. Severity collapsed, every sleeve looked
+// safe to crop, and the panel sliced "THE BEATLES" in half. A band of type is
+// a small fraction of the height — exactly what a mean hides and a high
+// percentile must find.
+void test_fill_narrow_band_is_not_averaged_away(void) {
+    const int W = 300, H = 300;
+    static uint8_t rgb[W*H*3];
+    fillNoise(rgb, W, H, 3);
+    addBar(rgb, W, H, 150, 168);       // 6% of the height, typical of a title
+    TEST_ASSERT_GREATER_THAN_FLOAT(FILL_CUT_LIMIT, fillCutSeverity(rgb, W, H, 1.3f));
+}
+
+// A band low in the frame must count as much as one near the top. Rounding the
+// row stride down left heights between 128 and 256 scanning only their top
+// half, so anything below it was silently invisible.
+void test_fill_scans_the_whole_height(void) {
+    const int W = 200, H = 200;
+    static uint8_t rgb[W*H*3];
+    fillNoise(rgb, W, H, 9);
+    addBar(rgb, W, H, 176, 192);       // near the bottom edge
+    TEST_ASSERT_GREATER_THAN_FLOAT(FILL_CUT_LIMIT, fillCutSeverity(rgb, W, H, 1.3f));
+}
+
+// The metric compares a local peak against a global mean, and both move with
+// resolution — which silently made the device disagree with the simulator.
+// Identical artwork at different sizes must score alike.
+void test_fill_severity_is_resolution_independent(void) {
+    const int A = 200, B = 700;
+    static uint8_t small[A*A*3], big[B*B*3];
+    fillNoise(small, A, A, 11); addBar(small, A, A, 30, 45);
+    fillNoise(big,   B, B, 11); addBar(big,   B, B, 105, 157);   // same proportions
+    float sa = fillCutSeverity(small, A, A, 1.3f);
+    float sb = fillCutSeverity(big,   B, B, 1.3f);
+    TEST_ASSERT_TRUE(sa > FILL_CUT_LIMIT && sb > FILL_CUT_LIMIT);
+    TEST_ASSERT_FLOAT_WITHIN(0.65f * sa, sa, sb);   // same order of magnitude
+}
+
+void test_fill_zoom_never_exceeds_panel(void) {
+    const int W = 120, H = 120;
+    static uint8_t rgb[W*H*3];
+    fillNoise(rgb, W, H, 5);
+    float z = fillAdaptiveZoom(rgb, W, H);
+    TEST_ASSERT_TRUE(z >= 1.0f && z <= FILL_MAX_ZOOM);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -353,6 +452,14 @@ int main(int argc, char** argv) {
     RUN_TEST(test_dither_pixel_packing);
     RUN_TEST(test_dither_profiles_differ);
     RUN_TEST(test_dither_zero_size_is_safe);
+
+    // Artwork fill policy
+    RUN_TEST(test_fill_photographic_can_crop);
+    RUN_TEST(test_fill_type_across_sleeve_is_protected);
+    RUN_TEST(test_fill_narrow_band_is_not_averaged_away);
+    RUN_TEST(test_fill_scans_the_whole_height);
+    RUN_TEST(test_fill_severity_is_resolution_independent);
+    RUN_TEST(test_fill_zoom_never_exceeds_panel);
 
     // History policy
     RUN_TEST(test_history_prunes_oldest_unpinned);

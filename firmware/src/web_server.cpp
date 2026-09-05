@@ -17,6 +17,9 @@
 #include <WiFi.h>
 #include <Update.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
+#include "display.h"
+#include "controller.h"
 
 // ═══════════════════════════════════════════════════════════
 // Request-body accumulation
@@ -229,6 +232,10 @@ void webServerInit() {
         doc["art_url"]    = g_app.lastArtUrl;
         doc["ip"]         = WiFi.localIP().toString();
         doc["uptime"]     = millis() / 1000;
+        doc["refreshes"]  = displayRefreshCount();
+        doc["reset_reason"] = (int)esp_reset_reason();
+        doc["free_heap"]  = ESP.getFreeHeap();
+        doc["quiet"]      = inQuietHours();
         if (g_app.displayHoldUntil != 0) {
             long remaining = (long)(g_app.displayHoldUntil - millis());
             doc["display_hold_sec"] = (remaining > 0) ? remaining / 1000 : 0;
@@ -296,6 +303,10 @@ void webServerInit() {
         doc["bg_style"]             = g_app.settings.bg_style;
         doc["render_profile"]       = g_app.settings.render_profile;
         doc["fill_mode"]            = g_app.settings.fill_mode;
+        doc["min_refresh_ms"]       = g_app.settings.min_refresh_ms;
+        doc["quiet_start_hour"]     = g_app.settings.quiet_start_hour;
+        doc["quiet_end_hour"]       = g_app.settings.quiet_end_hour;
+        doc["utc_offset_hours"]     = g_app.settings.utc_offset_hours;
         doc["portal_password_set"]  = strlen(g_app.settings.portal_password) > 0;
         sendJson(req, 200, doc);
     });
@@ -337,6 +348,14 @@ void webServerInit() {
                 g_app.settings.bg_mode = doc["bg_mode"];
             if (doc["bg_style"].is<unsigned int>())
                 g_app.settings.bg_style = doc["bg_style"];
+            if (doc["min_refresh_ms"].is<unsigned int>())
+                g_app.settings.min_refresh_ms = doc["min_refresh_ms"];
+            if (doc["quiet_start_hour"].is<unsigned int>())
+                g_app.settings.quiet_start_hour = (uint8_t)doc["quiet_start_hour"] % 24;
+            if (doc["quiet_end_hour"].is<unsigned int>())
+                g_app.settings.quiet_end_hour = (uint8_t)doc["quiet_end_hour"] % 24;
+            if (doc["utc_offset_hours"].is<int>())
+                g_app.settings.utc_offset_hours = (int8_t)doc["utc_offset_hours"];
             if (doc["fill_mode"].is<unsigned int>()) {
                 uint8_t f = doc["fill_mode"];
                 g_app.settings.fill_mode = (f <= FILL_COVER) ? f : FILL_ADAPTIVE;
@@ -514,6 +533,67 @@ void webServerInit() {
             if (index + len == total) g_req.rawFrameLen = total;
         }
     );
+
+    // ─── What is actually on the panel ───
+    // Served as an indexed 4bpp BMP: the panel's own format is already 4bpp
+    // palette indices, so this is a header plus a memcpy — no encoder, no
+    // scaling, ~192 KB. Browsers render it directly.
+    server.on("/api/display/current.bmp", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
+        const uint8_t* frame = displayCurrentFrame();
+        if (!frame) {
+            req->send(404, "text/plain", "Nothing displayed yet");
+            return;
+        }
+
+        const uint32_t rowBytes = ((EPD_WIDTH + 1) / 2 + 3) & ~3u;   // 4-byte aligned
+        const uint32_t pixels   = rowBytes * EPD_HEIGHT;
+        const uint32_t offset   = 14 + 40 + EPD_COLORS * 4;
+        const uint32_t total    = offset + pixels;
+
+        AsyncWebServerResponse* res = req->beginChunkedResponse("image/bmp",
+            [frame, rowBytes, pixels, offset, total](uint8_t* buf, size_t maxLen,
+                                                     size_t index) -> size_t {
+                if (index >= total) return 0;
+                size_t sent = 0;
+
+                // Header, built on the fly so nothing has to be buffered.
+                while (index + sent < offset && sent < maxLen) {
+                    size_t i = index + sent;
+                    uint8_t b = 0;
+                    if (i == 0) b = 'B'; else if (i == 1) b = 'M';
+                    else if (i >= 2 && i < 6)   b = (total >> ((i - 2) * 8)) & 0xFF;
+                    else if (i >= 10 && i < 14) b = (offset >> ((i - 10) * 8)) & 0xFF;
+                    else if (i == 14) b = 40;
+                    else if (i >= 18 && i < 22) b = ((uint32_t)EPD_WIDTH >> ((i - 18) * 8)) & 0xFF;
+                    // Negative height => top-down rows, matching our buffer order.
+                    else if (i >= 22 && i < 26) b = ((uint32_t)(-(int32_t)EPD_HEIGHT) >> ((i - 22) * 8)) & 0xFF;
+                    else if (i == 26) b = 1;          // planes
+                    else if (i == 28) b = 4;          // bits per pixel
+                    else if (i >= 34 && i < 38) b = (pixels >> ((i - 34) * 8)) & 0xFF;
+                    else if (i == 46) b = EPD_COLORS; // palette entries used
+                    else if (i >= 54) {
+                        // Palette: BGRA, from the calibrated pigment values.
+                        uint32_t e = (i - 54) / 4, c = (i - 54) % 4;
+                        if (e < EPD_COLORS)
+                            b = (c == 0) ? PALETTE[e].b : (c == 1) ? PALETTE[e].g
+                              : (c == 2) ? PALETTE[e].r : 0;
+                    }
+                    buf[sent++] = b;
+                }
+
+                // Pixel rows, already packed two per byte.
+                while (sent < maxLen && index + sent < total) {
+                    size_t p = index + sent - offset;
+                    uint32_t y = p / rowBytes, x = p % rowBytes;
+                    buf[sent++] = (x < (uint32_t)EPD_WIDTH / 2)
+                                ? frame[y * (EPD_WIDTH / 2) + x] : 0;   // row padding
+                }
+                return sent;
+            });
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
 
     // ─── Display one specific history entry ───
     // Renders through the full pipeline and holds it, so a fixed set of covers
