@@ -206,6 +206,7 @@ button.danger:active{background:#722}
   <button class="debug-btn" onclick="forceRefresh()">Force Display Refresh</button>
   <button class="debug-btn" onclick="testColors()">Test Color Pattern</button>
   <button class="debug-btn" onclick="testDither()">Dither Test Pattern</button>
+  <button class="debug-btn" onclick="testCalibration()">Palette Calibration Card</button>
   <a href="/api/last-audio" download="recording.wav"><button type="button" class="debug-btn">Download Last Audio</button></a>
   <h2 style="margin-top:24px">Firmware Update</h2>
   <p style="font-size:.75rem;color:#888;margin-bottom:8px">

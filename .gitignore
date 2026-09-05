@@ -24,3 +24,6 @@ simulator/test_*.wav
 # Python
 __pycache__/
 *.pyc
+
+# Compiled helper tools
+tools/snap

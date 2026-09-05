@@ -1091,20 +1091,19 @@ void pipelineShowDitherTest() {
 
 // ─── Palette calibration card ───
 //
-// Six flat, undithered pigment patches on a white field.  Because the patches
-// bypass dithering entirely, each one shows exactly what a single pigment looks
-// like on this panel under your room's lighting — which is the ground truth the
-// dither needs and the only thing a photograph can actually tell you.
+// One row per pigment, each flanked by its own black and white reference chips.
+// Everything is written straight to palette indices, bypassing the dither, so
+// each area is exactly one pigment: what you photograph is ground truth rather
+// than an optical mix.
 //
-// Layout is fixed (see the CAL_* constants in image_pipeline.h) so that
-// simulator/calibrate_from_photo.py can sample the patch centres from a photo:
+//     [K] [====== pigment 0 (black)  ======] [W]
+//     [K] [====== pigment 1 (white)  ======] [W]
+//     [K] [====== pigment 2 (green)  ======] [W]
+//     ...
 //
-//     +---------------------+
-//     |  [0 Black] [1 White]|
-//     |  [2 Green] [3 Blue ]|
-//     |  [4 Red  ] [5 Yellw]|
-//     +---------------------+
-//
+// The per-row references are the important part: they let the sampler correct
+// exposure and white balance *locally*, cancelling any illumination gradient or
+// lens vignetting across the card. See simulator/calibrate_from_photo.py.
 void pipelineShowCalibrationCard() {
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
     uint8_t* packed = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
@@ -1112,8 +1111,7 @@ void pipelineShowCalibrationCard() {
         Serial.println("[Calibration] Packed alloc failed");
         return;
     }
-    // White field — index 1 in both nibbles
-    memset(packed, 0x11, packedSize);
+    memset(packed, 0x11, packedSize); // white field
 
     auto setPixel = [&](int x, int y, uint8_t idx) {
         if (x < 0 || x >= EPD_WIDTH || y < 0 || y >= EPD_HEIGHT) return;
@@ -1123,39 +1121,52 @@ void pipelineShowCalibrationCard() {
         else        packed[bi] = (packed[bi] & 0x0F) | (idx << 4);
     };
 
-    for (int c = 0; c < EPD_COLORS; c++) {
-        int col = c % CAL_COLS;
-        int row = c / CAL_COLS;
-        int x0 = CAL_MARGIN_X + col * (CAL_PATCH_W + CAL_GUTTER_X);
-        int y0 = CAL_MARGIN_Y + row * (CAL_PATCH_H + CAL_GUTTER_Y);
-
-        for (int y = y0; y < y0 + CAL_PATCH_H; y++)
-            for (int x = x0; x < x0 + CAL_PATCH_W; x++)
-                setPixel(x, y, (uint8_t)c);
-
-        // Black keyline around every patch.  Without it the white patch is
-        // invisible against the white field, so you cannot tell from the photo
-        // whether the crop lined up — and a misaligned crop silently produces
-        // a wrong palette.  The sampler only reads the middle 50% of each
-        // patch, so the keyline never contaminates a reading.
+    auto fillRect = [&](int x0, int y0, int w, int h, uint8_t idx) {
+        for (int y = y0; y < y0 + h; y++)
+            for (int x = x0; x < x0 + w; x++)
+                setPixel(x, y, idx);
+        // Keyline outside the rectangle, so the white chip and the white field
+        // stay distinguishable and a bad crop is visible in the photo.
         for (int t = 0; t < CAL_KEYLINE; t++) {
-            for (int x = x0 - t - 1; x <= x0 + CAL_PATCH_W + t; x++) {
+            for (int x = x0 - t - 1; x <= x0 + w + t; x++) {
                 setPixel(x, y0 - t - 1, 0);
-                setPixel(x, y0 + CAL_PATCH_H + t, 0);
+                setPixel(x, y0 + h + t, 0);
             }
-            for (int y = y0 - t - 1; y <= y0 + CAL_PATCH_H + t; y++) {
+            for (int y = y0 - t - 1; y <= y0 + h + t; y++) {
                 setPixel(x0 - t - 1, y, 0);
-                setPixel(x0 + CAL_PATCH_W + t, y, 0);
+                setPixel(x0 + w + t, y, 0);
             }
         }
+    };
 
-        Serial.printf("[Calibration] Patch %d (%s-ish) at (%d,%d) %dx%d\n",
-                      c, c == 0 ? "black" : c == 1 ? "white" : "colour",
-                      x0, y0, CAL_PATCH_W, CAL_PATCH_H);
+    const int xLeft  = CAL_MARGIN_X;
+    const int xPatch = xLeft + CAL_CHIP_W + CAL_CHIP_GAP;
+    const int xRight = xPatch + CAL_PATCH_W + CAL_CHIP_GAP;
+    const int quarter = CAL_ROW_H / CAL_CHIP_QUARTERS;
+
+    // K / W / W / K down each column, so the two black quarters and the two
+    // white quarters each average to the row's vertical centre — the pigment's
+    // own centroid. See the comment in image_pipeline.h.
+    static const uint8_t QUARTER_IDX[CAL_CHIP_QUARTERS] = { 0, 1, 1, 0 };
+
+    for (int c = 0; c < EPD_COLORS; c++) {
+        int y0 = CAL_MARGIN_Y + c * (CAL_ROW_H + CAL_ROW_GAP);
+
+        for (int q = 0; q < CAL_CHIP_QUARTERS; q++) {
+            int qy = y0 + q * quarter;
+            fillRect(xLeft,  qy, CAL_CHIP_W, quarter, QUARTER_IDX[q]);
+            fillRect(xRight, qy, CAL_CHIP_W, quarter, QUARTER_IDX[q]);
+        }
+
+        fillRect(xPatch, y0, CAL_PATCH_W, CAL_ROW_H, (uint8_t)c);
     }
+
+    Serial.printf("[Calibration] Card: %d rows, pigment x=%d w=%d, "
+                  "reference columns at x=%d and x=%d\n",
+                  EPD_COLORS, xPatch, CAL_PATCH_W, xLeft, xRight);
 
     displayShowImage(packed);
     heap_caps_free(packed);
-    Serial.println("[Calibration] Card displayed — photograph it head-on in even light");
+    Serial.println("[Calibration] Card displayed — photograph it square-on in even light");
     activityLog("Calibration card displayed");
 }

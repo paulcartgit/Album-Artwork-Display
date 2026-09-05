@@ -58,22 +58,28 @@ from PIL import Image, ImageDraw
 from firmware_config import CONFIG_H, PALETTE_RGB, PALETTE_NAMES, EPD_WIDTH, EPD_HEIGHT
 
 # Must match the CAL_* constants in firmware/src/image_pipeline.h
-CAL = dict(margin_x=30, margin_y=40, patch_w=190, patch_h=220,
-           gutter_x=40, gutter_y=30, cols=2, rows=3)
+CAL = dict(rows=6, margin_x=10, margin_y=20, row_h=120, row_gap=8,
+           chip_w=70, chip_gap=10, patch_w=300, keyline=2, quarters=4)
 
-# Fraction of each patch to average over (centre crop, so modest misalignment
-# or a slightly off-square photo doesn't pull in gutter white).
-SAMPLE_FRACTION = 0.5
+# K / W / W / K down each reference column — must match QUARTER_IDX in
+# image_pipeline.cpp. The ordering is what puts both reference means on the
+# pigment's centroid; changing it silently degrades the correction.
+QUARTER_IDX = (0, 1, 1, 0)
+
+# Fraction of each region to average over (centre crop), so a slightly off
+# crop or a non-square photo doesn't pull in the keyline or the white field.
+SAMPLE_FRACTION = 0.55
 
 
 def verify_geometry_matches_firmware():
     """Fail loudly if the firmware card layout changed but this script didn't."""
     header = (CONFIG_H.parent / "image_pipeline.h").read_text()
     expected = {
-        "CAL_MARGIN_X": CAL["margin_x"], "CAL_MARGIN_Y": CAL["margin_y"],
-        "CAL_PATCH_W": CAL["patch_w"], "CAL_PATCH_H": CAL["patch_h"],
-        "CAL_GUTTER_X": CAL["gutter_x"], "CAL_GUTTER_Y": CAL["gutter_y"],
-        "CAL_COLS": CAL["cols"], "CAL_ROWS": CAL["rows"],
+        "CAL_ROWS": CAL["rows"], "CAL_MARGIN_X": CAL["margin_x"],
+        "CAL_MARGIN_Y": CAL["margin_y"], "CAL_ROW_H": CAL["row_h"],
+        "CAL_ROW_GAP": CAL["row_gap"], "CAL_CHIP_W": CAL["chip_w"],
+        "CAL_CHIP_GAP": CAL["chip_gap"], "CAL_PATCH_W": CAL["patch_w"],
+        "CAL_CHIP_QUARTERS": CAL["quarters"],
     }
     for name, value in expected.items():
         m = re.search(rf"#define\s+{name}\s+(\d+)", header)
@@ -83,49 +89,87 @@ def verify_geometry_matches_firmware():
                      f"Update CAL in {Path(__file__).name}.")
 
 
-def patch_rect_normalised(index):
-    """Patch bounding box as fractions of the panel, for palette index 0..5."""
-    col = index % CAL["cols"]
-    row = index // CAL["cols"]
-    x0 = CAL["margin_x"] + col * (CAL["patch_w"] + CAL["gutter_x"])
-    y0 = CAL["margin_y"] + row * (CAL["patch_h"] + CAL["gutter_y"])
-    return (x0 / EPD_WIDTH, y0 / EPD_HEIGHT,
-            (x0 + CAL["patch_w"]) / EPD_WIDTH, (y0 + CAL["patch_h"]) / EPD_HEIGHT)
+def row_regions_normalised(index):
+    """
+    Boxes for one row, as panel fractions. Reference columns are quartered
+    K/W/W/K on each side; the pigment spans the full row height between them.
+    Returns (reference boxes with their true index, pigment box).
+    """
+    x_left  = CAL["margin_x"]
+    x_patch = x_left + CAL["chip_w"] + CAL["chip_gap"]
+    x_right = x_patch + CAL["patch_w"] + CAL["chip_gap"]
+    y0 = CAL["margin_y"] + index * (CAL["row_h"] + CAL["row_gap"])
+    quarter = CAL["row_h"] // CAL["quarters"]
+
+    def box(x0, w, yy0, hh):
+        return (x0 / EPD_WIDTH, yy0 / EPD_HEIGHT,
+                (x0 + w) / EPD_WIDTH, (yy0 + hh) / EPD_HEIGHT)
+
+    refs = []
+    for x in (x_left, x_right):
+        for q, idx in enumerate(QUARTER_IDX):
+            refs.append((idx, box(x, CAL["chip_w"], y0 + q * quarter, quarter)))
+
+    pigment = box(x_patch, CAL["patch_w"], y0, CAL["row_h"])
+    return refs, pigment
 
 
-def sample(img, index):
-    """Median colour of the centre of one patch. Median resists glare specks."""
+def sample_box(img, fbox):
+    """Median colour of the centre of a normalised box. Median resists glare."""
     w, h = img.size
-    fx0, fy0, fx1, fy1 = patch_rect_normalised(index)
+    fx0, fy0, fx1, fy1 = fbox
     cx, cy = (fx0 + fx1) / 2, (fy0 + fy1) / 2
-    half_w = (fx1 - fx0) * SAMPLE_FRACTION / 2
-    half_h = (fy1 - fy0) * SAMPLE_FRACTION / 2
-
-    box = (int((cx - half_w) * w), int((cy - half_h) * h),
-           int((cx + half_w) * w), int((cy + half_h) * h))
+    hw = (fx1 - fx0) * SAMPLE_FRACTION / 2
+    hh = (fy1 - fy0) * SAMPLE_FRACTION / 2
+    box = (int((cx - hw) * w), int((cy - hh) * h),
+           int((cx + hw) * w), int((cy + hh) * h))
     region = np.asarray(img.crop(box), dtype=np.float64).reshape(-1, 3)
     return np.median(region, axis=0), box
 
 
-def anchor_to_existing(samples):
+def sample_row(img, index):
     """
-    Per-channel affine map sending the photographed black/white onto the black
-    and white already in config.h, applied to every patch.
+    Returns ((black, pigment, white), boxes).
+
+    Black is the mean of the four black quarters and white the mean of the four
+    white quarters. Both means land on the pigment's own centroid in x and y, so
+    a smooth illumination gradient or lens vignetting affects references and
+    pigment identically and drops out of the correction.
+    """
+    refs_n, pigment_n = row_regions_normalised(index)
+
+    blacks, whites, boxes = [], [], []
+    for idx, fbox in refs_n:
+        v, px = sample_box(img, fbox)
+        boxes.append(px)
+        (blacks if idx == 0 else whites).append(v)
+
+    pigment, pig_box = sample_box(img, pigment_n)
+    boxes.append(pig_box)
+
+    black = np.mean(blacks, axis=0)
+    white = np.mean(whites, axis=0)
+    return (black, pigment, white), boxes
+
+
+def anchor_row(pigment, photo_black, photo_white):
+    """
+    Per-channel affine sending this row's own black and white references onto
+    the black and white already in config.h, applied to the pigment between
+    them.
+
+    Because the references sit millimetres away on both sides, this cancels
+    exposure, white balance, illumination gradient and lens vignetting in one
+    step — the things that otherwise make a photograph useless as a colour
+    reference.
     """
     target_black = np.array(PALETTE_RGB[0], dtype=np.float64)
     target_white = np.array(PALETTE_RGB[1], dtype=np.float64)
-    photo_black, photo_white = samples[0], samples[1]
-
     span = photo_white - photo_black
     if np.any(np.abs(span) < 8):
-        sys.exit("The black and white patches look nearly identical in this photo.\n"
-                 "That usually means the crop is wrong, the photo is badly "
-                 "over/under-exposed, or the panel hadn't finished refreshing.\n"
-                 "Re-shoot with even lighting and try again (use --preview to check "
-                 "where it sampled).")
-
+        return None
     scale = (target_white - target_black) / span
-    return [np.clip(target_black + (s - photo_black) * scale, 0, 255) for s in samples]
+    return np.clip(target_black + (pigment - photo_black) * scale, 0, 255)
 
 
 def sanity_check(values):
@@ -162,8 +206,9 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="Report the difference from the current palette, don't emit new values")
     ap.add_argument("--preview", help="Write an image showing where it sampled")
-    ap.add_argument("--anchor", choices=["keep", "photo"], default="keep",
-                    help="keep (default): preserve the existing black/white points")
+    ap.add_argument("--anchor", choices=["row", "none"], default="row",
+                    help="row (default): correct each pigment against its own "
+                         "black/white chips. none: report raw photographed values")
     args = ap.parse_args()
 
     verify_geometry_matches_firmware()
@@ -171,38 +216,62 @@ def main():
     img = Image.open(args.photo).convert("RGB")
     print(f"Photo: {img.size[0]}x{img.size[1]}")
 
-    raw, boxes = [], []
+    raw, values, all_boxes, refs = [], [], [], []
     for i in range(len(PALETTE_RGB)):
-        colour, box = sample(img, i)
-        raw.append(colour)
-        boxes.append(box)
+        (black, pigment, white), boxes = sample_row(img, i)
+        raw.append(pigment)
+        refs.append((black, white))
+        all_boxes.append(boxes)
+
+        if args.anchor == "none":
+            values.append(pigment)
+            continue
+        corrected = anchor_row(pigment, black, white)
+        if corrected is None:
+            sys.exit(f"Row {i}: the black and white reference chips look nearly "
+                     f"identical (black={black.round()}, white={white.round()}).\n"
+                     f"That usually means the crop is wrong, the photo is badly "
+                     f"exposed, or the panel hadn't finished refreshing.\n"
+                     f"Re-shoot and use --preview to check where it sampled.")
+        values.append(corrected)
 
     if args.preview:
         annotated = img.copy()
         draw = ImageDraw.Draw(annotated)
-        for i, box in enumerate(boxes):
-            draw.rectangle(box, outline=(255, 0, 255), width=4)
-            draw.text((box[0] + 8, box[1] + 8), f"{i} {PALETTE_NAMES[i]}",
-                      fill=(255, 0, 255))
+        for i, boxes in enumerate(all_boxes):
+            for j, box in enumerate(boxes):
+                colour = (255, 0, 255) if j == len(boxes) - 1 else (0, 200, 255)
+                draw.rectangle(box, outline=colour, width=3)
+            draw.text((boxes[-1][0] + 6, boxes[-1][1] + 6),
+                      f"{i} {PALETTE_NAMES[i]}", fill=(255, 0, 255))
         annotated.save(args.preview)
-        print(f"Sampling preview written to {args.preview} — "
-              f"check every box sits inside its patch")
+        print(f"Sampling preview written to {args.preview} — check every box sits "
+              f"inside its patch (magenta = pigment, cyan = reference chips)")
 
-    values = anchor_to_existing(raw) if args.anchor == "keep" else raw
-
-    print("\n  idx  name     photographed      ->  calibrated     current      delta")
-    print("  " + "-" * 72)
+    print("\n  idx  name     photographed   refs K/W          calibrated   current     delta")
+    print("  " + "-" * 78)
     total_delta = 0
     for i, name in enumerate(PALETTE_NAMES):
         r0, g0, b0 = (int(round(c)) for c in raw[i])
         r1, g1, b1 = (int(round(c)) for c in values[i])
         cr, cg, cb = PALETTE_RGB[i]
+        kl = int(round(np.mean(refs[i][0])))
+        wl = int(round(np.mean(refs[i][1])))
         delta = max(abs(r1 - cr), abs(g1 - cg), abs(b1 - cb))
         total_delta += delta
         flag = "  <-- large" if delta > 24 else ""
-        print(f"  {i:3d}  {name:7s}  #{r0:02X}{g0:02X}{b0:02X}"
-              f"          ->  #{r1:02X}{g1:02X}{b1:02X}      "
-              f"#{cr:02X}{cg:02X}{cb:02X}     {delta:3d}{flag}")
+        print(f"  {i:3d}  {name:7s}  #{r0:02X}{g0:02X}{b0:02X}         "
+              f"{kl:3d}/{wl:3d}           #{r1:02X}{g1:02X}{b1:02X}      "
+              f"#{cr:02X}{cg:02X}{cb:02X}    {delta:3d}{flag}")
+
+    # Illumination uniformity: how much the white references vary down the card.
+    white_levels = [float(np.mean(w)) for _, w in refs]
+    spread = max(white_levels) - min(white_levels)
+    print(f"\n  Illumination across the card: white refs {min(white_levels):.0f}"
+          f"-{max(white_levels):.0f} (spread {spread:.0f})")
+    if spread > 25:
+        print("  That is a large gradient. Per-row anchoring corrects for it, but "
+              "more even lighting will give a better result.")
 
     for w in sanity_check(values):
         print(f"\n  WARNING: {w}")
@@ -219,10 +288,9 @@ def main():
 
     print(f"\nPaste this over the PALETTE[] block in {CONFIG_H}:\n")
     print(format_palette_block(values))
-    print("\nThen rebuild and re-flash (or upload firmware.bin via Debug -> "
-          "Firmware Update), and re-shoot the card to confirm it converged.")
-    print("The simulator picks the new values up automatically — "
-          "it parses config.h.")
+    print("\nThen rebuild and update over the air (Debug -> Firmware Update), and "
+          "re-shoot the card to confirm it converged.")
+    print("The simulator picks the new values up automatically — it parses config.h.")
 
 
 if __name__ == "__main__":
