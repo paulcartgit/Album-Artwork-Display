@@ -307,6 +307,29 @@ void controllerSetup() {
         displayShowMessage(ready.c_str());
     }
     delay(3000);
+
+    // Put the last cover back up rather than leaving the address on screen
+    // until something plays. E-ink holds its last image through a restart, so
+    // before this the panel showed the old artwork while the firmware had no
+    // copy of it — the portal served nothing, and the frame looked right only
+    // by accident. Restoring it makes the two agree again.
+    {
+        String last = sdHistoryNewestFile();
+        Serial.printf("[BOOT] Restore candidate: '%s'\n", last.c_str());
+        if (!last.length()) {
+            activityLog("No history to restore after restart");
+        } else if (pipelineProcessFile(last.c_str())) {
+            String artist, album;
+            if (sdHistoryLookup(last.substring(9).c_str(), artist, album)) {
+                g_app.currentArtist = artist;
+                g_app.currentAlbum  = album;
+                enrichRelease(artist, album);
+            }
+            activityLog("Restored the last cover after restart");
+        } else {
+            activityLogf("Could not restore %s after restart", last.c_str());
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════

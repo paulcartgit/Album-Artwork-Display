@@ -412,6 +412,20 @@ static void rebuildShuffleBag() {
     g_shufflePos = 0;
 }
 
+String sdHistoryNewestFile() {
+    JsonDocument doc;
+    if (!readIndex(doc)) return "";
+    // The index is written newest first, so the first enabled entry is the
+    // last thing that was on the panel.
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (!(obj["on"] | true)) continue;
+        const char* f = obj["f"] | "";
+        if (f && *f) return String("/history/") + f;
+    }
+    return "";
+}
+
+
 String sdHistoryRandomFile() {
     if (g_shuffleDirty || g_shufflePos >= g_shuffleCount) {
         rebuildShuffleBag();

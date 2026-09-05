@@ -18,6 +18,12 @@ bool sdHistorySetPinned(const char* file, bool pinned);
 bool sdHistoryDelete(const char* file);            // remove entry + JPEG from SD
 String sdHistoryRandomFile();                     // shuffle-bag enabled entry path
 
+// The most recently saved entry. Used to put something back on the panel after
+// a restart: e-ink keeps showing whatever was there, but the firmware has no
+// copy of it, so the portal has nothing to serve and the frame is stale in a
+// way nobody can see. Returns "" if the history is empty.
+String sdHistoryNewestFile();
+
 // ─── Release metadata cache ───
 // Looked up once per album from MusicBrainz and kept in the history index, so
 // a record is never queried twice.
