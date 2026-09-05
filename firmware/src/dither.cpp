@@ -13,39 +13,7 @@ struct FakeSerial { template<typename... Args> void println(Args...) {} template
 #include <esp_heap_caps.h>
 #endif
 
-// ═══════════════════════════════════════════════════════════
-// sRGB → CIELAB colour-space pipeline
-// ═══════════════════════════════════════════════════════════
-
-struct Lab { float L, a, b; };
-
-// Float-accepting Lab conversion (pixels carry accumulated error, so values
-// can land outside [0,255] before clamping).
-static Lab rgbToLabF(float r, float g, float b) {
-    r = fmaxf(0.0f, fminf(255.0f, r)) / 255.0f;
-    g = fmaxf(0.0f, fminf(255.0f, g)) / 255.0f;
-    b = fmaxf(0.0f, fminf(255.0f, b)) / 255.0f;
-    auto decode = [](float v) -> float {
-        return (v <= 0.04045f) ? v / 12.92f
-                               : powf((v + 0.055f) / 1.055f, 2.4f);
-    };
-    float lr = decode(r), lg = decode(g), lb = decode(b);
-
-    // Linear sRGB → XYZ (D65 illuminant)
-    float x = lr * 0.4124564f + lg * 0.3575761f + lb * 0.1804375f;
-    float y = lr * 0.2126729f + lg * 0.7151522f + lb * 0.0721750f;
-    float z = lr * 0.0193339f + lg * 0.1191920f + lb * 0.9503041f;
-    x /= 0.95047f;
-    z /= 1.08883f;
-
-    auto labf = [](float t) -> float {
-        return (t > 0.008856f) ? cbrtf(t) : (7.787f * t + 16.0f / 116.0f);
-    };
-    float fx = labf(x), fy = labf(y), fz = labf(z);
-    return { 116.0f * fy - 16.0f,
-             500.0f * (fx - fy),
-             200.0f * (fy - fz) };
-}
+#include "colour.h"
 
 // ═══════════════════════════════════════════════════════════
 // Extended matching palette: 6 real + 2 virtual entries

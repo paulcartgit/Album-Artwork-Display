@@ -244,6 +244,38 @@ check("severity is resolution independent",
 
 
 # ═══════════════════════════════════════════════════════════
+print("\nTone mapping")
+# ═══════════════════════════════════════════════════════════
+import tone_select
+from tone_map import compress
+
+tm_h = read("tone_map.h")
+check("tone-map constants come from tone_map.h",
+      tone_select.SCALES == (1.0, 0.9, 0.8) and tone_select.HUE_WEIGHT == 0.15,
+      f"scales={tone_select.SCALES} weight={tone_select.HUE_WEIGHT}")
+check("firmware measures rather than predicts",
+      "ditherFloydSteinberg(cand, packed, dw, dh)" in read("image_pipeline.cpp"),
+      "the trial render is gone — a predictor has crept back in")
+check("firmware scores against the source",
+      "toneMapScore(small, shown, dw, dh" in read("image_pipeline.cpp"))
+
+# Compression must move lightness and leave hue alone. That is the whole
+# reason it is done in Lab: an RGB white-point pull produced dither speckle
+# instead of colour.
+probe = np.full((8, 8, 3), (233, 163, 197), dtype=np.uint8)   # the KPop skin
+lab_a = eink.rgb_to_lab(probe.reshape(-1, 3))[0]
+lab_b = eink.rgb_to_lab(compress(probe, 0.80).reshape(-1, 3))[0]
+h_a = np.degrees(np.arctan2(lab_a[2], lab_a[1])) % 360
+h_b = np.degrees(np.arctan2(lab_b[2], lab_b[1])) % 360
+check("compression darkens", lab_b[0] < lab_a[0] - 5,
+      f"L* {lab_a[0]:.1f} -> {lab_b[0]:.1f}")
+check("compression preserves hue", abs((h_a - h_b + 180) % 360 - 180) < 3.0,
+      f"hue {h_a:.1f} -> {h_b:.1f} deg")
+check("scale 1.0 is a no-op",
+      np.array_equal(compress(probe, 1.0), probe))
+
+
+# ═══════════════════════════════════════════════════════════
 print()
 if FAILURES:
     print(f"PARITY CHECK FAILED — {len(FAILURES)} problem(s):")

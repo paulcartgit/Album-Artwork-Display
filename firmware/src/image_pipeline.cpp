@@ -1,6 +1,7 @@
 #include "image_pipeline.h"
 #include "config.h"
 #include "dither.h"
+#include "tone_map.h"
 #include "display.h"
 #include "sd_manager.h"
 #include "activity_log.h"
@@ -296,6 +297,55 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
 // ─── Pre-dither image enhancement for e-ink output ───
 // Applies mild unsharp-mask sharpening + contrast boost + gamma correction
 // in a single pass using a 3-row rolling buffer (~4 KB working memory).
+
+// Choose how far to compress lightness for THIS image, by rendering the
+// candidates small and scoring each against the source. See tone_map.h for
+// why this is measured rather than predicted.
+static float chooseLightnessScale(const uint8_t* rgb, int w, int h) {
+    const int dw = w / TONEMAP_TRIAL_DIV, dh = h / TONEMAP_TRIAL_DIV;
+    const size_t npix = (size_t)dw * dh;
+
+    uint8_t* small  = (uint8_t*)heap_caps_malloc(npix * 3, MALLOC_CAP_SPIRAM);
+    uint8_t* cand   = (uint8_t*)heap_caps_malloc(npix * 3, MALLOC_CAP_SPIRAM);
+    uint8_t* shown  = (uint8_t*)heap_caps_malloc(npix * 3, MALLOC_CAP_SPIRAM);
+    uint8_t* packed = (uint8_t*)heap_caps_malloc(npix / 2 + 1, MALLOC_CAP_SPIRAM);
+    if (!small || !cand || !shown || !packed) {
+        heap_caps_free(small); heap_caps_free(cand);
+        heap_caps_free(shown); heap_caps_free(packed);
+        Serial.println("[Pipeline] Tone-map alloc failed, leaving lightness alone");
+        return 1.0f;
+    }
+
+    toneMapShrink(rgb, w, h, TONEMAP_TRIAL_DIV, small);
+
+    float best = 1.0f, bestScore = 0.0f;
+    for (int k = 0; k < TONEMAP_SCALES; k++) {
+        memcpy(cand, small, npix * 3);
+        toneMapApply(cand, dw, dh, TONEMAP_SCALE[k]);
+        ditherFloydSteinberg(cand, packed, dw, dh);
+
+        // Unpack to the pigment colours the panel will actually show.
+        for (size_t i = 0; i < npix; i++) {
+            const uint8_t idx = (i & 1) ? (packed[i >> 1] & 0x0F)
+                                        : (packed[i >> 1] >> 4);
+            const PaletteColor& p = PALETTE[idx < EPD_COLORS ? idx : 1];
+            shown[i * 3 + 0] = p.r; shown[i * 3 + 1] = p.g; shown[i * 3 + 2] = p.b;
+        }
+
+        float dE = 0.0f, hue = 0.0f;
+        toneMapScore(small, shown, dw, dh, 8, &dE, &hue);
+        const float score = dE + TONEMAP_HUE_WEIGHT * hue;
+        Serial.printf("[Pipeline] tone x%.2f  dE %.1f  hue %.1f  score %.1f\n",
+                      TONEMAP_SCALE[k], dE, hue, score);
+        if (k == 0 || score < bestScore) { bestScore = score; best = TONEMAP_SCALE[k]; }
+    }
+
+    heap_caps_free(small); heap_caps_free(cand);
+    heap_caps_free(shown); heap_caps_free(packed);
+    Serial.printf("[Pipeline] tone map chose x%.2f\n", best);
+    return best;
+}
+
 static void enhanceForEink(uint8_t* rgb, int w, int h, const RenderProfile& profile) {
     const float sharpenAmt   = profile.sharpen;
     const float contrastFact = profile.contrast;
@@ -811,6 +861,8 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
 
     // 3.5. Pre-dither enhancement (sharpen + contrast + gamma)
     const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
+    toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
+                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT));
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     // 4. Dither to 6-colour packed buffer
@@ -863,6 +915,8 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
                0, EPD_HEIGHT, bgR, bgG, bgB);
 
     const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
+    toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
+                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT));
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
