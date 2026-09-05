@@ -57,8 +57,9 @@ check("three render profiles", len(RENDER_PROFILES) == 3)
 
 dither_cpp = read("dither.cpp")
 
-# VIRTUAL_PAIR in dither.cpp: { {2,3}, {4,3} }
-pairs = re.search(r"VIRTUAL_PAIR\[2\]\[2\]\s*=\s*\{(.*?)\};", dither_cpp, re.S)
+# VIRTUAL_PAIR in dither.cpp. Read the declared size rather than pinning it:
+# the list grew from 2 to 7 and a hardcoded [2][2] silently stopped matching.
+pairs = re.search(r"VIRTUAL_PAIR\[\d+\]\[2\]\s*=\s*\{(.*?)\};", dither_cpp, re.S)
 firmware_pairs = tuple(
     tuple(int(n) for n in m)
     for m in re.findall(r"\{\s*(\d+)\s*,\s*(\d+)\s*\}", pairs.group(1) if pairs else "")
@@ -67,8 +68,18 @@ check("virtual colour pairs match dither.cpp",
       firmware_pairs == eink.VIRTUAL_PAIR,
       f"firmware {firmware_pairs} vs simulator {eink.VIRTUAL_PAIR}")
 
-check("matching palette has 6 real + 2 virtual entries",
-      eink.MATCH_COLORS == EPD_COLORS + 2 and eink.MATCH_PAL.shape[0] == EPD_COLORS + 2)
+nvirtual = len(eink.VIRTUAL_PAIR)
+check(f"matching palette has {EPD_COLORS} real + {nvirtual} virtual entries",
+      eink.MATCH_COLORS == EPD_COLORS + nvirtual
+      and eink.MATCH_PAL.shape[0] == EPD_COLORS + nvirtual)
+check("firmware MATCH_COLORS agrees with the pair table",
+      f"MATCH_COLORS = EPD_COLORS + {nvirtual}" in dither_cpp,
+      "dither.cpp declares a different count from its VIRTUAL_PAIR table")
+check("every virtual pair blends two DIFFERENT real pigments",
+      all(a != b and 0 <= a < EPD_COLORS and 0 <= b < EPD_COLORS
+          for a, b in eink.VIRTUAL_PAIR))
+check("no duplicate virtual pairs",
+      len({frozenset(p) for p in eink.VIRTUAL_PAIR}) == len(eink.VIRTUAL_PAIR))
 
 # The firmware must still derive its match palette from PALETTE, not from
 # idealised RGB cube corners — that was the original bug.

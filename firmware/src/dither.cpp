@@ -66,14 +66,28 @@ static Lab rgbToLabF(float r, float g, float b) {
 // pure #00FF00 when the panel will show a dark teal, so every subsequent error
 // term is wrong and the whole image drifts.
 // ═══════════════════════════════════════════════════════════
-static constexpr int MATCH_COLORS = EPD_COLORS + 2;
-static constexpr uint8_t VIRTUAL_CYAN    = EPD_COLORS;     // 6 → Green + Blue
-static constexpr uint8_t VIRTUAL_MAGENTA = EPD_COLORS + 1; // 7 → Red   + Blue
+// Every two-pigment 50/50 blend the panel can actually hold. We shipped only
+// Cyan and Magenta for a long time; the other five are colours the artwork
+// genuinely wants and the matcher previously had to approximate by diffusing
+// error across neighbours, which reads as noise rather than as the colour.
+//
+// The two WHITE-paired entries are the reason this list grew. A pale tint had
+// no target: White is the nearest entry in Lab AND the chroma penalty below
+// actively pushes low-chroma pixels toward the achromatic entries, so pale
+// regions collapsed onto flat white pigment — the washed-out slab that started
+// this. Light Pink and Light Yellow give those regions somewhere to go.
+static constexpr int MATCH_COLORS = EPD_COLORS + 7;
 
 // The two real palette indices each virtual colour interleaves between.
-static constexpr uint8_t VIRTUAL_PAIR[2][2] = {
-    { 2, 3 },  // Cyan    → Green / Blue
-    { 4, 3 },  // Magenta → Red   / Blue
+// Palette order: 0 Black, 1 White, 2 Green, 3 Blue, 4 Red, 5 Yellow.
+static constexpr uint8_t VIRTUAL_PAIR[7][2] = {
+    { 2, 3 },  // Cyan         → Green / Blue
+    { 4, 3 },  // Magenta      → Red   / Blue
+    { 4, 5 },  // Orange       → Red   / Yellow
+    { 2, 5 },  // Lime         → Green / Yellow
+    { 4, 2 },  // Brown        → Red   / Green
+    { 4, 1 },  // Light Pink   → Red   / White
+    { 5, 1 },  // Light Yellow → Yellow/ White
 };
 
 // Matching palette in RGB, derived from PALETTE at startup.
@@ -92,7 +106,7 @@ static void ensureMatchPalette() {
         MATCH_PAL[i][2] = (float)PALETTE[i].b;
     }
     // Virtual colours — midpoint of the pigment pair they interleave.
-    for (int v = 0; v < 2; v++) {
+    for (int v = 0; v < MATCH_COLORS - EPD_COLORS; v++) {
         const PaletteColor& a = PALETTE[VIRTUAL_PAIR[v][0]];
         const PaletteColor& b = PALETTE[VIRTUAL_PAIR[v][1]];
         MATCH_PAL[EPD_COLORS + v][0] = (a.r + b.r) * 0.5f;

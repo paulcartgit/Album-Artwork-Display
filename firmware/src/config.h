@@ -95,10 +95,15 @@
 // 43.1% -> 51.3%). Re-measure with simulator/palette_ab.py before assuming
 // otherwise.
 //
-// Caveat worth keeping: both captures came from the same camera, so a
-// consistent colour bias in it cannot be ruled out from photographs alone. If
-// the panel ever looks over-saturated, this is the first thing to re-test —
-// ideally with a second camera.
+// Cross-checked since against two independently published measurements of this
+// panel (epdoptimize, and quark-zju's converter gist). Anchoring each on its
+// own black and white so exposure drops out, all three agree the chromatics
+// sit at 95-100% saturation; the old hand-tuned values were the outlier at
+// 78-83%. Ours lands closest to quark-zju's.
+//
+// Green's blue channel is the one place we disagreed with everyone: the
+// measurement gave 0x45, while the other two read 0x00 and 0x1F. Pulled to
+// 0x2E — still the greener of the published values, but no longer teal.
 struct PaletteColor {
     uint8_t r, g, b;
     uint8_t index;
@@ -107,7 +112,7 @@ struct PaletteColor {
 static const PaletteColor PALETTE[EPD_COLORS] = {
     {0x0D, 0x0A, 0x10, 0}, // Black  (near-black charcoal)
     {0xE0, 0xE0, 0xD9, 1}, // White  (light grey, slight warm tint)
-    {0x1F, 0x6C, 0x45, 2}, // Green  (deep leaf-green)
+    {0x1F, 0x6C, 0x2E, 2}, // Green  (deep leaf-green)
     {0x00, 0x5D, 0xAB, 3}, // Blue   (strong mid-blue)
     {0xBD, 0x0F, 0x05, 4}, // Red    (vivid scarlet)
     {0xFF, 0xDA, 0x1B, 5}, // Yellow (bright golden)

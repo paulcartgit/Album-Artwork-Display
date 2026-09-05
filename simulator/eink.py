@@ -24,7 +24,15 @@ PALETTE = np.array(PALETTE_RGB, dtype=np.float64)
 
 # Virtual entries: the midpoint of the two pigments they interleave.
 # Mirrors VIRTUAL_PAIR in dither.cpp.
-VIRTUAL_PAIR = ((2, 3), (4, 3))   # Cyan -> Green/Blue, Magenta -> Red/Blue
+VIRTUAL_PAIR = (
+    (2, 3),   # Cyan         -> Green / Blue
+    (4, 3),   # Magenta      -> Red   / Blue
+    (4, 5),   # Orange       -> Red   / Yellow
+    (2, 5),   # Lime         -> Green / Yellow
+    (4, 2),   # Brown        -> Red   / Green
+    (4, 1),   # Light Pink   -> Red   / White
+    (5, 1),   # Light Yellow -> Yellow/ White
+)
 MATCH_COLORS = EPD_COLORS + len(VIRTUAL_PAIR)
 
 MATCH_PAL = np.vstack([
