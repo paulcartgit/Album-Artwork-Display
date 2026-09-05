@@ -21,5 +21,8 @@ String sdHistoryRandomFile();                     // shuffle-bag enabled entry p
 // ─── Release metadata cache ───
 // Looked up once per album from MusicBrainz and kept in the history index, so
 // a record is never queried twice.
+// Artist and album for a stored entry.
+bool sdHistoryLookup(const char* file, String& artist, String& album);
+
 bool sdHistoryGetRelease(const char* artist, const char* album, String& summary);
 bool sdHistorySetRelease(const char* artist, const char* album, const char* summary);

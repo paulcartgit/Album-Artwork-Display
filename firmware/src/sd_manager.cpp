@@ -457,3 +457,17 @@ bool sdHistorySetRelease(const char* artist, const char* album, const char* summ
     }
     return false;
 }
+
+
+bool sdHistoryLookup(const char* file, String& artist, String& album) {
+    if (!file || !file[0]) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", file) != 0) continue;
+        artist = obj["a"] | "";
+        album  = obj["al"] | "";
+        return artist.length() > 0;
+    }
+    return false;
+}

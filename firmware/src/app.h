@@ -36,6 +36,7 @@ struct AppContext {
 
     // Sonos poll timing
     unsigned long lastPollTime;
+    uint32_t eventCount = 0;   // pushed Sonos events received
 
     // The speaker actually being polled — the group coordinator, which is not
     // necessarily the one the user selected.

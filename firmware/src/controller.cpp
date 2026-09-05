@@ -154,6 +154,7 @@ static void enrichRelease(const String& artist, const String& album) {
         activityLogf("Release: %s", g_app.releaseInfo.c_str());
     } else {
         g_app.releaseInfo = "";
+        activityLogf("No release details for %s", album.c_str());
     }
     sdHistorySetRelease(artist.c_str(), album.c_str(), g_app.releaseInfo.c_str());
 }
@@ -381,7 +382,11 @@ void controllerLoop() {
     // A pushed event means something changed; poll immediately rather than
     // waiting out the interval.
     bool pushed = upnpEventsPoll();
-    if (pushed) g_app.lastPollTime = 0;
+    if (pushed) {
+        g_app.lastPollTime = 0;
+        g_app.eventCount++;
+        activityLog("Sonos event — checking now");
+    }
 
     if (!pushed && now - g_app.lastPollTime < g_app.settings.sonos_poll_ms) {
         delay(100);
@@ -541,6 +546,15 @@ static void serviceRequests() {
         activityLogf("Showing %s on request", g_req.showHistoryFile);
         if (pipelineProcessFile(path.c_str())) {
             holdDisplay();
+            // Pick up the artist and album for this entry so the portal shows
+            // what it is, and its pressing details, not just a picture.
+            String a, al;
+            if (sdHistoryLookup(g_req.showHistoryFile, a, al)) {
+                g_app.currentArtist = a;
+                g_app.currentAlbum  = al;
+                g_app.currentTitle  = "";
+                enrichRelease(a, al);
+            }
         } else {
             activityLogf("Could not display %s", g_req.showHistoryFile);
         }

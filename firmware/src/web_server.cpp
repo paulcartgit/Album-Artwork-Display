@@ -232,6 +232,7 @@ void webServerInit() {
         doc["art_url"]    = g_app.lastArtUrl;
         doc["release"]    = g_app.releaseInfo;
         doc["poll_ip"]    = g_app.pollIp;
+        doc["events"]     = g_app.eventCount;
         doc["ip"]         = WiFi.localIP().toString();
         doc["uptime"]     = millis() / 1000;
         doc["refreshes"]  = displayRefreshCount();

@@ -42,9 +42,77 @@ static String luceneEscape(const String& s) {
     return out;
 }
 
+// Strip edition suffixes before searching.
+//
+// Sonos and Shazam report titles as they appear in the store — "Help!
+// (Remastered)", "Getz/Gilberto (Expanded Edition)", "Up From Below - 10th
+// Anniversary Edition" — and an exact release match on those finds nothing.
+// "Help! (Remastered)" returns 0 results; "Help!" returns 5. Only brackets
+// containing an edition word are removed, so titles that genuinely use
+// parentheses survive.
+static const char* EDITION_WORDS[] = {
+    "remaster", "deluxe", "edition", "anniversary", "expanded", "reissue",
+    "bonus track", "explicit", "special", "collector"
+};
+
+static bool looksLikeEdition(const String& inner) {
+    String low = inner; low.toLowerCase();
+    for (const char* w : EDITION_WORDS) if (low.indexOf(w) >= 0) return true;
+    return false;
+}
+
+static String normaliseAlbum(const String& title) {
+    String t = title;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        t.trim();
+
+        // Trailing "(...)" or "[...]" naming an edition
+        int len = t.length();
+        if (len > 2) {
+            char close = t.charAt(len - 1);
+            char open  = (close == ')') ? '(' : (close == ']') ? '[' : 0;
+            if (open) {
+                int start = t.lastIndexOf(open);
+                if (start > 0 && looksLikeEdition(t.substring(start + 1, len - 1))) {
+                    t = t.substring(0, start);
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+
+        // Trailing " - 10th Anniversary Edition" and friends
+        int dash = t.lastIndexOf(" - ");
+        if (dash > 0 && looksLikeEdition(t.substring(dash + 3))) {
+            t = t.substring(0, dash);
+            changed = true;
+        }
+    }
+    t.trim();
+    return t.length() ? t : title;
+}
+
+// Returns the number of releases considered, filling `out` from the best one.
+static int queryReleases(const char* artist, const String& album, ReleaseInfo& out);
+
 bool metadataLookup(const char* artist, const char* album, ReleaseInfo& out) {
     out = ReleaseInfo();
     if (!artist || !artist[0] || !album || !album[0]) return false;
+
+    String raw(album);
+    String clean = normaliseAlbum(raw);
+
+    if (queryReleases(artist, clean, out) > 0) return out.found;
+    // The bracket may have been part of the real title after all.
+    if (clean != raw && queryReleases(artist, raw, out) > 0) return out.found;
+
+    Serial.printf("[Meta] No release found for %s — %s\n", artist, album);
+    return false;
+}
+
+static int queryReleases(const char* artist, const String& album, ReleaseInfo& out) {
 
     unsigned long since = millis() - s_lastRequest;
     if (s_lastRequest != 0 && since < MB_MIN_INTERVAL_MS) {
@@ -53,7 +121,7 @@ bool metadataLookup(const char* artist, const char* album, ReleaseInfo& out) {
     s_lastRequest = millis();
 
     String query = "artist:\"" + luceneEscape(artist) + "\" AND release:\"" +
-                   luceneEscape(album) + "\"";
+                   luceneEscape(album.c_str()) + "\"";
     String url = "https://musicbrainz.org/ws/2/release/?query=" + urlEscape(query) +
                  "&fmt=json&limit=12";
 
@@ -74,7 +142,7 @@ bool metadataLookup(const char* artist, const char* album, ReleaseInfo& out) {
     if (code != HTTP_CODE_OK) {
         Serial.printf("[Meta] MusicBrainz HTTP %d\n", code);
         http.end();
-        return false;
+        return 0;
     }
 
     // Only the handful of fields we use, so the document stays small.
@@ -91,11 +159,11 @@ bool metadataLookup(const char* artist, const char* album, ReleaseInfo& out) {
     http.end();
     if (err) {
         Serial.printf("[Meta] JSON parse failed: %s\n", err.c_str());
-        return false;
+        return 0;
     }
 
     JsonArray releases = doc["releases"].as<JsonArray>();
-    if (releases.isNull() || releases.size() == 0) return false;
+    if (releases.isNull() || releases.size() == 0) return 0;
 
     // Prefer the EARLIEST pressing that carries a catalogue number.
     //
@@ -129,10 +197,10 @@ bool metadataLookup(const char* artist, const char* album, ReleaseInfo& out) {
 
     out.found = out.year.length() || out.label.length() || out.catalogNumber.length();
     if (out.found) {
-        Serial.printf("[Meta] %s — %s: %s\n", artist, album,
+        Serial.printf("[Meta] %s — %s: %s\n", artist, album.c_str(),
                       metadataSummary(out).c_str());
     }
-    return out.found;
+    return (int)releases.size();
 }
 
 String metadataSummary(const ReleaseInfo& info) {
