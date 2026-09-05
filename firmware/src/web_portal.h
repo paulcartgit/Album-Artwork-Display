@@ -112,6 +112,7 @@ header.scrolled{border-bottom-color:var(--line)}
 .track h1{font-size:22px;font-weight:600;letter-spacing:-.02em;margin:0 0 4px;line-height:1.25}
 .track p{margin:0;color:var(--dim);font-size:15px}
 .track .album{color:var(--faint);font-size:13px;margin-top:3px}
+.track .release{color:var(--faint);font-size:12px;margin:7px 0 0;letter-spacing:.02em;min-height:16px}
 .meta{text-align:center;color:var(--faint);font-size:12.5px;margin-top:-14px;margin-bottom:22px;min-height:18px}
 
 /* ── Buttons ── */
@@ -292,6 +293,7 @@ details .body{padding:0 16px 14px}
     <h1 id="npTitle">&nbsp;</h1>
     <p id="npArtist">&nbsp;</p>
     <p class="album" id="npAlbum">&nbsp;</p>
+    <p class="release" id="npRelease"></p>
   </div>
   <div class="meta" id="npMeta"></div>
   <div class="actions">
@@ -454,6 +456,7 @@ details .body{padding:0 16px 14px}
   <div class="label">Device</div>
   <div class="card">
     <div class="row"><span class="k">Address</span><span class="v" id="dIp">—</span></div>
+    <div class="row"><span class="k">Polling</span><span class="v" id="dPoll">&mdash;</span></div>
     <div class="row"><span class="k">Uptime</span><span class="v" id="dUp">—</span></div>
     <div class="row"><span class="k">State</span><span class="v" id="dState">—</span></div>
     <div class="row"><span class="k">Panel refreshes</span><span class="v" id="dRefresh">—</span></div>
@@ -623,6 +626,7 @@ async function tick(){
   $('#npTitle').textContent  = d.title  || (st === 'IDLE' ? 'Nothing playing' : ' ');
   $('#npArtist').textContent = d.artist || ' ';
   $('#npAlbum').textContent  = d.album  || ' ';
+  $('#npRelease').textContent = d.release || '';
 
   if(artView === 'panel'){
     // Only refetch when the panel has actually repainted.
@@ -657,6 +661,7 @@ async function tick(){
   $('#npMeta').textContent = bits[0] || '';
 
   $('#dIp').textContent = d.ip || '—';
+  $('#dPoll').textContent = d.poll_ip || '\u2014';
   $('#dUp').textContent = fmtUptime(d.uptime || 0);
   $('#dState').textContent = (STATE_TEXT[st] || st) + (d.quiet ? ' · quiet hours' : '');
   if(d.refreshes !== undefined) $('#dRefresh').textContent = d.refreshes.toLocaleString();

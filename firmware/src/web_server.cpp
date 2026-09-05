@@ -230,6 +230,8 @@ void webServerInit() {
         doc["title"]      = g_app.currentTitle;
         doc["album"]      = g_app.currentAlbum;
         doc["art_url"]    = g_app.lastArtUrl;
+        doc["release"]    = g_app.releaseInfo;
+        doc["poll_ip"]    = g_app.pollIp;
         doc["ip"]         = WiFi.localIP().toString();
         doc["uptime"]     = millis() / 1000;
         doc["refreshes"]  = displayRefreshCount();

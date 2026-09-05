@@ -307,3 +307,139 @@ bool sonosResolveByName(const char* name, char* ipOut, size_t ipLen) {
     }
     return false;
 }
+
+
+// ─── Group coordination ───
+
+bool sonosResolveCoordinator(const char* seedIp, const char* roomName,
+                             char* ipOut, size_t ipLen) {
+    strlcpy(ipOut, seedIp, ipLen);          // sensible default: itself
+    if (!roomName || !roomName[0]) return false;
+
+    HTTPClient http;
+    String url = String("http://") + seedIp + ":1400/ZoneGroupTopology/Control";
+    http.begin(url);
+    http.setConnectTimeout(3000);
+    http.setTimeout(5000);
+    http.addHeader("Content-Type", "text/xml; charset=\"utf-8\"");
+    http.addHeader("SOAPAction",
+        "\"urn:schemas-upnp-org:service:ZoneGroupTopology:1#GetZoneGroupState\"");
+    int code = http.POST(ZONEGRP_ENVELOPE);
+    if (code != HTTP_CODE_OK) { http.end(); return false; }
+    String decoded = decodeXmlEntities(http.getString());
+    http.end();
+
+    // Walk each <ZoneGroup Coordinator="UUID" ...> block and look for our room
+    // among its members. The coordinator's own member entry carries the
+    // Location we need.
+    int pos = 0;
+    while (true) {
+        int gStart = decoded.indexOf("<ZoneGroup ", pos);
+        if (gStart < 0) break;
+        int gEnd = decoded.indexOf("</ZoneGroup>", gStart);
+        if (gEnd < 0) gEnd = decoded.length();
+        String group = decoded.substring(gStart, gEnd);
+        pos = gEnd + 1;
+
+        int cs = group.indexOf("Coordinator=\"");
+        if (cs < 0) continue;
+        cs += 13;
+        int ce = group.indexOf('"', cs);
+        if (ce < 0) continue;
+        String coordUuid = group.substring(cs, ce);
+
+        // Is our room in this group?
+        String needle = String("ZoneName=\"") + roomName + "\"";
+        if (group.indexOf(needle) < 0) continue;
+
+        // Find the coordinator's member entry and pull its Location.
+        int mPos = 0;
+        while (true) {
+            int mStart = group.indexOf("<ZoneGroupMember ", mPos);
+            if (mStart < 0) break;
+            int mEnd = group.indexOf("/>", mStart);
+            if (mEnd < 0) break;
+            String member = group.substring(mStart, mEnd);
+            mPos = mEnd + 2;
+            if (member.indexOf(String("UUID=\"") + coordUuid + "\"") < 0) continue;
+
+            int ls = member.indexOf("Location=\"");
+            if (ls < 0) break;
+            ls += 10;
+            int le = member.indexOf('"', ls);
+            if (le < 0) break;
+            String loc = member.substring(ls, le);
+            int ipStart = loc.indexOf("//");
+            if (ipStart < 0) break;
+            ipStart += 2;
+            int ipEnd = loc.indexOf(':', ipStart);
+            if (ipEnd < 0) ipEnd = loc.indexOf('/', ipStart);
+            if (ipEnd <= ipStart) break;
+            String ip = loc.substring(ipStart, ipEnd);
+            strlcpy(ipOut, ip.c_str(), ipLen);
+            if (ip != seedIp) {
+                Serial.printf("[Sonos] '%s' is grouped; coordinator is %s\n",
+                              roomName, ipOut);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// ─── GENA subscriptions ───
+
+static bool subscribeRequest(const char* ip, const char* callbackUrl, const char* sid,
+                             char* sidOut, size_t sidLen, uint32_t* timeoutSecOut) {
+    HTTPClient http;
+    String url = String("http://") + ip + ":1400/MediaRenderer/AVTransport/Event";
+    http.begin(url);
+    http.setConnectTimeout(3000);
+    http.setTimeout(5000);
+    if (sid) {
+        http.addHeader("SID", sid);
+    } else {
+        http.addHeader("CALLBACK", String("<") + callbackUrl + ">");
+        http.addHeader("NT", "upnp:event");
+    }
+    http.addHeader("TIMEOUT", "Second-1800");
+    const char* collect[] = {"SID", "TIMEOUT"};
+    http.collectHeaders(collect, 2);
+
+    int code = http.sendRequest("SUBSCRIBE");
+    if (code != HTTP_CODE_OK) {
+        Serial.printf("[Sonos] SUBSCRIBE %s -> HTTP %d\n", sid ? "renew" : "new", code);
+        http.end();
+        return false;
+    }
+    if (sidOut) strlcpy(sidOut, http.header("SID").c_str(), sidLen);
+    if (timeoutSecOut) {
+        String t = http.header("TIMEOUT");           // "Second-1800"
+        int dash = t.indexOf('-');
+        uint32_t secs = (dash >= 0) ? (uint32_t)t.substring(dash + 1).toInt() : 1800;
+        *timeoutSecOut = (secs > 60) ? secs : 1800;
+    }
+    http.end();
+    return true;
+}
+
+bool sonosSubscribe(const char* ip, const char* callbackUrl,
+                    char* sidOut, size_t sidLen, uint32_t* timeoutSecOut) {
+    if (sidOut) sidOut[0] = 0;
+    return subscribeRequest(ip, callbackUrl, nullptr, sidOut, sidLen, timeoutSecOut);
+}
+
+bool sonosRenewSubscription(const char* ip, const char* sid, uint32_t* timeoutSecOut) {
+    if (!sid || !sid[0]) return false;
+    return subscribeRequest(ip, nullptr, sid, nullptr, 0, timeoutSecOut);
+}
+
+void sonosUnsubscribe(const char* ip, const char* sid) {
+    if (!sid || !sid[0]) return;
+    HTTPClient http;
+    http.begin(String("http://") + ip + ":1400/MediaRenderer/AVTransport/Event");
+    http.setConnectTimeout(2000);
+    http.addHeader("SID", sid);
+    http.sendRequest("UNSUBSCRIBE");
+    http.end();
+}

@@ -17,3 +17,9 @@ bool sdHistorySetEnabled(const char* file, bool on);
 bool sdHistorySetPinned(const char* file, bool pinned);
 bool sdHistoryDelete(const char* file);            // remove entry + JPEG from SD
 String sdHistoryRandomFile();                     // shuffle-bag enabled entry path
+
+// ─── Release metadata cache ───
+// Looked up once per album from MusicBrainz and kept in the history index, so
+// a record is never queried twice.
+bool sdHistoryGetRelease(const char* artist, const char* album, String& summary);
+bool sdHistorySetRelease(const char* artist, const char* album, const char* summary);

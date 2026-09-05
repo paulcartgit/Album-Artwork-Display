@@ -19,6 +19,8 @@
 #include "web_server.h"
 #include "activity_log.h"
 #include "backoff.h"
+#include "upnp_events.h"
+#include "metadata_client.h"
 
 // ─── Shared state (declared in app.h) ───
 AppContext  g_app = {};
@@ -36,6 +38,56 @@ static String trackHash(const String& artist, const String& title) {
 static unsigned long g_lastIdleSwap = 0;
 static int g_consecutiveIdlePolls = 0;
 static const int IDLE_DEBOUNCE_COUNT = 2; // consecutive idle polls before transitioning
+
+// ─── Sonos eventing ───
+// A subscription turns track changes into a push instead of a wait, so the
+// display follows within a second or two rather than up to a poll interval.
+// Polling continues underneath at a relaxed rate: the subscription can lapse,
+// the speaker can reboot, and events can simply be missed.
+static const uint16_t UPNP_EVENT_PORT = 1401;
+static char  g_sid[64] = {};
+static unsigned long g_subRenewAt = 0;
+static unsigned long g_subRetryAt = 0;
+static char  g_subIp[40] = {};
+
+static void sonosDropSubscription() {
+    if (g_sid[0] && g_subIp[0]) sonosUnsubscribe(g_subIp, g_sid);
+    g_sid[0] = 0; g_subIp[0] = 0; g_subRenewAt = 0;
+}
+
+// Keep the subscription pointed at whichever speaker we are polling.
+static void maintainSubscription(const char* ip) {
+    unsigned long now = millis();
+    if (!ip || !ip[0]) return;
+
+    if (g_sid[0] && strcmp(g_subIp, ip) != 0) {
+        sonosDropSubscription();          // speaker changed
+    }
+
+    if (g_sid[0]) {
+        if ((long)(now - g_subRenewAt) < 0) return;
+        uint32_t secs = 1800;
+        if (sonosRenewSubscription(ip, g_sid, &secs)) {
+            g_subRenewAt = now + (secs / 2) * 1000UL;
+        } else {
+            activityLog("Sonos subscription lapsed — resubscribing");
+            g_sid[0] = 0;
+        }
+        return;
+    }
+
+    if ((long)(now - g_subRetryAt) < 0) return;
+    g_subRetryAt = now + 60000;
+
+    String cb = String("http://") + WiFi.localIP().toString() + ":" +
+                String(UPNP_EVENT_PORT) + "/notify";
+    uint32_t secs = 1800;
+    if (sonosSubscribe(ip, cb.c_str(), g_sid, sizeof(g_sid), &secs)) {
+        strlcpy(g_subIp, ip, sizeof(g_subIp));
+        g_subRenewAt = now + (secs / 2) * 1000UL;
+        activityLogf("Subscribed to Sonos events (%us)", (unsigned)secs);
+    }
+}
 
 // ─── Sonos re-discovery when IP changes ───
 static int g_sonosUnreachableCount = 0;
@@ -86,6 +138,25 @@ static void handlePlaying();
 static void handleIdle();
 static void showFallbackImage();
 static void resetVinylBackoff();
+
+// Fill in the pressing details for whatever is playing, once per album.
+// Runs after the artwork is on screen so it never delays the display.
+static void enrichRelease(const String& artist, const String& album) {
+    if (!artist.length() || !album.length()) return;
+    String cached;
+    if (sdHistoryGetRelease(artist.c_str(), album.c_str(), cached)) {
+        g_app.releaseInfo = cached;      // already known, including a known miss
+        return;
+    }
+    ReleaseInfo info;
+    if (metadataLookup(artist.c_str(), album.c_str(), info)) {
+        g_app.releaseInfo = metadataSummary(info);
+        activityLogf("Release: %s", g_app.releaseInfo.c_str());
+    } else {
+        g_app.releaseInfo = "";
+    }
+    sdHistorySetRelease(artist.c_str(), album.c_str(), g_app.releaseInfo.c_str());
+}
 static void serviceRequests();
 
 // Keep whatever is on the panel there, so a test or calibration pattern
@@ -215,6 +286,7 @@ void controllerSetup() {
 
     // ── Web server ──
     webServerInit();
+    upnpEventsBegin(UPNP_EVENT_PORT);
 
     // ── Ready ──
     // ── Watchdog ──
@@ -320,7 +392,12 @@ void controllerLoop() {
         activityLog("Display hold expired — resuming normal operation");
     }
 
-    if (now - g_app.lastPollTime < g_app.settings.sonos_poll_ms) {
+    // A pushed event means something changed; poll immediately rather than
+    // waiting out the interval.
+    bool pushed = upnpEventsPoll();
+    if (pushed) g_app.lastPollTime = 0;
+
+    if (!pushed && now - g_app.lastPollTime < g_app.settings.sonos_poll_ms) {
         delay(100);
         return;
     }
@@ -347,8 +424,25 @@ void controllerLoop() {
         }
     }
 
+    // Grouped speakers report their own transport, not the group's, so always
+    // talk to the coordinator.
+    char pollIp[40];
+    strlcpy(pollIp, g_app.settings.sonos_ip, sizeof(pollIp));
+    if (strlen(g_app.settings.sonos_name) > 0) {
+        static unsigned long s_lastCoordCheck = 0;
+        static char s_coord[40] = {};
+        if (s_coord[0] == 0 || now - s_lastCoordCheck > 30000) {
+            s_lastCoordCheck = now;
+            sonosResolveCoordinator(g_app.settings.sonos_ip,
+                                    g_app.settings.sonos_name, s_coord, sizeof(s_coord));
+        }
+        if (s_coord[0]) strlcpy(pollIp, s_coord, sizeof(pollIp));
+    }
+    strlcpy(g_app.pollIp, pollIp, sizeof(g_app.pollIp));
+    maintainSubscription(pollIp);
+
     bool reachable = false;
-    bool playing = sonosIsPlaying(g_app.settings.sonos_ip, &reachable);
+    bool playing = sonosIsPlaying(pollIp, &reachable);
 
     if (!reachable) {
         // Connection error — device may have changed IP
@@ -366,6 +460,7 @@ void controllerLoop() {
                 activityLogf("Sonos re-discovered at %s", newIp);
                 g_sonosUnreachableCount = 0;
                 // Retry immediately with the new IP
+                sonosDropSubscription();
                 playing = sonosIsPlaying(g_app.settings.sonos_ip, &reachable);
                 if (!reachable) { handleIdle(); return; }
             } else {
@@ -394,6 +489,7 @@ void controllerLoop() {
             g_app.currentArtist = "";
             g_app.currentTitle  = "";
             g_app.currentAlbum  = "";
+            g_app.releaseInfo   = "";
             g_lastTrackHash = "";
             g_app.lastArtUrl = "";
             resetVinylBackoff();
@@ -486,6 +582,7 @@ static void serviceRequests() {
             g_app.currentTitle  = title;
             g_app.currentAlbum  = album;
             g_lastTrackHash = trackHash(artist, title);
+            enrichRelease(artist, album);
         }
         digitalWrite(LED_RED, LOW);
         return;
@@ -575,6 +672,7 @@ static void handleVinyl() {
     g_app.currentArtist = artist;
     g_app.currentTitle  = title;
     g_app.currentAlbum  = album;
+    enrichRelease(artist, album);
 
     // Remember the album so an unchanged side doesn't re-render the panel.
     // Singles with no album name are always shown.
@@ -624,11 +722,13 @@ static void handleDigital(const SonosTrackInfo& track) {
     } else {
         activityLog("Artwork pipeline failed");
     }
+    enrichRelease(track.artist, track.album);
 }
 
 static void handlePlaying() {
     SonosTrackInfo track;
-    if (!sonosGetTrackInfo(g_app.settings.sonos_ip, track)) {
+    const char* ip = g_app.pollIp[0] ? g_app.pollIp : g_app.settings.sonos_ip;
+    if (!sonosGetTrackInfo(ip, track)) {
         activityLog("Sonos poll failed");
         return;
     }

@@ -31,8 +31,15 @@ struct AppContext {
     String currentAlbum;
     String lastArtUrl;
 
+    // "1973 · Harvest · SHVL 804" for the current album, or empty.
+    String releaseInfo;
+
     // Sonos poll timing
     unsigned long lastPollTime;
+
+    // The speaker actually being polled — the group coordinator, which is not
+    // necessarily the one the user selected.
+    char pollIp[40];
 
     // While set, the state machine leaves the panel alone.  Test and
     // calibration patterns are useless if the idle gallery paints over them a

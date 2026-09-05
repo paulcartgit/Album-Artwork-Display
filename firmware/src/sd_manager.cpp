@@ -417,3 +417,43 @@ String sdHistoryRandomFile() {
     }
     return String("/history/") + g_shuffleBag[g_shufflePos++];
 }
+
+
+// ─── Release metadata cache ───
+// Keyed by the same artist|album hash that names the artwork file, so the
+// lookup and the cover stay together.
+
+static String releaseKeyFile(const char* artist, const char* album) {
+    if (!artist || !artist[0] || !album || !album[0]) return "";
+    String key = String(artist) + "|" + String(album);
+    char fname[20];
+    snprintf(fname, sizeof(fname), "%08x.jpg", djb2(key.c_str()));
+    return String(fname);
+}
+
+bool sdHistoryGetRelease(const char* artist, const char* album, String& summary) {
+    String fname = releaseKeyFile(artist, album);
+    if (!fname.length()) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", fname.c_str()) != 0) continue;
+        if (!obj["rel"].is<const char*>()) return false;
+        summary = obj["rel"].as<const char*>();
+        return true;   // cached, even when empty: a miss is worth remembering
+    }
+    return false;
+}
+
+bool sdHistorySetRelease(const char* artist, const char* album, const char* summary) {
+    String fname = releaseKeyFile(artist, album);
+    if (!fname.length()) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", fname.c_str()) != 0) continue;
+        obj["rel"] = summary ? summary : "";
+        return writeIndex(doc);
+    }
+    return false;
+}
