@@ -399,7 +399,7 @@ details[open] summary::after{transform:rotate(-135deg)}
       <div class="row col"><span class="k">Re-identify vinyl every</span>
         <div class="slider"><input type="range" id="tVinyl" min="1" max="30"
           aria-label="Vinyl re-identify interval"><span class="val" id="tVinylV"></span></div></div>
-      <div class="row col"><span class="k">Pause after failed matches</span>
+      <div class="row col"><span class="k">First pause after failed matches</span>
         <div class="slider"><input type="range" id="tCool" min="1" max="15"
           aria-label="Pause after failed matches"><span class="val" id="tCoolV"></span></div></div>
       <div class="row col"><span class="k">Rotate artwork when idle</span>
@@ -407,7 +407,9 @@ details[open] summary::after{transform:rotate(-135deg)}
           aria-label="Idle rotation interval"><span class="val" id="tIdleV"></span></div></div>
     </div>
     <p class="hint">The frame subscribes to Sonos for instant updates; this poll is the fallback
-    for when an event is missed.</p>
+    for when an event is missed. The pause after a failed vinyl match lengthens each
+    time it fails again — this sets the first one — so a record it cannot identify
+    stops costing a listen every few minutes.</p>
 
     <div class="label">Vinyl</div>
     <div class="card"><div class="row col"><span class="k">Shazam API key</span>

@@ -54,6 +54,12 @@ struct FakeSerial { template<typename... Args> void println(Args...) {} template
 //
 // Repeating a pigment weights it: { R, B, W, W } is quarter-red, quarter-blue,
 // half-white. { G, B, G, B } is the plain 50/50 the pairs used to be.
+// How much of the CHROMA component of the diffused error to carry onward.
+// 1.0 is the historical behaviour: spread the raw RGB residual unchanged.
+#ifndef ERROR_CHROMA_DAMP
+#define ERROR_CHROMA_DAMP 1.0f
+#endif
+
 static constexpr int MATCH_COLORS = EPD_COLORS + 11;
 
 // The 2x2 cell each virtual colour tiles, in reading order.
@@ -248,6 +254,22 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
                 er = eLum + (er - eLum) * chromaScale;
                 eg = eLum + (eg - eLum) * chromaScale;
                 eb = eLum + (eb - eLum) * chromaScale;
+            }
+
+            // Damp the chroma half of the diffused error everywhere, not only
+            // in shadows. The match is made in CIELAB but the residual is
+            // spread as a raw RGB vector, so a chroma error propagates as
+            // hard as a luminance one despite being far less visible — and it
+            // compounds: the panel's white is #E0E0D9, so placing it for a
+            // neutral target leaves an error near (-15,-15,-8), and diffusing
+            // that faithfully walks a flat grey into blue and then red.
+            // Luminance error still spreads at full strength, because that is
+            // what carries detail.
+            if (ERROR_CHROMA_DAMP != 1.0f) {
+                const float eLum = 0.299f * er + 0.587f * eg + 0.114f * eb;
+                er = eLum + (er - eLum) * ERROR_CHROMA_DAMP;
+                eg = eLum + (eg - eLum) * ERROR_CHROMA_DAMP;
+                eb = eLum + (eb - eLum) * ERROR_CHROMA_DAMP;
             }
 
             // Edge-aware: attenuate error leaving a pixel that sits on an edge.

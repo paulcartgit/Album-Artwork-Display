@@ -114,9 +114,18 @@ bool inQuietHours() {
                    : (hour >= a || hour < b);    // wraps midnight, e.g. 23:00-07:00
 }
 
+// Set by an explicit refresh request and consumed by the next repaint. The
+// floor exists to stop a playlist skipping through tracks wearing the panel
+// out; someone pressing Redraw has asked for exactly one repaint and should
+// get it. Before this, Force refresh logged "clearing caches" and was then
+// silently swallowed by the floor, which made the button a lie.
+static bool g_bypassRefreshFloor = false;
+static bool g_restorePending = false;
+
 // Refuse to repaint too soon. Without this, skipping through a playlist
 // repaints on every track, and each full refresh is 20-25s of panel wear.
 static bool refreshTooSoon() {
+    if (g_bypassRefreshFloor) return false;
     unsigned long last = displayLastRefreshMs();
     if (last == 0) return false;
     return (millis() - last) < g_app.settings.min_refresh_ms;
@@ -308,14 +317,24 @@ void controllerSetup() {
     }
     delay(3000);
 
-    // Put the last cover back up rather than leaving the address on screen
-    // until something plays. E-ink holds its last image through a restart, so
-    // before this the panel showed the old artwork while the firmware had no
-    // copy of it — the portal served nothing, and the frame looked right only
-    // by accident. Restoring it makes the two agree again.
-    {
+    // Ask the loop to put the last cover back, rather than doing it here.
+    // Doing it inline was a 20-25s panel refresh inside setup, after the
+    // watchdog is armed and before the loop that feeds it exists — the frame
+    // reset-looped on the watchdog. The loop already feeds it every pass, so
+    // the restore belongs there.
+    g_restorePending = true;
+}
+
+// ═══════════════════════════════════════════════════════════
+void controllerLoop() {
+    esp_task_wdt_reset();
+
+    // One-shot: put back whatever was last on the panel. E-ink keeps showing
+    // it through a restart, but the firmware has no copy, so the portal has
+    // nothing to serve until the next track change.
+    if (g_restorePending) {
+        g_restorePending = false;
         String last = sdHistoryNewestFile();
-        Serial.printf("[BOOT] Restore candidate: '%s'\n", last.c_str());
         if (!last.length()) {
             activityLog("No history to restore after restart");
         } else if (pipelineProcessFile(last.c_str())) {
@@ -329,12 +348,9 @@ void controllerSetup() {
         } else {
             activityLogf("Could not restore %s after restart", last.c_str());
         }
+        esp_task_wdt_reset();
+        return;                    // one long job per pass
     }
-}
-
-// ═══════════════════════════════════════════════════════════
-void controllerLoop() {
-    esp_task_wdt_reset();
 
     if (g_app.state == STATE_ERROR) {
         delay(10000);
@@ -628,6 +644,7 @@ static void serviceRequests() {
         g_lastIdleSwap = 0;
         g_app.lastPollTime = 0; // force immediate poll
         resetVinylBackoff();
+        g_bypassRefreshFloor = true;
         activityLog("Force refresh — clearing caches");
     }
 }
@@ -744,6 +761,7 @@ static void handleDigital(const SonosTrackInfo& track) {
         return;
     }
 
+    g_bypassRefreshFloor = false;   // one repaint per request, not a mode
     activityLog("Downloading artwork...");
     const char* overlayArtist = g_app.settings.show_track_info ? track.artist.c_str() : nullptr;
     const char* overlayAlbum  = g_app.settings.show_track_info ? track.album.c_str()  : nullptr;
@@ -778,6 +796,7 @@ static void handleIdle() {
     if (g_lastIdleSwap != 0 && (now - g_lastIdleSwap) < g_app.settings.idle_gallery_ms) return;
     if (refreshTooSoon()) return;
     g_lastIdleSwap = now;
+    g_bypassRefreshFloor = false;   // consumed here too, if the gallery got there first
 
     showFallbackImage();
 }
