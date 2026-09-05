@@ -191,7 +191,12 @@ struct Settings {
     uint8_t bg_mode;         // 0 = always solid, 1 = always blur, 2 = auto (default)
     uint8_t bg_style;        // 0 = darken background, 1 = wash out (lighten)
     uint8_t render_profile;  // RenderProfileId — 1 (Natural) by default
-    uint8_t fill_mode;       // FillMode — how artwork fills the portrait panel
+    uint8_t fill_mode;
+    // Look for a better-rendering scan of the same sleeve on the Cover Art
+    // Archive. Off by default: it costs several seconds and a handful of
+    // downloads per new album, and the gate that keeps it honest (cover_match.h)
+    // is worth understanding before turning it on.
+    bool cover_variants;       // FillMode — how artwork fills the portrait panel
     uint32_t min_refresh_ms; // floor between panel refreshes (protects the panel)
     uint8_t quiet_start_hour;// local hour to stop refreshing (0-23)
     uint8_t quiet_end_hour;  // local hour to resume (equal values = never quiet)

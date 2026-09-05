@@ -3,6 +3,8 @@
 #include "dither.h"
 #include "tone_map.h"
 #include "gamut.h"
+#include "cover_match.h"
+#include "cover_variants.h"
 
 // Last pre-dither canvas, downsampled, so the simulator can be compared against
 // what the device actually fed the dither rather than against a guess at it.
@@ -1112,6 +1114,102 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
 
 // ─── Public API ───
 
+
+// ─── How well would this cover render? ───
+//
+// Used to choose between pressings of the same album. Decodes at a quarter
+// scale and runs the same trial the real path runs, so the answer is the
+// pipeline's own opinion rather than a proxy for it — three separate proxies
+// were tried for the tone map and all three chose wrong.
+//
+// Also returns the artwork signature, because a candidate that renders
+// beautifully is no use if it is a different sleeve. See cover_match.h.
+bool pipelineAssessJpeg(const uint8_t* jpeg, size_t len,
+                        float* scoreOut, float* sigOut) {
+    uint16_t imgW = 0, imgH = 0;
+    if (TJpgDec.getJpgSize(&imgW, &imgH, (uint8_t*)jpeg, len) != JDR_OK ||
+        !imgW || !imgH) return false;
+
+    const int div = 4;                       // plenty for both jobs
+    const int dw = imgW / div, dh = imgH / div;
+    if (dw < 16 || dh < 16) return false;
+
+    uint8_t* prevBuf = g_decodeBuf;
+    const int prevW = g_decodeW, prevH = g_decodeH;
+
+    g_decodeW = dw; g_decodeH = dh;
+    g_decodeBuf = (uint8_t*)heap_caps_malloc((size_t)dw * dh * 3, MALLOC_CAP_SPIRAM);
+    if (!g_decodeBuf) {
+        g_decodeBuf = prevBuf; g_decodeW = prevW; g_decodeH = prevH;
+        return false;
+    }
+
+    TJpgDec.setCallback(tjpgCallback);
+    TJpgDec.setJpgScale(div);
+    const bool ok = TJpgDec.drawJpg(0, 0, (uint8_t*)jpeg, len) == JDR_OK;
+    TJpgDec.setJpgScale(1);
+
+    if (ok) {
+        if (sigOut) coverSignature(g_decodeBuf, dw, dh, sigOut);
+
+        if (scoreOut) {
+            // A square canvas of the sleeve alone. The real path also extends
+            // the artwork to fill the panel, but every candidate is treated
+            // alike so the comparison holds, and the extension is derived from
+            // the sleeve anyway.
+            const int cw = 120, ch = 200;
+            uint8_t* canvas = (uint8_t*)heap_caps_malloc((size_t)cw * ch * 3,
+                                                         MALLOC_CAP_SPIRAM);
+            uint8_t* packed = (uint8_t*)heap_caps_malloc((size_t)cw * ch / 2,
+                                                         MALLOC_CAP_SPIRAM);
+            uint8_t* shown  = (uint8_t*)heap_caps_malloc((size_t)cw * ch * 3,
+                                                         MALLOC_CAP_SPIRAM);
+            if (canvas && packed && shown) {
+                for (int y = 0; y < ch; y++)
+                    for (int x = 0; x < cw; x++) {
+                        const int sx = x * dw / cw, sy = y * dh / ch;
+                        const uint8_t* sp = &g_decodeBuf[((size_t)sy * dw + sx) * 3];
+                        uint8_t* dp = &canvas[((size_t)y * cw + x) * 3];
+                        dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2];
+                    }
+                const RenderProfile& profile =
+                    renderProfile(g_app.settings.render_profile);
+                uint8_t* ref = (uint8_t*)heap_caps_malloc((size_t)cw * ch * 3,
+                                                          MALLOC_CAP_SPIRAM);
+                if (ref) memcpy(ref, canvas, (size_t)cw * ch * 3);
+
+                float best = 1e30f;
+                for (int k = 0; k < TONEMAP_SCALES * 2; k++) {
+                    if (ref) memcpy(canvas, ref, (size_t)cw * ch * 3);
+                    toneMapApply(canvas, cw, ch, TONEMAP_SCALE[k % TONEMAP_SCALES]);
+                    if (k >= TONEMAP_SCALES) gamutMapApply(canvas, cw, ch);
+                    enhanceForEink(canvas, cw, ch, profile);
+                    ditherFloydSteinberg(canvas, packed, cw, ch, profile);
+                    for (size_t i = 0; i < (size_t)cw * ch; i++) {
+                        const uint8_t idx = (i & 1) ? (packed[i >> 1] & 0x0F)
+                                                    : (packed[i >> 1] >> 4);
+                        const PaletteColor& pc = PALETTE[idx < EPD_COLORS ? idx : 1];
+                        shown[i*3] = pc.r; shown[i*3+1] = pc.g; shown[i*3+2] = pc.b;
+                    }
+                    float dE = 0.0f, hue = 0.0f;
+                    toneMapScore(canvas, shown, cw, ch, 8, &dE, &hue);
+                    const float sc = dE + TONEMAP_HUE_WEIGHT * hue;
+                    if (sc < best) best = sc;
+                }
+                heap_caps_free(ref);
+                *scoreOut = best;
+            } else {
+                *scoreOut = 1e30f;
+            }
+            heap_caps_free(canvas); heap_caps_free(packed); heap_caps_free(shown);
+        }
+    }
+
+    heap_caps_free(g_decodeBuf);
+    g_decodeBuf = prevBuf; g_decodeW = prevW; g_decodeH = prevH;
+    return ok;
+}
+
 bool pipelineProcessUrl(const char* url,
                         const char* overlayArtist, const char* overlayAlbum,
                         const char* artist, const char* title, const char* album) {
@@ -1120,6 +1218,25 @@ bool pipelineProcessUrl(const char* url,
     if (!jpegBuf || jpegSize == 0) {
         activityLog("Artwork fetch failed");
         return false;
+    }
+
+    // Look for a better-rendering scan of the SAME sleeve. Only ever a
+    // different scan — cover_match.h refuses anything that is not recognisably
+    // the same picture, because ranking on render quality alone would hang an
+    // obscure reissue on the wall in place of the famous cover.
+    if (g_app.settings.cover_variants && artist && artist[0] && album && album[0]) {
+        String better;
+        if (coverChooseVariant(artist, album, jpegBuf, jpegSize, better)) {
+            size_t altSize = 0;
+            uint8_t* altBuf = downloadJpeg(better.c_str(), altSize);
+            if (altBuf && altSize) {
+                heap_caps_free(jpegBuf);
+                jpegBuf = altBuf;
+                jpegSize = altSize;
+            } else if (altBuf) {
+                heap_caps_free(altBuf);
+            }
+        }
     }
 
     PipelineResult res = processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum);

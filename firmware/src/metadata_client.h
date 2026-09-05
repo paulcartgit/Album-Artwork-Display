@@ -15,6 +15,11 @@
 
 #define RELEASE_CANDIDATES 6   // release ids kept for cover-art selection
 
+// Shared so other MusicBrainz-family requests (Cover Art Archive) identify
+// themselves the same way. Both services ask for an honest User-Agent and it
+// would be rude, and rate-limitable, to send two different ones.
+extern const char* MB_USER_AGENT;
+
 struct ReleaseInfo {
     String year;            // "1973"
     String label;           // "Harvest"

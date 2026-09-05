@@ -308,6 +308,7 @@ void webServerInit() {
         doc["bg_style"]             = g_app.settings.bg_style;
         doc["render_profile"]       = g_app.settings.render_profile;
         doc["fill_mode"]            = g_app.settings.fill_mode;
+        doc["cover_variants"]       = g_app.settings.cover_variants;
         doc["min_refresh_ms"]       = g_app.settings.min_refresh_ms;
         doc["quiet_start_hour"]     = g_app.settings.quiet_start_hour;
         doc["quiet_end_hour"]       = g_app.settings.quiet_end_hour;
@@ -361,6 +362,8 @@ void webServerInit() {
                 g_app.settings.quiet_end_hour = (uint8_t)doc["quiet_end_hour"] % 24;
             if (doc["utc_offset_hours"].is<int>())
                 g_app.settings.utc_offset_hours = (int8_t)doc["utc_offset_hours"];
+            if (doc["cover_variants"].is<bool>())
+                g_app.settings.cover_variants = doc["cover_variants"];
             if (doc["fill_mode"].is<unsigned int>()) {
                 uint8_t f = doc["fill_mode"];
                 g_app.settings.fill_mode = (f <= FILL_COVER) ? f : FILL_ADAPTIVE;

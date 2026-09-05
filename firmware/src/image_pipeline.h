@@ -17,6 +17,13 @@ bool pipelineProcessUrl(const char* url,
 const uint8_t* pipelineCanvasProbe();
 size_t pipelineCanvasProbeSize();
 
+// How well would this JPEG render on the panel, and what artwork is it?
+// Lower scores are better. Either output may be null. Used to choose between
+// pressings of the same album; see cover_match.h for why the signature
+// matters as much as the score.
+bool pipelineAssessJpeg(const uint8_t* jpeg, size_t len,
+                        float* scoreOut, float* sigOut);
+
 // Process a local JPEG file from SD card
 bool pipelineProcessFile(const char* path);
 

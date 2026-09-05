@@ -112,6 +112,7 @@ bool sdReadSettings(Settings& settings) {
     settings.bg_style = 0; // darken
     settings.render_profile = PROFILE_NATURAL;
     settings.fill_mode = FILL_ADAPTIVE;
+    settings.cover_variants = false;
     settings.min_refresh_ms = MIN_REFRESH_INTERVAL_MS;
     settings.quiet_start_hour = 0;
     settings.quiet_end_hour = 0;      // equal = quiet hours disabled
@@ -146,6 +147,7 @@ bool sdReadSettings(Settings& settings) {
     settings.bg_style = doc["bg_style"] | 0;
     settings.render_profile = doc["render_profile"] | (uint8_t)PROFILE_NATURAL;
     settings.fill_mode = doc["fill_mode"] | (uint8_t)FILL_ADAPTIVE;
+    settings.cover_variants = doc["cover_variants"] | false;
     if (settings.fill_mode > FILL_COVER) settings.fill_mode = FILL_ADAPTIVE;
     settings.min_refresh_ms = doc["min_refresh_ms"] | (uint32_t)MIN_REFRESH_INTERVAL_MS;
     settings.quiet_start_hour = doc["quiet_start_hour"] | 0;
@@ -170,6 +172,7 @@ bool sdWriteSettings(const Settings& settings) {
     doc["bg_style"] = settings.bg_style;
     doc["render_profile"] = settings.render_profile;
     doc["fill_mode"] = settings.fill_mode;
+    doc["cover_variants"] = settings.cover_variants;
     doc["min_refresh_ms"] = settings.min_refresh_ms;
     doc["quiet_start_hour"] = settings.quiet_start_hour;
     doc["quiet_end_hour"] = settings.quiet_end_hour;

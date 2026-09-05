@@ -6,7 +6,7 @@
 
 // MusicBrainz asks for a User-Agent identifying the application and a contact.
 // Sending a generic one is how clients get blocked.
-static const char* MB_USER_AGENT =
+const char* MB_USER_AGENT =
     "NowPlayingFrame/1.0 ( https://github.com/paulcartgit/Album-Artwork-Display )";
 
 // MusicBrainz permits one request per second per client, averaged. Artwork
