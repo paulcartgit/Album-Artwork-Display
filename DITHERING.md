@@ -108,7 +108,9 @@ However, we later moved to a chroma-aware penalty system (see below) which made 
 
 ## The Missing-Colour Problem
 
-This is the central challenge. With 6 colours that are 6 of the 8 RGB cube corners, the missing corners are **Cyan (0, 255, 255)** and **Magenta (255, 0, 255)**.
+> **Correction (2026):** for a long time the implementation matched and diffused error against *idealised* RGB cube corners — `(0,255,0)` for green, `(255,0,0)` for red — while `config.h` carried a carefully calibrated table of what the pigments actually look like that nothing read. Every colour decision was therefore made against a model of a panel we don't have; the panel's green pigment was being matched as blue. Matching now happens in calibrated space throughout, and the virtual entries below are derived from it. The section is left in place because the *reasoning* still holds — only the coordinates changed.
+
+This is the central challenge. Our 6 pigments are roughly 6 of the 8 RGB cube corners; the missing corners are **Cyan** and **Magenta**.
 
 For **purple** on the display, the algorithm must interleave Red and Blue pixels. But standard error diffusion cannot achieve this:
 
@@ -366,11 +368,12 @@ FOR each row (serpentine: alternating L→R / R→L):
            → Apply chroma penalty (K=5.0) to Black/White when pixel is chromatic
         3. Map virtual colours to physical checkerboard:
            Cyan → Green/Blue, Magenta → Red/Blue  [based on (x+y) & 1]
-        4. Compute RGB error against ACTUAL placed colour (idealized values)
+        4. Compute RGB error against the ACTUAL placed pigment
+           → the CALIBRATED value from PALETTE[], not an idealized corner
         5. In shadows (lum < 8): suppress chrominance component of error
-        6. At edges: attenuate error by (1 − edge×0.85)
+        6. At edges: attenuate error by (1 − edge × profile.edgeAttenuation)
+           → applied ONCE, at the source pixel
         7. Distribute error via Floyd-Steinberg kernel (7/16, 3/16, 5/16, 1/16)
-           → Also attenuate each kernel target by its own edge strength
         8. Pack 4-bit palette index into output buffer
 ```
 
@@ -408,3 +411,134 @@ This image was passed through the actual dither pipeline and displayed on hardwa
 ---
 
 *This document was produced during the development of an ESP32-S3-based album artwork display using the GDEP073E01 6-colour e-paper panel. The full source code is available in the project repository.*
+
+
+---
+
+## The Calibrated Palette Is the Matching Space
+
+Everything above depends on one thing that is easy to get wrong: **the coordinates you match against must be what the panel actually shows, not what the colour is called.**
+
+The Spectra 6 pigments are muted. Its "green" is a dark teal (`#306658`), its "red" a brick crimson (`#9C302C`), its "white" a cool light grey (`#D8DAD4`). If the matcher believes the palette is `{#000000, #FFFFFF, #00FF00, #0000FF, #FF0000, #FFFF00}`, then:
+
+- every distance computation is wrong, so the wrong pigment gets chosen;
+- every error term is wrong, because the error is measured against a colour that was never placed;
+- and the two compound down the serpentine scan.
+
+Concretely, feeding the dither the panel's own green pigment used to come back as **blue**. The regression test `test_dither_matches_calibrated_pigments` pins this: every entry in `PALETTE[]` must round-trip to its own index with nothing left to diffuse.
+
+The virtual entries follow from the same principle. Virtual Magenta is not `#FF00FF`; it is the midpoint of the calibrated red and blue pigments — the colour the eye will actually integrate when those two are interleaved:
+
+```c
+static constexpr uint8_t VIRTUAL_PAIR[2][2] = {
+    { 2, 3 },  // Cyan    → Green / Blue
+    { 4, 3 },  // Magenta → Red   / Blue
+};
+// MATCH_PAL[virtual] = midpoint of the calibrated pair
+```
+
+Error, however, is still diffused against the pigment **physically placed** (Red *or* Blue), not against the virtual midpoint. That asymmetry is deliberate and it is what produces the interleave: having placed Red for a magenta pixel, the residual blue pushes the next pixel toward Blue, and vice versa. Diffusing against the midpoint instead under-accounts for the error and washes the checkerboard out.
+
+### Applying edge attenuation once
+
+Edge-aware diffusion originally attenuated the error twice — once leaving the source pixel and again entering each kernel target. That discards the same energy twice, so total error is not conserved and edges drift progressively lighter. It is now applied once, at the source.
+
+---
+
+## Render Profiles
+
+The pipeline has a lot of tuning constants, and the right value depends on the artwork. Bold graphic sleeves want sharpening and contrast; photographic covers want to be left alone. These are now exposed as three named profiles in `config.h` rather than baked in:
+
+| | Sharpen | Contrast | Gamma | Chroma K | Onset | Edge atten. |
+|---|---|---|---|---|---|---|
+| **Punchy** | 0.65 | 1.35 | 0.85 | 7.0 | 10.0 | 0.85 |
+| **Natural** | 0.40 | 1.20 | 0.90 | 5.0 | 12.0 | 0.85 |
+| **Soft** | 0.20 | 1.08 | 0.95 | 3.5 | 16.0 | 0.70 |
+
+**Natural** reproduces the historical behaviour exactly, so existing devices look identical until you choose otherwise. Pick a profile in the web portal under Settings → Display.
+
+To compare them on a real cover without touching the hardware:
+
+```bash
+cd simulator
+python dither_preview.py cover.jpg --all-profiles
+```
+
+---
+
+## Keeping the Simulator Honest
+
+`simulator/eink.py` is a Python port of this algorithm, and it is what you should use to iterate — a panel refresh takes ~15 seconds, a simulator render takes ~5.
+
+That port had previously drifted into a different algorithm entirely (a seven-colour palette, plain RGB matching, no virtual colours) while still claiming to "mirror dither.cpp exactly". Two things now prevent that:
+
+1. `simulator/firmware_config.py` parses `PALETTE[]` and `RENDER_PROFILES[]` directly out of `firmware/src/config.h`. There is one definition.
+2. `simulator/parity_check.py` reads the C++ sources for the remaining constants and repeats the native test suite's behavioural assertions against the Python implementation. It runs in CI.
+
+If you change the algorithm, change it in both places — the parity check will tell you if you forgot.
+
+
+---
+
+## Verifying the Palette Against the Real Panel
+
+Everything in this document rests on `PALETTE[]` being right, and the only
+instrument that can tell you whether it is right is the panel itself.
+
+### A note on the history
+
+Worth knowing before you re-calibrate, because it changes how much to trust the
+values currently in `config.h`:
+
+| Date | Commit | What happened |
+|---|---|---|
+| 11 Apr | `ad42a2f` | Palette introduced (7 colours incl. Orange). Dither matched against it in RGB — **calibration was live**. |
+| 13 Apr | `fc091a6` | Palette re-tuned from photos (green → `#67A062`, red → `#B02628`, Orange dropped). Still matched in RGB — **calibration was live**. |
+| 18 Apr | `18f6f78` | CIELAB rewrite lands **and** the palette is re-tuned again, in the same commit. The rewrite matched against idealised RGB cube corners, so `PALETTE[]` stopped being read. **Calibration went dead.** |
+
+The values sitting in `config.h` today are the 18 April set — the round that
+landed in the same commit that disconnected them. They have therefore most
+likely never influenced a single rendered image. They are a reasonable starting
+estimate (they were derived by eye from photographs), but they have not been
+validated against output that actually used them.
+
+Now that the dither reads them again, they matter, and they are worth
+re-checking.
+
+### The loop
+
+1. **Web portal → Debug → Palette Calibration Card.** Six flat, undithered
+   pigment patches on a white field. Undithered matters: each patch is exactly
+   one pigment, so what you photograph is ground truth rather than an optical
+   mix.
+2. **Photograph it** square-on, in even indirect light. No flash, no glare, no
+   coloured lamps. Crop roughly to the panel.
+3. **Run the sampler:**
+   ```bash
+   cd simulator
+   python calibrate_from_photo.py photo.jpg --preview check.png
+   ```
+   Open `check.png` first and confirm each magenta box sits inside its patch.
+4. **Paste** the emitted `PALETTE[]` block into `config.h`, rebuild, and update
+   over the air (Debug → Firmware Update).
+5. **Re-shoot the card** and run with `--check`. The reported delta should have
+   shrunk. Two rounds is normally enough.
+
+The simulator needs no update — it parses `config.h`.
+
+### Judging real artwork
+
+The card tells you whether the *pigments* are described correctly. It doesn't
+tell you whether photographs look good, which is what you actually care about.
+For that, pick three or four covers you know well — one with skin tones, one
+heavily saturated, one dark and moody, one with fine detail — and keep them as
+a fixed reference set. Render them in the simulator first:
+
+```bash
+python dither_preview.py cover.jpg --all-profiles
+```
+
+then put the same covers on the panel and photograph them under the light the
+frame actually lives in. Comparing against the *same* covers each time is what
+makes slow, subtle regressions visible; comparing against whatever happens to be
+playing does not.

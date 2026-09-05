@@ -1088,3 +1088,58 @@ void pipelineShowDitherTest() {
     heap_caps_free(packed);
     Serial.println("[DitherTest] Dither test pattern displayed");
 }
+
+// ─── Palette calibration card ───
+//
+// Six flat, undithered pigment patches on a white field.  Because the patches
+// bypass dithering entirely, each one shows exactly what a single pigment looks
+// like on this panel under your room's lighting — which is the ground truth the
+// dither needs and the only thing a photograph can actually tell you.
+//
+// Layout is fixed (see the CAL_* constants in image_pipeline.h) so that
+// simulator/calibrate_from_photo.py can sample the patch centres from a photo:
+//
+//     +---------------------+
+//     |  [0 Black] [1 White]|
+//     |  [2 Green] [3 Blue ]|
+//     |  [4 Red  ] [5 Yellw]|
+//     +---------------------+
+//
+void pipelineShowCalibrationCard() {
+    size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
+    uint8_t* packed = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
+    if (!packed) {
+        Serial.println("[Calibration] Packed alloc failed");
+        return;
+    }
+    // White field — index 1 in both nibbles
+    memset(packed, 0x11, packedSize);
+
+    auto setPixel = [&](int x, int y, uint8_t idx) {
+        if (x < 0 || x >= EPD_WIDTH || y < 0 || y >= EPD_HEIGHT) return;
+        int pi = y * EPD_WIDTH + x;
+        int bi = pi / 2;
+        if (pi & 1) packed[bi] = (packed[bi] & 0xF0) | (idx & 0x0F);
+        else        packed[bi] = (packed[bi] & 0x0F) | (idx << 4);
+    };
+
+    for (int c = 0; c < EPD_COLORS; c++) {
+        int col = c % CAL_COLS;
+        int row = c / CAL_COLS;
+        int x0 = CAL_MARGIN_X + col * (CAL_PATCH_W + CAL_GUTTER_X);
+        int y0 = CAL_MARGIN_Y + row * (CAL_PATCH_H + CAL_GUTTER_Y);
+
+        for (int y = y0; y < y0 + CAL_PATCH_H; y++)
+            for (int x = x0; x < x0 + CAL_PATCH_W; x++)
+                setPixel(x, y, (uint8_t)c);
+
+        Serial.printf("[Calibration] Patch %d (%s-ish) at (%d,%d) %dx%d\n",
+                      c, c == 0 ? "black" : c == 1 ? "white" : "colour",
+                      x0, y0, CAL_PATCH_W, CAL_PATCH_H);
+    }
+
+    displayShowImage(packed);
+    heap_caps_free(packed);
+    Serial.println("[Calibration] Card displayed — photograph it head-on in even light");
+    activityLog("Calibration card displayed");
+}

@@ -60,6 +60,7 @@ struct AppRequests {
     volatile bool forceRefresh;
     volatile bool testColors;
     volatile bool testDither;
+    volatile bool testCalibration;
     volatile bool forceListen;
     volatile bool reboot;
 };

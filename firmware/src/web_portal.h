@@ -225,6 +225,8 @@ button.danger:active{background:#722}
     <b>Force Display Refresh</b> — re-fetches artwork and redraws the e-ink display.<br>
     <b>Test Color Pattern</b> — shows 6 color bands to verify all e-ink pigments.<br>
     <b>Dither Test Pattern</b> — shows dithered color mixes: purples, pinks, greys, etc.<br>
+    <b>Palette Calibration Card</b> — six flat, undithered pigment patches. Photograph it and run
+    <code>simulator/calibrate_from_photo.py</code> to regenerate the calibrated palette.<br>
     <b>Download Last Audio</b> — saves the most recent recording as a WAV file.
   </p>
 </div>
@@ -321,6 +323,17 @@ async function testDither() {
   try {
     await fetch('/api/test-dither', {method:'POST'});
     alert('Dither test pattern sent — 8 rows of color swatches through F-S dithering');
+  } catch(e) { alert('Failed: '+e.message); }
+}
+
+async function testCalibration() {
+  try {
+    await fetch('/api/test-calibration', {method:'POST'});
+    alert('Calibration card sent.\n\n'
+        + 'Once the panel finishes refreshing (~15s), photograph it square-on '
+        + 'in even, indirect light, then run:\n\n'
+        + '  cd simulator\n'
+        + '  python calibrate_from_photo.py photo.jpg');
   } catch(e) { alert('Failed: '+e.message); }
 }
 

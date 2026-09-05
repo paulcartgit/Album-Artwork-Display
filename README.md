@@ -62,9 +62,11 @@ Album art goes through a multi-stage image processing pipeline optimised for the
 3. **Scaling** — Fit to display with correct aspect ratio, centred with margin for drop shadow
 4. **Drop shadow** — Top and bottom gradient bands (20px, quadratic falloff) in full-art mode
 5. **Text overlay** — 2× supersampled anti-aliased rendering (FreeSansBold 24pt artist, FreeSans 18pt album), auto-scaling and ellipsis truncation for long names, contrast-adaptive text colour (white on dark, black on light), frosted overlay on blurred backgrounds for legibility
-6. **Enhancement** — Unsharp mask sharpening, contrast boost, gamma correction with shadow protection
-7. **Dithering** — CIELAB color space, Stucki error diffusion kernel, serpentine scanning, lightness-weighted matching, error cap with dampening for stability
+6. **Enhancement** — Unsharp mask sharpening, contrast boost, gamma correction with shadow protection (strength set by the render profile)
+7. **Dithering** — CIELAB matching against the *calibrated* pigment values, Floyd-Steinberg error diffusion, serpentine scanning, virtual Cyan/Magenta entries for out-of-gamut colours, chroma-aware penalty so White doesn't absorb pastels, shadow chroma suppression, edge-aware attenuation. See [DITHERING.md](DITHERING.md).
 8. **Placeholder fallback** — When artwork can't be decoded (unsupported JPEG format), a text-only display shows artist and album name on a dark background
+
+Artwork is cached to the SD card only after it successfully decodes, so an unreadable image can't wedge the idle gallery.
 
 ## Web Portal
 
@@ -78,7 +80,8 @@ Current track info, artwork preview, and activity log. Buttons to force a Sonos 
 - **Sonos** — Scan and select a speaker by room name
 - **Shazam** — RapidAPI key for vinyl identification
 - **Timing** — Sonos poll interval (5–60s), vinyl re-identify interval (1–30 min), no-match cooldown (1–15 min), idle gallery rotation (1–30 min)
-- **Display** — Track info overlay toggle, background fill mode (auto/blur/solid), background style (darken/wash out)
+- **Display** — Track info overlay toggle, background fill mode (auto/blur/solid), background style (darken/wash out), render profile (Punchy/Natural/Soft)
+- **Security** — Optional portal password (username `admin`). Off by default; with no password, anyone on your network can change the Wi-Fi settings
 
 ### History
 Gallery grid of all saved album covers (up to 100), split into **Pinned** and **History** sections:
@@ -87,7 +90,7 @@ Gallery grid of all saved album covers (up to 100), split into **Pinned** and **
 - **Delete** unwanted entries
 
 ### Debug
-Device IP, uptime, force display refresh, test color pattern, download last audio recording.
+Device IP, uptime, force display refresh, test color pattern, dither test pattern, download last audio recording, and **firmware update** — upload a new `firmware.bin` over the network instead of unmounting the frame.
 
 ## Album Art History
 
@@ -108,7 +111,7 @@ Additional behaviours:
 - **Idle debounce** — Requires 2 consecutive idle polls before transitioning from playing to idle (prevents false transitions during track changes)
 - **Escalating cooldown** — After Shazam retries are exhausted, cooldown duration escalates progressively, capped at 30 minutes
 - **Speaker rediscovery** — After 3 consecutive Sonos failures, re-discovers the speaker by room name via UPnP/SOAP topology API
-- **Display queue** — Artwork arriving while the e-ink is still refreshing (~15s) is queued and processed when the panel finishes
+- **Blocking refresh** — A panel refresh takes ~15s and blocks the state machine for its duration, yielding throughout so Wi-Fi and the web portal stay responsive
 - **Physical button** — BTN_KEY triggers immediate re-identification (resets all cooldowns)
 
 ## 6-Color Palette
@@ -117,23 +120,35 @@ The Spectra 6 e-ink display uses these calibrated pigment colors:
 
 | Index | Color | Calibrated RGB |
 |-------|-------|----------------|
-| 0 | Black | `#000000` |
-| 1 | White | `#FFFFFF` |
-| 2 | Green | `#3A6B35` (muted olive) |
-| 3 | Blue | `#4A6B8A` (muted steel) |
-| 4 | Red | `#8B2500` (deep crimson) |
-| 5 | Yellow | `#C8A000` (warm golden) |
+| 0 | Black | `#101012` (near-black charcoal) |
+| 1 | White | `#D8DAD4` (light grey, slight cool tint) |
+| 2 | Green | `#306658` (dark teal-green) |
+| 3 | Blue | `#3868C0` (medium-bright, saturated) |
+| 4 | Red | `#9C302C` (dark brick-crimson) |
+| 5 | Yellow | `#C8B830` (warm golden) |
+
+These are the single source of truth: the dither matches and diffuses error against them, and the simulator parses them straight out of `config.h`. If you recalibrate, change them here and nowhere else.
+
+To re-derive them from your own panel: **Debug → Palette Calibration Card**, photograph it, then
+
+```bash
+cd simulator && python calibrate_from_photo.py photo.jpg --preview check.png
+```
+
+See [DITHERING.md](DITHERING.md#verifying-the-palette-against-the-real-panel) for the full loop.
 
 ## Project Structure
 
 ```
 firmware/               ESP32-S3 PlatformIO firmware
 ├── src/
-│   ├── main.cpp            Entry point, state machine, Sonos polling
-│   ├── config.h            Pin definitions, constants, settings struct
+│   ├── main.cpp            setup()/loop() shim
+│   ├── controller.cpp/h    State machine, Sonos polling, request servicing
+│   ├── app.h               Shared application state and web-server requests
+│   ├── config.h            Pin definitions, constants, palette, render profiles
 │   ├── display.cpp/h       GxEPD2 6-color e-ink driver (non-blocking refresh)
 │   ├── image_pipeline.cpp/h    JPEG → scale → enhance → dither → display
-│   ├── dither.cpp/h        CIELAB + Stucki + serpentine dithering
+│   ├── dither.cpp/h        CIELAB + Floyd-Steinberg + serpentine dithering
 │   ├── web_server.cpp/h    HTTP API + captive portal + settings portal
 │   ├── web_portal.h        Embedded HTML/CSS/JS (status, settings, history, debug)
 │   ├── captive_portal.h    Embedded HTML/CSS/JS for WiFi setup wizard
@@ -142,8 +157,12 @@ firmware/               ESP32-S3 PlatformIO firmware
 │   ├── audio_capture.cpp/h I2S microphone recording (ES7210)
 │   ├── sd_manager.cpp/h    SD card: settings, wifi config, art history
 │   ├── wifi_manager.cpp/h  WiFi STA connection + AP mode for setup
+│   ├── identify.cpp/h      Record → mono → auto-gain → Shazam → display
 │   ├── activity_log.h      Circular activity log for web UI
-│   ├── url_utils.h         URL encoding helpers
+│   ├── backoff.h           Vinyl retry/cooldown escalation policy
+│   ├── history_policy.h    History eviction and timestamp rules
+│   ├── wav_utils.h         WAV header construction
+│   ├── certs.h             Pinned root CA for the Shazam API
 │   └── xml_utils.h         XML tag extraction (UPnP/SOAP)
 ├── test/
 │   ├── test_native/test_main.cpp   Native unit tests
@@ -151,18 +170,48 @@ firmware/               ESP32-S3 PlatformIO firmware
 └── platformio.ini
 
 simulator/              Python simulator (runs without hardware)
+├── eink.py             Port of the firmware rendering pipeline
+├── firmware_config.py  Reads the palette + profiles from firmware/src/config.h
+├── parity_check.py     Fails CI if the simulator drifts from the firmware
 ├── vinyl_sim.py        Full simulator with web UI
-├── dither_preview.py   Standalone dither preview tool
+├── dither_preview.py   Standalone render preview tool
 ├── requirements.txt    Python dependencies
 └── settings.example.json   Template for credentials
 ```
 
 ## Running Tests
 
+Native unit tests — dithering, history policy, back-off escalation, XML parsing.
+No hardware needed:
+
 ```bash
-cd firmware
-pio test -e native
+cd firmware && pio test -e native
 ```
+
+Verify the simulator still matches the firmware:
+
+```bash
+cd simulator && python parity_check.py
+```
+
+Preview how a cover will actually render, without flashing anything:
+
+```bash
+cd simulator && python dither_preview.py cover.jpg --all-profiles
+```
+
+CI runs all three on every push.
+
+## Updating Firmware Over the Air
+
+After the first USB flash, subsequent updates go over the network:
+
+1. `cd firmware && pio run -e esp32-s3-photopainter`
+2. Open the portal → **Debug** → **Firmware Update**
+3. Upload `.pio/build/esp32-s3-photopainter/firmware.bin`
+
+The device verifies the image, writes it to the inactive OTA slot and reboots.
+If the upload fails, the running firmware is untouched.
 
 ## License
 

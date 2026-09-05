@@ -494,6 +494,12 @@ void webServerInit() {
         req->send(200, "application/json", "{\"ok\":true}");
     });
 
+    server.on("/api/test-calibration", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
+        g_req.testCalibration = true;
+        req->send(200, "application/json", "{\"ok\":true}");
+    });
+
     server.on("/api/listen", HTTP_POST, [](AsyncWebServerRequest* req) {
         if (!requireAuth(req)) return;
         g_req.forceListen = true;

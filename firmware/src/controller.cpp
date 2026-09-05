@@ -354,6 +354,12 @@ static void serviceRequests() {
         return;
     }
 
+    if (g_req.testCalibration) {
+        g_req.testCalibration = false;
+        pipelineShowCalibrationCard();
+        return;
+    }
+
     // Sonos discovery — SSDP + SOAP, far too slow to run on the AsyncTCP task
     if (g_app.scanState == SCAN_REQUESTED) {
         g_app.scanState = SCAN_RUNNING;
