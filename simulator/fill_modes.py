@@ -10,13 +10,21 @@ and look.
 """
 
 import numpy as np
+import firmware_config
 from PIL import Image
 
 import eink
 from firmware_config import (EPD_WIDTH, EPD_HEIGHT,
                              FILL_MAX_ZOOM, FILL_CUT_LIMIT, FILL_SCAN_SIZE)
 
-FIT, COVER, BLEED, ADAPTIVE = range(4)
+# Order matters and must match FillMode in config.h. These were declared here
+# as FIT, COVER, BLEED, ADAPTIVE while the firmware declares FIT, ADAPTIVE,
+# BLEED, COVER — so ADAPTIVE and COVER were swapped, and every simulator run
+# that passed the device's configured mode (1) rendered COVER while the device
+# rendered ADAPTIVE. Read them from the header instead of restating them.
+FIT, ADAPTIVE, BLEED, COVER = (
+    firmware_config.FILL_MODES[n] for n in ("FILL_FIT", "FILL_ADAPTIVE",
+                                            "FILL_BLEED", "FILL_COVER"))
 NAMES = {FIT:"Fit (centred square)", COVER:"Cover crop",
          BLEED:"Bleed", ADAPTIVE:"Adaptive"}
 

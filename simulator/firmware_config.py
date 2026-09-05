@@ -128,3 +128,23 @@ def profile(index=DEFAULT_PROFILE):
     if not 0 <= index < len(RENDER_PROFILES):
         index = DEFAULT_PROFILE
     return RENDER_PROFILES[index]
+
+def _parse_fill_modes():
+    """
+    FillMode from config.h. The simulator used to restate this enum from
+    memory and had ADAPTIVE and COVER the wrong way round, so it silently
+    rendered a different fill from the device for the whole of a session.
+    """
+    m = re.search(r"enum FillMode \{(.*?)\};", _TEXT, re.S)
+    if not m:
+        raise ValueError("FillMode not found in config.h")
+    out = {}
+    for name, value in re.findall(r"(FILL_[A-Z]+)\s*=\s*(\d+)", m.group(1)):
+        out[name] = int(value)
+    for required in ("FILL_FIT", "FILL_ADAPTIVE", "FILL_BLEED", "FILL_COVER"):
+        if required not in out:
+            raise ValueError(f"{required} missing from FillMode")
+    return out
+
+
+FILL_MODES = _parse_fill_modes()

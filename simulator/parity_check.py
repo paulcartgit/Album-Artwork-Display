@@ -190,6 +190,21 @@ print("\nArtwork fill")
 import fill_modes as fmod
 
 fill_h = (SRC / "fill_policy.h").read_text()
+# The enum itself, not just the thresholds. fill_modes.py restated FillMode
+# from memory with ADAPTIVE and COVER transposed, so passing the device's
+# configured mode rendered a different fill in the simulator than on the
+# panel — a whole session of comparisons measured the wrong framing, and
+# nothing here noticed because only the thresholds were checked.
+import firmware_config as _fc
+check("fill mode enum matches config.h",
+      (fmod.FIT, fmod.ADAPTIVE, fmod.BLEED, fmod.COVER) ==
+      (_fc.FILL_MODES["FILL_FIT"], _fc.FILL_MODES["FILL_ADAPTIVE"],
+       _fc.FILL_MODES["FILL_BLEED"], _fc.FILL_MODES["FILL_COVER"]),
+      f"simulator {(fmod.FIT, fmod.ADAPTIVE, fmod.BLEED, fmod.COVER)} "
+      f"vs config.h {tuple(_fc.FILL_MODES[k] for k in ('FILL_FIT','FILL_ADAPTIVE','FILL_BLEED','FILL_COVER'))}")
+check("every fill mode has a distinct value",
+      len({fmod.FIT, fmod.ADAPTIVE, fmod.BLEED, fmod.COVER}) == 4)
+
 check("fill thresholds come from fill_policy.h",
       fmod.CUT_LIMIT == float(re.search(r"FILL_CUT_LIMIT\s+([0-9.]+)f", fill_h).group(1)))
 

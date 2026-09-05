@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdint>
+#include <cstddef>
 
 // Download JPEG from URL, decode, scale, dither, and push to display
 // overlayArtist/overlayAlbum: text shown on display (null = no overlay)
@@ -9,6 +11,11 @@ bool pipelineProcessUrl(const char* url,
                         const char* artist = nullptr,
                         const char* title  = nullptr,
                         const char* album  = nullptr);
+
+// The last canvas handed to the dither, box-downsampled 4x, RGB888. Exists so
+// the simulator can be diffed against what the device actually rendered from.
+const uint8_t* pipelineCanvasProbe();
+size_t pipelineCanvasProbeSize();
 
 // Process a local JPEG file from SD card
 bool pipelineProcessFile(const char* path);

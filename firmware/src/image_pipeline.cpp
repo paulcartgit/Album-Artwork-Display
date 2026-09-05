@@ -2,6 +2,17 @@
 #include "config.h"
 #include "dither.h"
 #include "tone_map.h"
+
+// Last pre-dither canvas, downsampled, so the simulator can be compared against
+// what the device actually fed the dither rather than against a guess at it.
+// Diagnosing a parity gap by elimination cost an evening; this answers it.
+static uint8_t* g_canvasProbe = nullptr;
+#define CANVAS_PROBE_DIV 4
+const uint8_t* pipelineCanvasProbe() { return g_canvasProbe; }
+size_t pipelineCanvasProbeSize() {
+    return g_canvasProbe ? (size_t)(EPD_WIDTH / CANVAS_PROBE_DIV) *
+                           (EPD_HEIGHT / CANVAS_PROBE_DIV) * 3 : 0;
+}
 #include "display.h"
 #include "sd_manager.h"
 #include "activity_log.h"
@@ -876,6 +887,15 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
                  chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile));
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
+
+    if (!g_canvasProbe)
+        g_canvasProbe = (uint8_t*)heap_caps_malloc(pipelineCanvasProbeSize()
+                            ? pipelineCanvasProbeSize()
+                            : (size_t)(EPD_WIDTH / CANVAS_PROBE_DIV) *
+                              (EPD_HEIGHT / CANVAS_PROBE_DIV) * 3,
+                            MALLOC_CAP_SPIRAM);
+    if (g_canvasProbe)
+        toneMapShrink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, CANVAS_PROBE_DIV, g_canvasProbe);
 
     // 4. Dither to 6-colour packed buffer
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;

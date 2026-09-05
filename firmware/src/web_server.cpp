@@ -540,6 +540,18 @@ void webServerInit() {
     );
 
     // ─── What is actually on the panel ───
+    // ─── The canvas as the dither saw it ───
+    server.on("/api/display/canvas.raw", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
+        const uint8_t* c = pipelineCanvasProbe();
+        size_t len = pipelineCanvasProbeSize();
+        if (!c || !len) { req->send(404, "text/plain", "Nothing rendered yet"); return; }
+        AsyncWebServerResponse* res = req->beginResponse_P(200, "application/octet-stream", c, len);
+        res->addHeader("X-Canvas-Width",  String(EPD_WIDTH / 4));
+        res->addHeader("X-Canvas-Height", String(EPD_HEIGHT / 4));
+        req->send(res);
+    });
+
     server.on("/api/display/current.png", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!requireAuth(req)) return;
         const uint8_t* png = displayCurrentPng();
