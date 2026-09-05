@@ -442,6 +442,11 @@ def main():
                     help="Report the difference from the current palette, don't emit new values")
     ap.add_argument("--preview", help="Write an image showing where it sampled")
     ap.add_argument("--crop", help="Manual crop as x0,y0,x1,y1 (skips auto-detection)")
+    ap.add_argument("--corners",
+                    help="Manual panel corners as x,y of top-left, top-right, "
+                         "bottom-right, bottom-left (8 numbers). Skips detection "
+                         "and still corrects perspective, so it handles a frame "
+                         "leaning back where --crop cannot.")
     ap.add_argument("--no-auto-crop", action="store_true",
                     help="Assume the photo is already cropped to the panel")
     ap.add_argument("--force", action="store_true",
@@ -458,7 +463,16 @@ def main():
     print(f"Photo: {img.size[0]}x{img.size[1]}")
     full = img
 
-    if args.crop:
+    if args.corners:
+        nums = [float(v) for v in args.corners.replace(" ", "").split(",")]
+        if len(nums) != 8:
+            sys.exit("--corners needs 8 numbers: x,y for top-left, top-right, "
+                     "bottom-right, bottom-left")
+        src_quad = [(nums[i], nums[i + 1]) for i in range(0, 8, 2)]
+        dst_quad = [(0, 0), (EPD_WIDTH, 0), (EPD_WIDTH, EPD_HEIGHT), (0, EPD_HEIGHT)]
+        img = rectify_panel(img, src_quad, dst_quad)
+        print(f"  rectified from given corners -> {img.size[0]}x{img.size[1]}")
+    elif args.crop:
         box = tuple(int(v) for v in args.crop.split(","))
         img = img.crop(box)
         print(f"  cropped to {box} -> {img.size[0]}x{img.size[1]}")
