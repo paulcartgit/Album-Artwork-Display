@@ -8,6 +8,8 @@
 #include <SPI.h>
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
+#include "png_writer.h"
+#include "activity_log.h"
 
 // Page buffer: HEIGHT/4 = 120 rows. Each row = 800 pixels × 4bpp / 8 = 400 bytes.
 // Page buffer total = 120 × 400 = 48,000 bytes — fits in SRAM.
@@ -21,8 +23,34 @@ static uint32_t g_refreshCount = 0;
 static unsigned long g_lastRefreshMs = 0;
 
 static uint8_t* g_lastFrame = nullptr;   // packed 4bpp copy of what is on screen
+static uint8_t* g_png = nullptr;
+static size_t   g_pngSize = 0;
 
 const uint8_t* displayCurrentFrame() { return g_lastFrame; }
+const uint8_t* displayCurrentPng()   { return g_pngSize ? g_png : nullptr; }
+size_t displayCurrentPngSize()       { return g_pngSize; }
+
+// Encode the frame for the portal. Done here, on the task that owns the
+// buffer, so the web server only ever hands over bytes.
+static void buildPng() {
+    if (!g_lastFrame) return;
+    const size_t cap = (size_t)EPD_WIDTH * EPD_HEIGHT / 2 + 8192;
+    if (!g_png) g_png = (uint8_t*)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!g_png) {
+        activityLogf("PNG buffer alloc failed (%u free PSRAM)",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        return;
+    }
+
+    uint8_t pal[EPD_COLORS * 3];
+    for (int i = 0; i < EPD_COLORS; i++) {
+        pal[i*3] = PALETTE[i].r; pal[i*3+1] = PALETTE[i].g; pal[i*3+2] = PALETTE[i].b;
+    }
+    g_pngSize = pngWriteIndexed4(g_png, cap, g_lastFrame,
+                                 EPD_WIDTH, EPD_HEIGHT, pal, EPD_COLORS);
+    if (!g_pngSize) activityLog("PNG encode returned 0");
+
+}
 
 uint32_t displayRefreshCount() { return g_refreshCount; }
 void displaySetRefreshCount(uint32_t n) { g_refreshCount = n; }
@@ -98,7 +126,7 @@ void displayShowImage(const uint8_t* packedBuffer) {
     // Keep a copy so the portal can serve exactly what the panel shows.
     size_t packedSize = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
     if (!g_lastFrame) g_lastFrame = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
-    if (g_lastFrame) memcpy(g_lastFrame, packedBuffer, packedSize);
+    if (g_lastFrame) { memcpy(g_lastFrame, packedBuffer, packedSize); buildPng(); }
 
     memset(native, 0x11, nativeSize); // white fill (index 1)
 

@@ -550,7 +550,7 @@ function toggleView(){
 }
 function show(url){
   const img = $('#art');
-  if(view === 'panel') url = '/api/display/current.bmp?v=' + seq;
+  if(view === 'panel') url = '/api/display/current.png?v=' + seq;
   if(!url){ img.classList.remove('on'); $('#ph').hidden = false; return; }
   img.dataset.src = url;
   img.onload  = () => { img.classList.add('on'); $('#ph').hidden = true; };

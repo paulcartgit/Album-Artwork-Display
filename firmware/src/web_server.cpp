@@ -539,6 +539,20 @@ void webServerInit() {
     );
 
     // ─── What is actually on the panel ───
+    server.on("/api/display/current.png", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!requireAuth(req)) return;
+        const uint8_t* png = displayCurrentPng();
+        size_t len = displayCurrentPngSize();
+        if (!png || !len) {
+            req->send(404, "text/plain", "Nothing displayed yet");
+            return;
+        }
+        AsyncWebServerResponse* res = req->beginResponse_P(200, "image/png", png, len);
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // ─── The same frame as a BMP ───
     // Served as an indexed 4bpp BMP: the panel's own format is already 4bpp
     // palette indices, so this is a header plus a memcpy — no encoder, no
     // scaling, ~192 KB. Browsers render it directly.

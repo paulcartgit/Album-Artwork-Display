@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 
 bool displayInit();
 
@@ -24,6 +25,11 @@ unsigned long displayLastRefreshMs();
 // image. Kept so the portal can show what is actually displayed rather than
 // the source artwork, which says nothing about how it rendered.
 const uint8_t* displayCurrentFrame();
+
+// The same frame encoded as an indexed PNG, ready to serve. Built on the
+// controller task after each refresh so the web server never has to.
+const uint8_t* displayCurrentPng();
+size_t displayCurrentPngSize();
 
 // True while a refresh is in flight.  Only meaningful when called from a task
 // *other* than the one driving the display (e.g. the async web server), since
