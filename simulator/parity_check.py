@@ -319,6 +319,33 @@ check("the trial enhances before dithering, as the real path does",
       "trial dithers un-enhanced pixels — it is scoring a render that never happens")
 check("the trial dithers with the active profile",
       "ditherFloydSteinberg(cand, packed, dw, dh, profile)" in _trial)
+check("the trial also decides the gamut map",
+      "if (gamut) gamutMapApply(cand, dw, dh);" in _trial,
+      "gamut mapping is applied unconditionally, or not trialled — it rescues "
+      "out-of-gamut covers and costs on in-gamut ones, so it has to be chosen")
+check("the real path honours that decision",
+      "if (useGamut) gamutMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT);" in _ip)
+
+# Gamut mapping must keep hue and spend lightness — that is its whole purpose.
+import gamut_map
+_rose = np.full((8, 8, 3), (233, 163, 197), np.uint8)     # the KPop skin
+_out = gamut_map.map_image(_rose)
+_a = eink.rgb_to_lab(_rose.reshape(-1, 3))[0]
+_b = eink.rgb_to_lab(_out.reshape(-1, 3))[0]
+_ha = np.degrees(np.arctan2(_a[2], _a[1])) % 360
+_hb = np.degrees(np.arctan2(_b[2], _b[1])) % 360
+check("gamut mapping preserves hue",
+      abs((_ha - _hb + 180) % 360 - 180) < 6.0,
+      f"hue {_ha:.0f} -> {_hb:.0f} deg; it is meant to spend lightness, not hue")
+check("gamut mapping pulls an out-of-gamut colour in", _b[0] < _a[0],
+      f"L* {_a[0]:.0f} -> {_b[0]:.0f}")
+_grey = np.full((8, 8, 3), (128, 128, 128), np.uint8)
+check("an in-gamut colour is left alone",
+      np.array_equal(gamut_map.map_image(_grey), _grey))
+
+
+# ═══════════════════════════════════════════════════════════
+print("\nTone mapping")
 
 # Compression must move lightness and leave hue alone. That is the whole
 # reason it is done in Lab: an RGB white-point pull produced dither speckle

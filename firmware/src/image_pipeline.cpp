@@ -2,6 +2,7 @@
 #include "config.h"
 #include "dither.h"
 #include "tone_map.h"
+#include "gamut.h"
 
 // Last pre-dither canvas, downsampled, so the simulator can be compared against
 // what the device actually fed the dither rather than against a guess at it.
@@ -321,7 +322,7 @@ static void enhanceForEink(uint8_t* rgb, int w, int h, const RenderProfile& prof
 // compressed. Skipping them here picked the wrong scale on the device while
 // the simulator, which did enhance, picked the right one.
 static float chooseLightnessScale(const uint8_t* rgb, int w, int h,
-                                  const RenderProfile& profile) {
+                                  const RenderProfile& profile, bool* useGamut) {
     const int dw = w / TONEMAP_TRIAL_DIV, dh = h / TONEMAP_TRIAL_DIV;
     const size_t npix = (size_t)dw * dh;
 
@@ -341,10 +342,19 @@ static float chooseLightnessScale(const uint8_t* rgb, int w, int h,
 
     toneMapShrink(rgb, w, h, TONEMAP_TRIAL_DIV, small);
 
+    // Gamut mapping is not a free win. It rescues the covers whose colour is
+    // unreachable — the KPop sleeve goes from dE 14.5 / hue 19.4 to 9.1 / 5.8
+    // — and costs on covers that were already inside the gamut, where the
+    // worst regression measured was dE 38.9 to 48.8. So it is decided the same
+    // way the tone scale is: try it, keep it if it scores better.
     float best = 1.0f, bestScore = 0.0f;
-    for (int k = 0; k < TONEMAP_SCALES; k++) {
+    bool bestGamut = false;
+    for (int k = 0; k < TONEMAP_SCALES * 2; k++) {
+        const float scale = TONEMAP_SCALE[k % TONEMAP_SCALES];
+        const bool gamut = (k >= TONEMAP_SCALES);
         memcpy(cand, small, npix * 3);
-        toneMapApply(cand, dw, dh, TONEMAP_SCALE[k]);
+        toneMapApply(cand, dw, dh, scale);
+        if (gamut) gamutMapApply(cand, dw, dh);
         enhanceForEink(cand, dw, dh, profile);
         ditherFloydSteinberg(cand, packed, dw, dh, profile);
 
@@ -359,13 +369,17 @@ static float chooseLightnessScale(const uint8_t* rgb, int w, int h,
         float dE = 0.0f, hue = 0.0f;
         toneMapScore(small, shown, dw, dh, 8, &dE, &hue);
         const float score = dE + TONEMAP_HUE_WEIGHT * hue;
-        Serial.printf("[Pipeline] tone x%.2f  dE %.1f  hue %.1f  score %.1f\n",
-                      TONEMAP_SCALE[k], dE, hue, score);
-        if (k == 0 || score < bestScore) { bestScore = score; best = TONEMAP_SCALE[k]; }
+        Serial.printf("[Pipeline] tone x%.2f gamut %d  dE %.1f  hue %.1f  score %.1f\n",
+                      scale, (int)gamut, dE, hue, score);
+        if (k == 0 || score < bestScore) {
+            bestScore = score; best = scale; bestGamut = gamut;
+        }
     }
+    if (useGamut) *useGamut = bestGamut;
 
     heap_caps_free(small); heap_caps_free(cand); heap_caps_free(packed);
-    Serial.printf("[Pipeline] tone map chose x%.2f\n", best);
+    Serial.printf("[Pipeline] chose tone x%.2f, gamut map %s\n",
+                  best, bestGamut ? "on" : "off");
     return best;
 }
 
@@ -884,8 +898,14 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
 
     // 3.5. Pre-dither enhancement (sharpen + contrast + gamma)
     const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
+    bool useGamut = false;
     toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
-                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile));
+                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
+                                      profile, &useGamut));
+    // After the tone map, so the gamut is judged at the lightness the image
+    // will actually be shown at, and before enhancement, so contrast and
+    // gamma act on colours the panel can hold.
+    if (useGamut) gamutMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     if (!g_canvasProbe)
@@ -948,7 +968,7 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
 
     const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
     toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
-                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile));
+                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile, nullptr));
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;

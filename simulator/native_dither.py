@@ -22,29 +22,43 @@ _ROOT = Path(__file__).resolve().parents[1]
 _SRC = _ROOT / "firmware" / "src"
 _CLI = _ROOT / "firmware" / "tools" / "dither_cli"
 _CPP = _ROOT / "firmware" / "tools" / "dither_cli.cpp"
+_GAMUT_CLI = _ROOT / "firmware" / "tools" / "gamut_cli"
+_GAMUT_CPP = _ROOT / "firmware" / "tools" / "gamut_cli.cpp"
 
 
-def _stale():
-    if not _CLI.exists():
-        return True
-    built = _CLI.stat().st_mtime
+def _build_one(binary, source, deps):
     # Rebuild whenever anything it compiles in has moved on, so the simulator
-    # can never quietly run yesterday's dither.
-    for f in (_CPP, _SRC / "dither.cpp", _SRC / "dither.h",
-              _SRC / "config.h", _SRC / "colour.h"):
-        if f.exists() and f.stat().st_mtime > built:
-            return True
-    return False
-
-
-def build(force=False):
-    if not force and not _stale():
-        return
+    # can never quietly run yesterday's firmware.
+    if binary.exists():
+        built = binary.stat().st_mtime
+        if all(not f.exists() or f.stat().st_mtime <= built
+               for f in (source,) + tuple(deps)):
+            return
     subprocess.run(
         ["c++", "-O2", "-std=c++17", "-D", "NATIVE_TEST",
          "-I", str(_ROOT / "firmware" / "test" / "mocks"), "-I", str(_SRC),
-         "-o", str(_CLI), str(_CPP)],
+         "-o", str(binary), str(source)],
         check=True)
+
+
+def build(force=False):
+    _build_one(_CLI, _CPP, (_SRC / "dither.cpp", _SRC / "dither.h",
+                            _SRC / "config.h", _SRC / "colour.h"))
+
+
+def gamut_map(rgb, weight=None):
+    """Firmware gamut mapping, for the same reason as the dither: one
+    implementation, so the simulator cannot disagree with the panel."""
+    _build_one(_GAMUT_CLI, _GAMUT_CPP,
+               (_SRC / "gamut.h", _SRC / "colour.h", _SRC / "config.h"))
+    a = np.ascontiguousarray(np.asarray(rgb, dtype=np.uint8))
+    h, w = a.shape[:2]
+    args = [str(_GAMUT_CLI), str(w), str(h)]
+    if weight is not None:
+        args.append(str(weight))
+    out = subprocess.run(args, input=a.tobytes(), stdout=subprocess.PIPE,
+                         check=True).stdout
+    return np.frombuffer(out, dtype=np.uint8).reshape(h, w, 3)
 
 
 def dither(rgb, profile_index=1):

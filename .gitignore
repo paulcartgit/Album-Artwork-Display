@@ -31,3 +31,4 @@ tools/Snap.app/
 
 # Compiled desktop build of the firmware dither (rebuilt on demand)
 firmware/tools/dither_cli
+firmware/tools/gamut_cli
