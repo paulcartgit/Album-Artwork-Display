@@ -100,6 +100,12 @@ button{background:none;border:0;padding:0;cursor:pointer}
 .frame img{width:100%;height:100%;object-fit:contain;display:block;opacity:0;
   transition:opacity .35s var(--ease)}
 .frame img.on{opacity:1}
+/* An element with an explicit display in a stylesheet ignores the `hidden`
+   attribute, because the UA's [hidden]{display:none} loses on specificity.
+   The placeholder set display:grid, so hiding it did nothing and it covered
+   the artwork for good — the frame showed a disc icon and never the cover.
+   One global rule, rather than patching each element as it bites. */
+[hidden]{display:none!important}
 .frame .ph{position:absolute;inset:0;display:grid;place-items:center;color:var(--faint)}
 @keyframes shimmer{to{background-position:200% 0}}
 .skeleton{background:linear-gradient(90deg,var(--surface-2) 25%,var(--surface-3) 50%,var(--surface-2) 75%);
