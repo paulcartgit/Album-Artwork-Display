@@ -298,10 +298,19 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
 // Applies mild unsharp-mask sharpening + contrast boost + gamma correction
 // in a single pass using a 3-row rolling buffer (~4 KB working memory).
 
+static void enhanceForEink(uint8_t* rgb, int w, int h, const RenderProfile& profile);
+
 // Choose how far to compress lightness for THIS image, by rendering the
 // candidates small and scoring each against the source. See tone_map.h for
 // why this is measured rather than predicted.
-static float chooseLightnessScale(const uint8_t* rgb, int w, int h) {
+//
+// The trial must run the WHOLE pipeline. Dithering the darkened candidate
+// directly scores a render that never happens: contrast, gamma and sharpening
+// come after this in the real path, and they re-expand exactly what was just
+// compressed. Skipping them here picked the wrong scale on the device while
+// the simulator, which did enhance, picked the right one.
+static float chooseLightnessScale(const uint8_t* rgb, int w, int h,
+                                  const RenderProfile& profile) {
     const int dw = w / TONEMAP_TRIAL_DIV, dh = h / TONEMAP_TRIAL_DIV;
     const size_t npix = (size_t)dw * dh;
 
@@ -322,7 +331,8 @@ static float chooseLightnessScale(const uint8_t* rgb, int w, int h) {
     for (int k = 0; k < TONEMAP_SCALES; k++) {
         memcpy(cand, small, npix * 3);
         toneMapApply(cand, dw, dh, TONEMAP_SCALE[k]);
-        ditherFloydSteinberg(cand, packed, dw, dh);
+        enhanceForEink(cand, dw, dh, profile);
+        ditherFloydSteinberg(cand, packed, dw, dh, profile);
 
         // Unpack to the pigment colours the panel will actually show.
         for (size_t i = 0; i < npix; i++) {
@@ -862,7 +872,7 @@ static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     // 3.5. Pre-dither enhancement (sharpen + contrast + gamma)
     const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
     toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
-                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT));
+                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile));
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     // 4. Dither to 6-colour packed buffer
@@ -916,7 +926,7 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
 
     const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
     toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
-                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT));
+                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile));
     enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;

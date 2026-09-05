@@ -254,10 +254,23 @@ check("tone-map constants come from tone_map.h",
       tone_select.SCALES == (1.0, 0.9, 0.8) and tone_select.HUE_WEIGHT == 0.15,
       f"scales={tone_select.SCALES} weight={tone_select.HUE_WEIGHT}")
 check("firmware measures rather than predicts",
-      "ditherFloydSteinberg(cand, packed, dw, dh)" in read("image_pipeline.cpp"),
+      "ditherFloydSteinberg(cand, packed, dw, dh, profile)" in read("image_pipeline.cpp"),
       "the trial render is gone — a predictor has crept back in")
 check("firmware scores against the source",
       "toneMapScore(small, shown, dw, dh" in read("image_pipeline.cpp"))
+
+# The trial has to render what the device will actually render. Dithering the
+# darkened candidate without enhancement scores a pipeline that never runs —
+# contrast and gamma re-expand what the compression just removed — and the
+# firmware picked a different scale from the simulator because of it.
+_ip = read("image_pipeline.cpp")
+_trial = _ip[_ip.index("static float chooseLightnessScale"):_ip.index("static void enhanceForEink(uint8_t* rgb, int w, int h, const RenderProfile& profile) {")]
+check("the trial enhances before dithering, as the real path does",
+      "enhanceForEink(cand, dw, dh, profile);" in _trial
+      and _trial.index("enhanceForEink(cand") < _trial.index("ditherFloydSteinberg(cand"),
+      "trial dithers un-enhanced pixels — it is scoring a render that never happens")
+check("the trial dithers with the active profile",
+      "ditherFloydSteinberg(cand, packed, dw, dh, profile)" in _trial)
 
 # Compression must move lightness and leave hue alone. That is the whole
 # reason it is done in Lab: an RGB white-point pull produced dither speckle
