@@ -1133,6 +1133,22 @@ void pipelineShowCalibrationCard() {
             for (int x = x0; x < x0 + CAL_PATCH_W; x++)
                 setPixel(x, y, (uint8_t)c);
 
+        // Black keyline around every patch.  Without it the white patch is
+        // invisible against the white field, so you cannot tell from the photo
+        // whether the crop lined up — and a misaligned crop silently produces
+        // a wrong palette.  The sampler only reads the middle 50% of each
+        // patch, so the keyline never contaminates a reading.
+        for (int t = 0; t < CAL_KEYLINE; t++) {
+            for (int x = x0 - t - 1; x <= x0 + CAL_PATCH_W + t; x++) {
+                setPixel(x, y0 - t - 1, 0);
+                setPixel(x, y0 + CAL_PATCH_H + t, 0);
+            }
+            for (int y = y0 - t - 1; y <= y0 + CAL_PATCH_H + t; y++) {
+                setPixel(x0 - t - 1, y, 0);
+                setPixel(x0 + CAL_PATCH_W + t, y, 0);
+            }
+        }
+
         Serial.printf("[Calibration] Patch %d (%s-ish) at (%d,%d) %dx%d\n",
                       c, c == 0 ? "black" : c == 1 ? "white" : "colour",
                       x0, y0, CAL_PATCH_W, CAL_PATCH_H);

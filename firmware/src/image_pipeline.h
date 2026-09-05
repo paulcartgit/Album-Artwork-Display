@@ -38,3 +38,4 @@ void pipelineShowCalibrationCard();
 #define CAL_GUTTER_Y   30
 #define CAL_COLS        2
 #define CAL_ROWS        3
+#define CAL_KEYLINE     3   // black outline thickness, drawn OUTSIDE the patch
