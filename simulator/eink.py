@@ -22,24 +22,27 @@ from firmware_config import (
 
 PALETTE = np.array(PALETTE_RGB, dtype=np.float64)
 
-# Virtual entries: the midpoint of the two pigments they interleave.
-# Mirrors VIRTUAL_PAIR in dither.cpp.
-VIRTUAL_PAIR = (
-    (2, 3),   # Cyan         -> Green / Blue
-    (4, 3),   # Magenta      -> Red   / Blue
-    (4, 5),   # Orange       -> Red   / Yellow
-    (2, 5),   # Lime         -> Green / Yellow
-    (4, 2),   # Brown        -> Red   / Green
-    (4, 1),   # Light Pink   -> Red   / White
-    (5, 1),   # Light Yellow -> Yellow/ White
-    (3, 1),   # Light Blue   -> Blue  / White
-    (2, 1),   # Light Green  -> Green / White
+# Virtual entries: the 2x2 cell each one tiles. Mirrors VIRTUAL_CELL in
+# dither.cpp. Repeating a pigment weights it, so a cell can express 25% steps
+# and three-pigment mixes, not just a 50/50 pair.
+VIRTUAL_CELL = (
+    (2, 3, 3, 2),   # Cyan          Green / Blue
+    (4, 3, 3, 4),   # Magenta       Red   / Blue
+    (4, 5, 5, 4),   # Orange        Red   / Yellow
+    (2, 5, 5, 2),   # Lime          Green / Yellow
+    (4, 2, 2, 4),   # Brown         Red   / Green
+    (4, 1, 1, 4),   # Light Pink    Red   / White
+    (5, 1, 1, 5),   # Light Yellow  Yellow/ White
+    (3, 1, 1, 3),   # Light Blue    Blue  / White
+    (2, 1, 1, 2),   # Light Green   Green / White
+    (4, 3, 1, 1),   # Light Purple  quarter Red, quarter Blue, half White
+    (4, 1, 1, 1),   # Pale Pink     quarter Red, three-quarter White
 )
-MATCH_COLORS = EPD_COLORS + len(VIRTUAL_PAIR)
+MATCH_COLORS = EPD_COLORS + len(VIRTUAL_CELL)
 
 MATCH_PAL = np.vstack([
     PALETTE,
-    np.array([(PALETTE[a] + PALETTE[b]) / 2.0 for a, b in VIRTUAL_PAIR]),
+    np.array([np.mean([PALETTE[i] for i in cell], axis=0) for cell in VIRTUAL_CELL]),
 ])
 
 # Layout constants — must match processJpegBuffer() in image_pipeline.cpp
@@ -179,8 +182,8 @@ def dither(rgb_img, profile_index=DEFAULT_PROFILE):
             ci = int(cache.lookup(c[0:1], c[1:2], c[2:3])[0])
 
             if ci >= EPD_COLORS:
-                pair = VIRTUAL_PAIR[ci - EPD_COLORS]
-                display_idx = pair[0] if ((x + y) & 1) else pair[1]
+                cell = VIRTUAL_CELL[ci - EPD_COLORS]
+                display_idx = cell[((y & 1) << 1) | (x & 1)]
             else:
                 display_idx = ci
             out[y, x] = display_idx

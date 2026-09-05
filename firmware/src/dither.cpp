@@ -71,26 +71,37 @@ static Lab rgbToLabF(float r, float g, float b) {
 // genuinely wants and the matcher previously had to approximate by diffusing
 // error across neighbours, which reads as noise rather than as the colour.
 //
-// The four WHITE-paired entries matter most. Every pigment here is darker and
-// more saturated than the artwork's mid-tones, so rendering a LIGHT version of
-// a colour needs that pigment mixed with White — and the chroma penalty below
-// deliberately pushes chromatic pixels AWAY from White. Without a light-blue
+// The WHITE-paired entries matter most. Every pigment is darker and more
+// saturated than the artwork's mid-tones, so rendering a LIGHT version of a
+// colour needs that pigment mixed with White — and the chroma penalty below
+// deliberately pushes chromatic pixels away from White. Without a light-blue
 // target the dither cannot lighten blue, so it reaches for the next lightest
 // chromatic pigment instead: Help!'s blue capes came out 20% green pigment.
-static constexpr int MATCH_COLORS = EPD_COLORS + 9;
+//
+// A 2x2 cell rather than a 50/50 pair, because two pigments cannot express
+// everything the artwork needs. Pale lavender wants Red AND Blue AND White at
+// once; with only pairs available the matcher took Light Blue as the closest
+// chromatic option and the KPop Demon Hunters sleeve rendered its pink hair
+// blue. Four cells give 25% steps and three-pigment mixes, which covers it.
+//
+// Repeating a pigment weights it: { R, B, W, W } is quarter-red, quarter-blue,
+// half-white. { G, B, G, B } is the plain 50/50 the pairs used to be.
+static constexpr int MATCH_COLORS = EPD_COLORS + 11;
 
-// The two real palette indices each virtual colour interleaves between.
+// The 2x2 cell each virtual colour tiles, in reading order.
 // Palette order: 0 Black, 1 White, 2 Green, 3 Blue, 4 Red, 5 Yellow.
-static constexpr uint8_t VIRTUAL_PAIR[9][2] = {
-    { 2, 3 },  // Cyan         → Green / Blue
-    { 4, 3 },  // Magenta      → Red   / Blue
-    { 4, 5 },  // Orange       → Red   / Yellow
-    { 2, 5 },  // Lime         → Green / Yellow
-    { 4, 2 },  // Brown        → Red   / Green
-    { 4, 1 },  // Light Pink   → Red   / White
-    { 5, 1 },  // Light Yellow → Yellow/ White
-    { 3, 1 },  // Light Blue   → Blue  / White
-    { 2, 1 },  // Light Green  → Green / White
+static constexpr uint8_t VIRTUAL_CELL[11][4] = {
+    { 2, 3, 3, 2 },  // Cyan          Green / Blue
+    { 4, 3, 3, 4 },  // Magenta       Red   / Blue
+    { 4, 5, 5, 4 },  // Orange        Red   / Yellow
+    { 2, 5, 5, 2 },  // Lime          Green / Yellow
+    { 4, 2, 2, 4 },  // Brown         Red   / Green
+    { 4, 1, 1, 4 },  // Light Pink    Red   / White
+    { 5, 1, 1, 5 },  // Light Yellow  Yellow/ White
+    { 3, 1, 1, 3 },  // Light Blue    Blue  / White
+    { 2, 1, 1, 2 },  // Light Green   Green / White
+    { 4, 3, 1, 1 },  // Light Purple  quarter Red, quarter Blue, half White
+    { 4, 1, 1, 1 },  // Pale Pink     quarter Red, three-quarter White
 };
 
 // Matching palette in RGB, derived from PALETTE at startup.
@@ -108,13 +119,17 @@ static void ensureMatchPalette() {
         MATCH_PAL[i][1] = (float)PALETTE[i].g;
         MATCH_PAL[i][2] = (float)PALETTE[i].b;
     }
-    // Virtual colours — midpoint of the pigment pair they interleave.
+    // Virtual colours — the mean of the four cells, which is what the eye
+    // integrates the tiled pattern to.
     for (int v = 0; v < MATCH_COLORS - EPD_COLORS; v++) {
-        const PaletteColor& a = PALETTE[VIRTUAL_PAIR[v][0]];
-        const PaletteColor& b = PALETTE[VIRTUAL_PAIR[v][1]];
-        MATCH_PAL[EPD_COLORS + v][0] = (a.r + b.r) * 0.5f;
-        MATCH_PAL[EPD_COLORS + v][1] = (a.g + b.g) * 0.5f;
-        MATCH_PAL[EPD_COLORS + v][2] = (a.b + b.b) * 0.5f;
+        float sr = 0, sg = 0, sb = 0;
+        for (int c = 0; c < 4; c++) {
+            const PaletteColor& p = PALETTE[VIRTUAL_CELL[v][c]];
+            sr += p.r; sg += p.g; sb += p.b;
+        }
+        MATCH_PAL[EPD_COLORS + v][0] = sr * 0.25f;
+        MATCH_PAL[EPD_COLORS + v][1] = sg * 0.25f;
+        MATCH_PAL[EPD_COLORS + v][2] = sb * 0.25f;
     }
 
     for (int i = 0; i < MATCH_COLORS; i++) {
@@ -240,8 +255,8 @@ void ditherFloydSteinberg(const uint8_t* rgb888, uint8_t* packedOut, int w, int 
             // Map virtual colours to alternating real pigments
             uint8_t displayIdx = ci;
             if (ci >= EPD_COLORS) {
-                const uint8_t* pair = VIRTUAL_PAIR[ci - EPD_COLORS];
-                displayIdx = ((x + y) & 1) ? pair[0] : pair[1];
+                const uint8_t* cell = VIRTUAL_CELL[ci - EPD_COLORS];
+                displayIdx = cell[((y & 1) << 1) | (x & 1)];
             }
 
             // Error is measured against the pigment PHYSICALLY PLACED, not

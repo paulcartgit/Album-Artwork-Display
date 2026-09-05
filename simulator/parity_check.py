@@ -57,29 +57,33 @@ check("three render profiles", len(RENDER_PROFILES) == 3)
 
 dither_cpp = read("dither.cpp")
 
-# VIRTUAL_PAIR in dither.cpp. Read the declared size rather than pinning it:
-# the list grew from 2 to 7 and a hardcoded [2][2] silently stopped matching.
-pairs = re.search(r"VIRTUAL_PAIR\[\d+\]\[2\]\s*=\s*\{(.*?)\};", dither_cpp, re.S)
-firmware_pairs = tuple(
+# VIRTUAL_CELL in dither.cpp. Read the declared size rather than pinning it:
+# the table went 2 pairs -> 9 pairs -> 11 2x2 cells, and each time a hardcoded
+# size made this silently stop comparing instead of failing.
+cells = re.search(r"VIRTUAL_CELL\[\d+\]\[4\]\s*=\s*\{(.*?)\n\};", dither_cpp, re.S)
+firmware_cells = tuple(
     tuple(int(n) for n in m)
-    for m in re.findall(r"\{\s*(\d+)\s*,\s*(\d+)\s*\}", pairs.group(1) if pairs else "")
+    for m in re.findall(r"\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}",
+                        cells.group(1) if cells else "")
 )
-check("virtual colour pairs match dither.cpp",
-      firmware_pairs == eink.VIRTUAL_PAIR,
-      f"firmware {firmware_pairs} vs simulator {eink.VIRTUAL_PAIR}")
+check("virtual colour cells match dither.cpp",
+      firmware_cells == eink.VIRTUAL_CELL,
+      f"firmware {firmware_cells} vs simulator {eink.VIRTUAL_CELL}")
 
-nvirtual = len(eink.VIRTUAL_PAIR)
+nvirtual = len(eink.VIRTUAL_CELL)
 check(f"matching palette has {EPD_COLORS} real + {nvirtual} virtual entries",
       eink.MATCH_COLORS == EPD_COLORS + nvirtual
       and eink.MATCH_PAL.shape[0] == EPD_COLORS + nvirtual)
 check("firmware MATCH_COLORS agrees with the pair table",
       f"MATCH_COLORS = EPD_COLORS + {nvirtual}" in dither_cpp,
       "dither.cpp declares a different count from its VIRTUAL_PAIR table")
-check("every virtual pair blends two DIFFERENT real pigments",
-      all(a != b and 0 <= a < EPD_COLORS and 0 <= b < EPD_COLORS
-          for a, b in eink.VIRTUAL_PAIR))
-check("no duplicate virtual pairs",
-      len({frozenset(p) for p in eink.VIRTUAL_PAIR}) == len(eink.VIRTUAL_PAIR))
+check("every virtual cell mixes at least two real pigments",
+      all(len(set(c)) >= 2 and all(0 <= i < EPD_COLORS for i in c)
+          for c in eink.VIRTUAL_CELL))
+check("no two virtual cells have the same mix",
+      len({tuple(sorted(c)) for c in eink.VIRTUAL_CELL}) == len(eink.VIRTUAL_CELL))
+check("firmware tiles the cell the same way the simulator does",
+      "cell[((y & 1) << 1) | (x & 1)]" in dither_cpp)
 
 # The firmware must still derive its match palette from PALETTE, not from
 # idealised RGB cube corners — that was the original bug.
