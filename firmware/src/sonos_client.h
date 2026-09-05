@@ -32,6 +32,26 @@ int sonosDiscover(SonosDevice* out, int maxDevices, uint32_t timeoutMs = 2500);
 // Runs a full discovery scan. Returns true and fills ipOut on success.
 bool sonosResolveByName(const char* name, char* ipOut, size_t ipLen);
 
+// Find the IP of the speaker coordinating the group that `roomName` belongs to.
+//
+// When speakers are grouped, only the coordinator carries the group's transport
+// state — a member reports its own, which is not what is playing. Polling the
+// member therefore gives wrong or empty metadata in exactly the situation Sonos
+// exists for. Falls back to seedIp when the speaker is ungrouped or the
+// topology cannot be read.
+bool sonosResolveCoordinator(const char* seedIp, const char* roomName,
+                             char* ipOut, size_t ipLen);
+
+// ─── UPnP eventing (GENA) ───
+// Sonos will push a NOTIFY the moment transport state changes, which removes
+// the latency of polling. Used purely as a "something changed" trigger: the
+// existing poll remains the source of truth, so a missed or malformed event
+// costs nothing beyond a slightly later update.
+bool sonosSubscribe(const char* ip, const char* callbackUrl,
+                    char* sidOut, size_t sidLen, uint32_t* timeoutSecOut);
+bool sonosRenewSubscription(const char* ip, const char* sid, uint32_t* timeoutSecOut);
+void sonosUnsubscribe(const char* ip, const char* sid);
+
 // Fetch the friendly (room) name of a speaker whose IP is already known.
 // Returns true and fills nameOut on success.
 bool sonosGetDeviceName(const char* ip, char* nameOut, size_t nameLen);

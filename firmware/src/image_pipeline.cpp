@@ -1,9 +1,29 @@
 #include "image_pipeline.h"
 #include "config.h"
 #include "dither.h"
+#include "tone_map.h"
+#include "gamut.h"
+#include "cover_match.h"
+#include "cover_variants.h"
+#include <esp_task_wdt.h>
+
+
+
+// Last pre-dither canvas, downsampled, so the simulator can be compared against
+// what the device actually fed the dither rather than against a guess at it.
+// Diagnosing a parity gap by elimination cost an evening; this answers it.
+static uint8_t* g_canvasProbe = nullptr;
+#define CANVAS_PROBE_DIV 4
+const uint8_t* pipelineCanvasProbe() { return g_canvasProbe; }
+size_t pipelineCanvasProbeSize() {
+    return g_canvasProbe ? (size_t)(EPD_WIDTH / CANVAS_PROBE_DIV) *
+                           (EPD_HEIGHT / CANVAS_PROBE_DIV) * 3 : 0;
+}
 #include "display.h"
 #include "sd_manager.h"
 #include "activity_log.h"
+#include "fill_policy.h"
+#include "app.h"
 
 #include <HTTPClient.h>
 #include <WiFiClient.h>
@@ -15,11 +35,31 @@
 #include <Fonts/FreeSansBold24pt7b.h>
 #include <Fonts/FreeSans18pt7b.h>
 
-extern Settings g_settings;
 static const size_t JPEG_INITIAL_ALLOC = 64 * 1024;
 static const size_t JPEG_MAX_DOWNLOAD  = 2 * 1024 * 1024;
 
 // ─── TJpg_Decoder callback state ───
+// Everything that changes what a given JPEG renders to. A cached frame is only
+// reused when this matches, so recalibrating the palette, switching profile or
+// fill mode, or changing the algorithm all invalidate the cache rather than
+// leaving stale frames that quietly disagree with fresh ones.
+//
+// Bump RENDER_ALGO_VERSION whenever the pipeline changes shape.
+#define RENDER_ALGO_VERSION 4
+
+static uint32_t renderSignature() {
+    uint32_t h = 2166136261u;               // FNV-1a
+    auto mix = [&h](uint8_t b) { h ^= b; h *= 16777619u; };
+    for (int i = 0; i < EPD_COLORS; i++) {
+        mix(PALETTE[i].r); mix(PALETTE[i].g); mix(PALETTE[i].b);
+    }
+    mix((uint8_t)g_app.settings.render_profile);
+    mix((uint8_t)g_app.settings.fill_mode);
+    mix((uint8_t)g_app.settings.show_track_info);
+    mix((uint8_t)RENDER_ALGO_VERSION);
+    return h;
+}
+
 static uint8_t* g_decodeBuf = nullptr;
 static int g_decodeW = 0;
 static int g_decodeH = 0;
@@ -121,52 +161,38 @@ static float edgeVariance(const uint8_t* src, int w, int h) {
     return (varR + varG + varB) / 3.0f;
 }
 
-// ─── Render text into RGB888 buffer using Adafruit GFX ───
-// Render a single line of text centred in a horizontal band.
-// 2× supersampled for anti-aliased output on the 6-colour e-ink display.
-static void renderTextBand(uint8_t* rgb, int canvasW, int canvasH,
-                           const char* text,
-                           const GFXfont* font, int initScale, int minScale,
-                           int textAreaY, int textAreaH,
-                           uint8_t bgR, uint8_t bgG, uint8_t bgB) {
-    int ssW = canvasW * 2;
-    int ssH = textAreaH * 2;
-    GFXcanvas1 canvas(ssW, ssH);
-    canvas.fillScreen(0);
-    canvas.setTextColor(1);
-    canvas.setTextWrap(false);
-
-    canvas.setFont(font);
-    canvas.setTextSize(initScale);
+// ─── Shared text fitting ───
+// Both text renderers need the same behaviour: try the requested scale, step
+// down while the string overflows the band, then truncate with an ellipsis.
+// Returns the chosen scale and leaves `str` holding the text to draw.
+static int fitTextToWidth(GFXcanvas1& canvas, const GFXfont* font,
+                          String& str, int initScale, int minScale, int maxWidth) {
     int16_t x1, y1; uint16_t tw, th;
+    canvas.setFont(font);
 
-    String str(text);
     int scale = initScale;
+    canvas.setTextSize(scale);
     canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    while (tw > (uint16_t)(ssW - 60) && scale > minScale) {
+    while (tw > (uint16_t)maxWidth && scale > minScale) {
         scale--;
         canvas.setTextSize(scale);
         canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
     }
-    while (tw > (uint16_t)(ssW - 60) && str.length() > 4) {
+    while (tw > (uint16_t)maxWidth && str.length() > 4) {
         str = str.substring(0, str.length() - 2);
         String test = str + "...";
         canvas.getTextBounds(test.c_str(), 0, 0, &x1, &y1, &tw, &th);
-        if (tw <= (uint16_t)(ssW - 60)) { str = test; break; }
+        if (tw <= (uint16_t)maxWidth) { str = test; break; }
     }
+    return scale;
+}
 
-    canvas.setFont(font);
-    canvas.setTextSize(scale);
-    canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    int textX = (ssW - tw) / 2 - x1;
-    int textY = (ssH - th) / 2 - y1;
-    canvas.setCursor(textX, textY);
-    canvas.print(str);
-
-    // Sample actual background pixels in the band to pick text colour
+// Average brightness of a band of the RGB canvas, used to pick a text colour
+// that contrasts with whatever is actually behind it.
+static int bandBrightness(const uint8_t* rgb, int canvasW, int textAreaY, int textAreaH) {
     long rSum = 0, gSum = 0, bSum = 0;
     int samples = 0;
-    int step = 4; // sample every 4th pixel for speed
+    const int step = 4; // sample every 4th pixel for speed
     for (int y = 0; y < textAreaH; y += step) {
         for (int x = 0; x < canvasW; x += step) {
             int di = ((textAreaY + y) * canvasW + x) * 3;
@@ -174,35 +200,9 @@ static void renderTextBand(uint8_t* rgb, int canvasW, int canvasH,
             samples++;
         }
     }
+    if (samples == 0) return 255;
     int avgR = rSum / samples, avgG = gSum / samples, avgB = bSum / samples;
-    int brightness = (avgR * 299 + avgG * 587 + avgB * 114) / 1000;
-    uint8_t textR, textG, textB;
-    if (brightness < 128) {
-        textR = 255; textG = 255; textB = 255;
-    } else {
-        textR = 0; textG = 0; textB = 0;
-    }
-
-    for (int y = 0; y < textAreaH; y++) {
-        for (int x = 0; x < canvasW; x++) {
-            int count = canvas.getPixel(x * 2,     y * 2)
-                      + canvas.getPixel(x * 2 + 1, y * 2)
-                      + canvas.getPixel(x * 2,     y * 2 + 1)
-                      + canvas.getPixel(x * 2 + 1, y * 2 + 1);
-            if (count == 0) continue;
-            int di = ((textAreaY + y) * canvasW + x) * 3;
-            if (count == 4) {
-                rgb[di]     = textR;
-                rgb[di + 1] = textG;
-                rgb[di + 2] = textB;
-            } else {
-                float alpha = count * 0.25f;
-                rgb[di]     = (uint8_t)(rgb[di]     + (textR - rgb[di])     * alpha);
-                rgb[di + 1] = (uint8_t)(rgb[di + 1] + (textG - rgb[di + 1]) * alpha);
-                rgb[di + 2] = (uint8_t)(rgb[di + 2] + (textB - rgb[di + 2]) * alpha);
-            }
-        }
-    }
+    return (avgR * 299 + avgG * 587 + avgB * 114) / 1000;
 }
 
 // Render text directly onto the packed (4-bit palette index) buffer,
@@ -220,47 +220,18 @@ static void renderTextBandPacked(uint8_t* packed, const uint8_t* rgb,
     canvas.setTextColor(1);
     canvas.setTextWrap(false);
 
-    canvas.setFont(font);
-    canvas.setTextSize(initScale);
-    int16_t x1, y1; uint16_t tw, th;
-
     String str(text);
-    int scale = initScale;
-    canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    while (tw > (uint16_t)(ssW - 60) && scale > minScale) {
-        scale--;
-        canvas.setTextSize(scale);
-        canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    }
-    while (tw > (uint16_t)(ssW - 60) && str.length() > 4) {
-        str = str.substring(0, str.length() - 2);
-        String test = str + "...";
-        canvas.getTextBounds(test.c_str(), 0, 0, &x1, &y1, &tw, &th);
-        if (tw <= (uint16_t)(ssW - 60)) { str = test; break; }
-    }
+    int scale = fitTextToWidth(canvas, font, str, initScale, minScale, ssW - 60);
 
+    int16_t x1, y1; uint16_t tw, th;
     canvas.setFont(font);
     canvas.setTextSize(scale);
     canvas.getTextBounds(str.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    int textX = (ssW - tw) / 2 - x1;
-    int textY = (ssH - th) / 2 - y1;
-    canvas.setCursor(textX, textY);
+    canvas.setCursor((ssW - tw) / 2 - x1, (ssH - th) / 2 - y1);
     canvas.print(str);
 
-    // Sample actual background pixels in the band to pick text colour
-    long rSum = 0, gSum = 0, bSum = 0;
-    int samples = 0;
-    int step = 4;
-    for (int y = 0; y < textAreaH; y += step) {
-        for (int x = 0; x < canvasW; x += step) {
-            int di = ((textAreaY + y) * canvasW + x) * 3;
-            rSum += rgb[di]; gSum += rgb[di + 1]; bSum += rgb[di + 2];
-            samples++;
-        }
-    }
-    int avgR = rSum / samples, avgG = gSum / samples, avgB = bSum / samples;
-    int brightness = (avgR * 299 + avgG * 587 + avgB * 114) / 1000;
-    uint8_t textIdx = (brightness < 128) ? 1 : 0; // White on dark, Black on light
+    // White on dark, black on light — measured against the real background
+    uint8_t textIdx = (bandBrightness(rgb, canvasW, textAreaY, textAreaH) < 128) ? 1 : 0;
 
     for (int y = 0; y < textAreaH; y++) {
         for (int x = 0; x < canvasW; x++) {
@@ -296,48 +267,19 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
     canvas.setTextColor(1);
     canvas.setTextWrap(false);
 
-    // Artist name — bold 24pt, scaled 4× on 2× canvas = ~66px effective
-    canvas.setFont(&FreeSansBold24pt7b);
-    canvas.setTextSize(4);
+    const int maxW = ssW - 60;
     int16_t x1, y1; uint16_t tw, th;
+    int16_t ax1, ay1; uint16_t atw, ath;
 
-    // If artist name is too wide, try smaller scale, then truncate
+    // Artist name — bold 24pt, scaled 4× on 2× canvas = ~66px effective
     String artistStr(artist);
-    int artistScale = 4;
-    canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    while (tw > (uint16_t)(ssW - 60) && artistScale > 2) {
-        artistScale--;
-        canvas.setTextSize(artistScale);
-        canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    }
-    // Still too wide? Truncate with ellipsis
-    while (tw > (uint16_t)(ssW - 60) && artistStr.length() > 4) {
-        artistStr = artistStr.substring(0, artistStr.length() - 2);
-        String test = artistStr + "...";
-        canvas.getTextBounds(test.c_str(), 0, 0, &x1, &y1, &tw, &th);
-        if (tw <= (uint16_t)(ssW - 60)) { artistStr = test; break; }
-    }
+    int artistScale = fitTextToWidth(canvas, &FreeSansBold24pt7b, artistStr, 4, 2, maxW);
     canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
     int artistH = th;
 
     // Album name — regular 18pt, scaled 3× on 2× canvas = ~36px effective
-    canvas.setFont(&FreeSans18pt7b);
-    canvas.setTextSize(3);
     String albumStr(album);
-    int albumScale = 3;
-    int16_t ax1, ay1; uint16_t atw, ath;
-    canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
-    while (atw > (uint16_t)(ssW - 60) && albumScale > 2) {
-        albumScale--;
-        canvas.setTextSize(albumScale);
-        canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
-    }
-    while (atw > (uint16_t)(ssW - 60) && albumStr.length() > 4) {
-        albumStr = albumStr.substring(0, albumStr.length() - 2);
-        String test = albumStr + "...";
-        canvas.getTextBounds(test.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
-        if (atw <= (uint16_t)(ssW - 60)) { albumStr = test; break; }
-    }
+    int albumScale = fitTextToWidth(canvas, &FreeSans18pt7b, albumStr, 3, 2, maxW);
     canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
     int albumH = ath;
 
@@ -350,28 +292,20 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
     canvas.setFont(&FreeSansBold24pt7b);
     canvas.setTextSize(artistScale);
     canvas.getTextBounds(artistStr.c_str(), 0, 0, &x1, &y1, &tw, &th);
-    int artistX = (ssW - tw) / 2 - x1;
-    int artistY = startY - y1;
-    canvas.setCursor(artistX, artistY);
+    canvas.setCursor((ssW - tw) / 2 - x1, startY - y1);
     canvas.print(artistStr);
 
     // Draw album
     canvas.setFont(&FreeSans18pt7b);
     canvas.setTextSize(albumScale);
     canvas.getTextBounds(albumStr.c_str(), 0, 0, &ax1, &ay1, &atw, &ath);
-    int albumX = (ssW - atw) / 2 - ax1;
-    int albumY = startY + artistH + gap - ay1;
-    canvas.setCursor(albumX, albumY);
+    canvas.setCursor((ssW - atw) / 2 - ax1, startY + artistH + gap - ay1);
     canvas.print(albumStr);
 
     // Determine text color: white on dark bg, black on light bg
     int brightness = (bgR * 299 + bgG * 587 + bgB * 114) / 1000;
-    uint8_t textR, textG, textB;
-    if (brightness < 128) {
-        textR = 255; textG = 255; textB = 255;
-    } else {
-        textR = 0; textG = 0; textB = 0;
-    }
+    uint8_t textR = (brightness < 128) ? 255 : 0;
+    uint8_t textG = textR, textB = textR;
 
     // Downsample 2×2 blocks → alpha (0..4) and blend text color with background
     for (int y = 0; y < textAreaH; y++) {
@@ -401,10 +335,91 @@ static void renderText(uint8_t* rgb, int canvasW, int canvasH,
 // ─── Pre-dither image enhancement for e-ink output ───
 // Applies mild unsharp-mask sharpening + contrast boost + gamma correction
 // in a single pass using a 3-row rolling buffer (~4 KB working memory).
-static void enhanceForEink(uint8_t* rgb, int w, int h) {
-    const float sharpenAmt   = 0.4f;   // unsharp mask strength
-    const float contrastFact = 1.2f;   // 20 % contrast boost
-    const float gamma        = 0.9f;   // < 1 lifts midtones slightly
+
+static void enhanceForEink(uint8_t* rgb, int w, int h, const RenderProfile& profile);
+
+// Choose how far to compress lightness for THIS image, by rendering the
+// candidates small and scoring each against the source. See tone_map.h for
+// why this is measured rather than predicted.
+//
+// The trial must run the WHOLE pipeline. Dithering the darkened candidate
+// directly scores a render that never happens: contrast, gamma and sharpening
+// come after this in the real path, and they re-expand exactly what was just
+// compressed. Skipping them here picked the wrong scale on the device while
+// the simulator, which did enhance, picked the right one.
+static float chooseLightnessScale(const uint8_t* rgb, int w, int h,
+                                  const RenderProfile& profile, bool* useGamut) {
+    const int dw = w / TONEMAP_TRIAL_DIV, dh = h / TONEMAP_TRIAL_DIV;
+    const size_t npix = (size_t)dw * dh;
+
+    // cand is reused to hold the unpacked render: the candidate pixels are
+    // finished with the moment they have been dithered. One 280 KB buffer
+    // fewer matters — the display's own frame copy competes for this PSRAM,
+    // and when it lost, the portal silently served no image at all.
+    uint8_t* small  = (uint8_t*)heap_caps_malloc(npix * 3, MALLOC_CAP_SPIRAM);
+    uint8_t* cand   = (uint8_t*)heap_caps_malloc(npix * 3, MALLOC_CAP_SPIRAM);
+    uint8_t* packed = (uint8_t*)heap_caps_malloc(npix / 2 + 1, MALLOC_CAP_SPIRAM);
+    uint8_t* shown  = cand;
+    if (!small || !cand || !packed) {
+        heap_caps_free(small); heap_caps_free(cand); heap_caps_free(packed);
+        Serial.println("[Pipeline] Tone-map alloc failed, leaving lightness alone");
+        return 1.0f;
+    }
+
+    toneMapShrink(rgb, w, h, TONEMAP_TRIAL_DIV, small);
+
+    // Gamut mapping is not a free win. It rescues the covers whose colour is
+    // unreachable — the KPop sleeve goes from dE 14.5 / hue 19.4 to 9.1 / 5.8
+    // — and costs on covers that were already inside the gamut, where the
+    // worst regression measured was dE 38.9 to 48.8. So it is decided the same
+    // way the tone scale is: try it, keep it if it scores better.
+    float best = 1.0f, bestScore = 0.0f;
+    bool bestGamut = false;
+    for (int k = 0; k < TONEMAP_SCALES * 2; k++) {
+        const float scale = TONEMAP_SCALE[k % TONEMAP_SCALES];
+        const bool gamut = (k >= TONEMAP_SCALES);
+        // Each stage below is a full-image pass with a Lab round trip or a
+        // dither in it. The loop task only feeds the watchdog between passes,
+        // so a render that got heavy enough — six trial candidates, plus tone
+        // mapping and gamut mapping at full resolution, plus the 25s panel
+        // refresh — tripped the 90s timeout and reset the frame. Feed it
+        // between stages rather than hoping the total stays under.
+        esp_task_wdt_reset();
+        memcpy(cand, small, npix * 3);
+        toneMapApply(cand, dw, dh, scale);
+        if (gamut) gamutMapApply(cand, dw, dh);
+        enhanceForEink(cand, dw, dh, profile);
+        ditherFloydSteinberg(cand, packed, dw, dh, profile);
+
+        // Unpack to the pigment colours the panel will actually show.
+        for (size_t i = 0; i < npix; i++) {
+            const uint8_t idx = (i & 1) ? (packed[i >> 1] & 0x0F)
+                                        : (packed[i >> 1] >> 4);
+            const PaletteColor& p = PALETTE[idx < EPD_COLORS ? idx : 1];
+            shown[i * 3 + 0] = p.r; shown[i * 3 + 1] = p.g; shown[i * 3 + 2] = p.b;
+        }
+
+        float dE = 0.0f, hue = 0.0f;
+        toneMapScore(small, shown, dw, dh, 8, &dE, &hue);
+        const float score = dE + TONEMAP_HUE_WEIGHT * hue;
+        Serial.printf("[Pipeline] tone x%.2f gamut %d  dE %.1f  hue %.1f  score %.1f\n",
+                      scale, (int)gamut, dE, hue, score);
+        if (k == 0 || score < bestScore) {
+            bestScore = score; best = scale; bestGamut = gamut;
+        }
+    }
+    if (useGamut) *useGamut = bestGamut;
+
+    heap_caps_free(small); heap_caps_free(cand); heap_caps_free(packed);
+    Serial.printf("[Pipeline] chose tone x%.2f, gamut map %s\n",
+                  best, bestGamut ? "on" : "off");
+    return best;
+}
+
+static void enhanceForEink(uint8_t* rgb, int w, int h, const RenderProfile& profile) {
+    const float sharpenAmt   = profile.sharpen;
+    const float contrastFact = profile.contrast;
+    const float gamma        = profile.gamma;
     const int   rowBytes     = w * 3;
 
     // Combined contrast + gamma LUT (one per intensity level)
@@ -485,7 +500,8 @@ static void enhanceForEink(uint8_t* rgb, int w, int h) {
     free(prev);
     free(curr);
     free(next);
-    Serial.println("[Pipeline] Enhanced (sharpen+contrast+gamma)");
+    Serial.printf("[Pipeline] Enhanced (%s: sharpen %.2f contrast %.2f gamma %.2f)\n",
+                  profile.name, sharpenAmt, contrastFact, gamma);
 }
 
 // ─── Blurred background fill ───
@@ -588,7 +604,7 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
     free(tmp);
 
     // Darken or wash out depending on bg_style setting
-    if (g_settings.bg_style == 1) {
+    if (g_app.settings.bg_style == 1) {
         // Wash out: blend toward white
         for (int i = 0; i < fillH * cW * 3; i++)
             canvas[i] = (uint8_t)(canvas[i] + (255 - canvas[i]) * 45 / 100);
@@ -601,9 +617,155 @@ static void fillBlurredBackground(uint8_t* canvas, int cW, int cH,
     Serial.println("[Pipeline] Blurred background fill applied");
 }
 
+// ═══════════════════════════════════════════════════════════
+// Filling the panel with square artwork
+//
+// The panel is 480x800; sleeves are square. Fitting to the width leaves 40% of
+// the screen as background, and cover-cropping to fill it throws away 40% of
+// the sleeve horizontally — which on album art usually means slicing through
+// the artist's name.
+//
+// So the choice is not crop-or-don't, it is *how much*. `zoom` spans the whole
+// range: 1.0 crops nothing and leaves a wide band to extend, FILL_MAX_ZOOM
+// covers the panel outright. Adaptive walks it up and stops before the cut
+// lines start passing through the sleeve's own detail.
+// ═══════════════════════════════════════════════════════════
+
+// Horizontal + vertical box blur over a band of rows, in place.
+static void blurBand(uint8_t* canvas, int w, int y0, int y1, int radius) {
+    if (radius < 1 || y1 - y0 < 1) return;
+    int diam = 2 * radius + 1;
+    uint8_t* tmp = (uint8_t*)malloc((size_t)w * 3);
+    if (!tmp) return;
+    for (int y = y0; y < y1; y++) {
+        uint8_t* row = &canvas[(size_t)y * w * 3];
+        int rS = 0, gS = 0, bS = 0;
+        for (int k = -radius; k <= radius; k++) {
+            int xi = constrain(k, 0, w - 1) * 3;
+            rS += row[xi]; gS += row[xi+1]; bS += row[xi+2];
+        }
+        for (int x = 0; x < w; x++) {
+            tmp[x*3] = rS / diam; tmp[x*3+1] = gS / diam; tmp[x*3+2] = bS / diam;
+            int a = constrain(x + radius + 1, 0, w - 1) * 3;
+            int b = constrain(x - radius,     0, w - 1) * 3;
+            rS += row[a] - row[b]; gS += row[a+1] - row[b+1]; bS += row[a+2] - row[b+2];
+        }
+        memcpy(row, tmp, (size_t)w * 3);
+    }
+    free(tmp);
+}
+
+// Fill the strips above and below the artwork so it reaches the panel edges.
+//
+// Mirroring guarantees the colour matches exactly at the join — the reflected
+// row beside the edge IS the edge row. But mirroring alone reflects *content*,
+// and sleeves put type near their edges: the first version produced legible
+// ghost text above the artwork, which reads as a fault rather than a design.
+// So the extension starts already blurred past recognition and is pulled
+// progressively toward a flat continuation of the artwork's edge colour.
+static void extendEdges(uint8_t* canvas, int w, int h, int artY0, int artH) {
+    const int artY1 = artY0 + artH;
+    if (artY0 <= 0 && artY1 >= h) return;
+
+    // Mirror the artwork outward.
+    for (int y = 0; y < artY0; y++) {
+        int src = artY0 + (artY0 - y);
+        if (src >= artY1) src = artY1 - 1;
+        memcpy(&canvas[(size_t)y * w * 3], &canvas[(size_t)src * w * 3], (size_t)w * 3);
+    }
+    for (int y = artY1; y < h; y++) {
+        int src = artY1 - (y - artY1) - 1;
+        if (src < artY0) src = artY0;
+        memcpy(&canvas[(size_t)y * w * 3], &canvas[(size_t)src * w * 3], (size_t)w * 3);
+    }
+
+    // Flat wash: the artwork's own edge colour, per column, softened across.
+    uint8_t* washTop = (uint8_t*)malloc((size_t)w * 3);
+    uint8_t* washBot = (uint8_t*)malloc((size_t)w * 3);
+    if (washTop && washBot) {
+        const int SAMPLE = 24;
+        for (int x = 0; x < w; x++) {
+            int rt=0,gt=0,bt=0,rb=0,gb=0,bb=0,n=0;
+            for (int k = 0; k < SAMPLE; k++) {
+                const uint8_t* t = &canvas[((size_t)(artY0 + k) * w + x) * 3];
+                const uint8_t* b = &canvas[((size_t)(artY1 - 1 - k) * w + x) * 3];
+                rt+=t[0]; gt+=t[1]; bt+=t[2]; rb+=b[0]; gb+=b[1]; bb+=b[2]; n++;
+            }
+            washTop[x*3]=rt/n; washTop[x*3+1]=gt/n; washTop[x*3+2]=bt/n;
+            washBot[x*3]=rb/n; washBot[x*3+1]=gb/n; washBot[x*3+2]=bb/n;
+        }
+
+        // Smear the wash sideways. It is sampled per column over rows that
+        // include whatever type the sleeve carries near its edge, so a column
+        // under a letter averages darker than its neighbours and the wash
+        // itself keeps a trace of the text. Blurring across x removes that
+        // while leaving the left-to-right colour change that makes the
+        // extension look like a continuation.
+        const int WASH_BLUR = 48;
+        uint8_t* tmp = (uint8_t*)malloc((size_t)w * 3);
+        if (tmp) {
+            for (uint8_t* wash : { washTop, washBot }) {
+                memcpy(tmp, wash, (size_t)w * 3);
+                for (int x = 0; x < w; x++)
+                    for (int c = 0; c < 3; c++) {
+                        int sum = 0, n2 = 0;
+                        for (int k = -WASH_BLUR; k <= WASH_BLUR; k++) {
+                            const int xx = x + k;
+                            if (xx < 0 || xx >= w) continue;
+                            sum += tmp[xx * 3 + c]; n2++;
+                        }
+                        wash[x * 3 + c] = (uint8_t)(sum / (n2 ? n2 : 1));
+                    }
+            }
+            free(tmp);
+        }
+    }
+
+    const int BANDS = 6;
+    for (int i = 0; i < BANDS; i++) {
+        float f0 = (float)i / BANDS, f1 = (float)(i + 1) / BANDS;
+        int radius = (int)(10 + 30 * powf(f1, 1.2f));
+        // Reach the wash quickly. The ghost that survives is the one nearest
+        // the join, because that band kept three quarters of the mirrored
+        // content — an exponent of 0.8 only reached 24% wash in the first
+        // band. The wash is the artwork's own edge colour, so converging on
+        // it sooner improves the join rather than compromising it.
+        float t = powf(f1, 0.35f);
+
+        int ty1 = artY0 - (int)(artY0 * f0), ty0 = artY0 - (int)(artY0 * f1);
+        int by0 = artY1 + (int)((h - artY1) * f0), by1 = artY1 + (int)((h - artY1) * f1);
+        blurBand(canvas, w, max(0, ty0), max(0, ty1), radius);
+        blurBand(canvas, w, min(h, by0), min(h, by1), radius);
+
+        if (washTop && washBot) {
+            for (int y = max(0, ty0); y < max(0, ty1); y++)
+                for (int x = 0; x < w * 3; x++) {
+                    uint8_t* p = &canvas[(size_t)y * w * 3 + x];
+                    *p = (uint8_t)(*p * (1 - t) + washTop[x] * t);
+                }
+            for (int y = min(h, by0); y < min(h, by1); y++)
+                for (int x = 0; x < w * 3; x++) {
+                    uint8_t* p = &canvas[(size_t)y * w * 3 + x];
+                    *p = (uint8_t)(*p * (1 - t) + washBot[x] * t);
+                }
+        }
+    }
+    free(washTop); free(washBot);
+    Serial.printf("[Fill] edges extended (artwork rows %d-%d of %d)\n", artY0, artY1, h);
+}
+
 // ─── Core: decode JPEG buffer → scale → optional text → dither → display ───
-static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
-                              const char* artist = nullptr, const char* album = nullptr) {
+// Does NOT take ownership of jpegBuf — the caller frees it.  Distinguishing
+// "this JPEG is undecodable" from "we ran out of memory" matters: only the
+// former should stop us caching the artwork to history.
+enum PipelineResult {
+    PIPE_OK = 0,
+    PIPE_DECODE_FAILED,   // the JPEG itself is unusable — do not cache it
+    PIPE_RESOURCE_FAILED  // transient (allocation) — the JPEG is fine
+};
+
+static PipelineResult processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
+                                        const char* artist = nullptr, const char* album = nullptr) {
     // 1. Get dimensions
     uint16_t imgW, imgH;
     JRESULT jr = TJpgDec.getJpgSize(&imgW, &imgH, jpegBuf, jpegSize);
@@ -615,8 +777,7 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     if (jr != JDR_OK || imgW == 0 || imgH == 0) {
         Serial.printf("[Pipeline] JPEG parse failed (jr=%d)\n", (int)jr);
         activityLogf("Artwork decode failed: JPEG header (jr=%d)", (int)jr);
-        heap_caps_free(jpegBuf);
-        return false;
+        return PIPE_DECODE_FAILED;
     }
 
     // 2. Decode to RGB888 in PSRAM
@@ -626,22 +787,19 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     if (!g_decodeBuf) {
         Serial.printf("[Pipeline] Decode buffer alloc failed (%dx%dx3 = %u bytes)\n",
                       imgW, imgH, (unsigned)(imgW * imgH * 3));
-        heap_caps_free(jpegBuf);
-        return false;
+        return PIPE_RESOURCE_FAILED;
     }
 
     TJpgDec.setCallback(tjpgCallback);
     TJpgDec.setJpgScale(1);
     JRESULT decodeResult = TJpgDec.drawJpg(0, 0, jpegBuf, jpegSize);
 
-    // JPEG buffer no longer needed
-    heap_caps_free(jpegBuf);
     if (decodeResult != JDR_OK) {
         Serial.printf("[Pipeline] JPEG decode failed (jr=%d)\n", (int)decodeResult);
         activityLogf("Artwork decode failed: unsupported JPEG format (jr=%d)", (int)decodeResult);
         heap_caps_free(g_decodeBuf);
         g_decodeBuf = nullptr;
-        return false;
+        return PIPE_DECODE_FAILED;
     }
 
     // 3. Scale to display size
@@ -658,8 +816,45 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
         heap_caps_free(g_decodeBuf);
         g_decodeBuf = nullptr;
         Serial.println("[Pipeline] Scaled buffer alloc failed");
-        return false;
+        return PIPE_RESOURCE_FAILED;
     }
+
+    // ── Fill strategy ──
+    // The text-overlay layout needs its bands, so it keeps the original
+    // fit-and-background treatment. Without text we can use the whole panel.
+    uint8_t fillMode = showText ? FILL_FIT : g_app.settings.fill_mode;
+
+    if (fillMode != FILL_FIT) {
+        float zoom = 1.0f;
+        if (fillMode == FILL_COVER)         zoom = FILL_MAX_ZOOM;
+        else if (fillMode == FILL_ADAPTIVE) zoom = fillAdaptiveZoom(g_decodeBuf, imgW, imgH);
+        Serial.printf("[Fill] mode %d, zoom %.2f\n", fillMode, zoom);
+
+        int side = (int)(EPD_WIDTH * zoom + 0.5f);
+        if (side > EPD_HEIGHT) side = EPD_HEIGHT;
+        int artY0 = (EPD_HEIGHT - side) / 2;
+        if (artY0 < 0) artY0 = 0;
+
+        // Sample the sleeve into a `side` x `side` square, cropped to the panel
+        // width and clipped vertically to the panel.
+        float sc = (float)side / imgW;
+        int cropX = (side - EPD_WIDTH) / 2;
+        int yStart = (artY0 < 0) ? -artY0 : 0;
+        for (int y = 0; y < side; y++) {
+            int cy = artY0 + y;
+            if (cy < 0 || cy >= EPD_HEIGHT) continue;
+            int sy = constrain((int)(y / sc), 0, imgH - 1);
+            for (int x = 0; x < EPD_WIDTH; x++) {
+                int sx = constrain((int)((x + cropX) / sc), 0, imgW - 1);
+                const uint8_t* sp = &g_decodeBuf[((size_t)sy * imgW + sx) * 3];
+                uint8_t* dp = &scaledBuf[((size_t)cy * EPD_WIDTH + x) * 3];
+                dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2];
+            }
+        }
+        (void)yStart;
+
+        if (side < EPD_HEIGHT) extendEdges(scaledBuf, EPD_WIDTH, EPD_HEIGHT, artY0, side);
+    } else {
 
     // Compute edge color for background fill (used as fallback)
     uint8_t bgR, bgG, bgB;
@@ -667,10 +862,10 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
 
     // Background mode: 0 = always solid, 1 = always blur, 2 = auto-detect.
     bool useBlur;
-    if (g_settings.bg_mode == 0) {
+    if (g_app.settings.bg_mode == 0) {
         useBlur = false;
         Serial.println("[Pipeline] Background: forced solid");
-    } else if (g_settings.bg_mode == 1) {
+    } else if (g_app.settings.bg_mode == 1) {
         useBlur = true;
         Serial.println("[Pipeline] Background: forced blur");
     } else {
@@ -759,11 +954,46 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
             scaledBuf[di + 2] = g_decodeBuf[si + 2];
         }
     }
+    }
+
     heap_caps_free(g_decodeBuf);
     g_decodeBuf = nullptr;
 
     // 3.5. Pre-dither enhancement (sharpen + contrast + gamma)
-    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+    const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
+    bool useGamut = false;
+    esp_task_wdt_reset();
+    const unsigned long tTrial = millis();
+    const float chosenScale = chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
+                                                   profile, &useGamut);
+    activityLogf("Trial renders %.1fs — chose x%.2f, gamut %s",
+                 (millis() - tTrial) / 1000.0f, chosenScale, useGamut ? "on" : "off");
+    const unsigned long tTone = millis();
+    toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT, chosenScale);
+    activityLogf("Tone map %.1fs", (millis() - tTone) / 1000.0f);
+    // After the tone map, so the gamut is judged at the lightness the image
+    // will actually be shown at, and before enhancement, so contrast and
+    // gamma act on colours the panel can hold.
+    esp_task_wdt_reset();
+    if (useGamut) {
+        const unsigned long tG = millis();
+        gamutMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+        activityLogf("Gamut map %.1fs", (millis() - tG) / 1000.0f);
+    }
+    esp_task_wdt_reset();
+    const unsigned long tEnh = millis();
+    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
+    activityLogf("Sharpen and contrast %.1fs", (millis() - tEnh) / 1000.0f);
+    esp_task_wdt_reset();
+
+    if (!g_canvasProbe)
+        g_canvasProbe = (uint8_t*)heap_caps_malloc(pipelineCanvasProbeSize()
+                            ? pipelineCanvasProbeSize()
+                            : (size_t)(EPD_WIDTH / CANVAS_PROBE_DIV) *
+                              (EPD_HEIGHT / CANVAS_PROBE_DIV) * 3,
+                            MALLOC_CAP_SPIRAM);
+    if (g_canvasProbe)
+        toneMapShrink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, CANVAS_PROBE_DIV, g_canvasProbe);
 
     // 4. Dither to 6-colour packed buffer
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
@@ -771,10 +1001,13 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     if (!packedBuf) {
         heap_caps_free(scaledBuf);
         Serial.println("[Pipeline] Packed buffer alloc failed");
-        return false;
+        return PIPE_RESOURCE_FAILED;
     }
 
-    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT);
+    const unsigned long tDither = millis();
+    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT, profile);
+    activityLogf("Dither %.1fs", (millis() - tDither) / 1000.0f);
+    esp_task_wdt_reset();
 
     // Render text directly onto packed buffer (after dithering for crisp text)
     if (showText) {
@@ -788,10 +1021,14 @@ static bool processJpegBuffer(uint8_t* jpegBuf, size_t jpegSize,
     heap_caps_free(scaledBuf);
 
     // 5. Push to display
-    displayShowImage(packedBuf);
+    {
+        const unsigned long tPanel = millis();
+        displayShowImage(packedBuf);
+        activityLogf("Panel refresh %.1fs", (millis() - tPanel) / 1000.0f);
+    }
     heap_caps_free(packedBuf);
 
-    return true;
+    return PIPE_OK;
 }
 
 // ─── Placeholder display when artwork can't be decoded ───
@@ -814,7 +1051,10 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
     renderText(scaledBuf, EPD_WIDTH, EPD_HEIGHT, artist, album,
                0, EPD_HEIGHT, bgR, bgG, bgB);
 
-    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT);
+    const RenderProfile& profile = renderProfile(g_app.settings.render_profile);
+    toneMapApply(scaledBuf, EPD_WIDTH, EPD_HEIGHT,
+                 chooseLightnessScale(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile, nullptr));
+    enhanceForEink(scaledBuf, EPD_WIDTH, EPD_HEIGHT, profile);
 
     size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
     uint8_t* packedBuf = (uint8_t*)heap_caps_calloc(packedSize, 1, MALLOC_CAP_SPIRAM);
@@ -824,10 +1064,14 @@ bool pipelineShowPlaceholder(const char* artist, const char* album) {
         return false;
     }
 
-    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT);
+    ditherFloydSteinberg(scaledBuf, packedBuf, EPD_WIDTH, EPD_HEIGHT, profile);
     heap_caps_free(scaledBuf);
 
-    displayShowImage(packedBuf);
+    {
+        const unsigned long tPanel = millis();
+        displayShowImage(packedBuf);
+        activityLogf("Panel refresh %.1fs", (millis() - tPanel) / 1000.0f);
+    }
     heap_caps_free(packedBuf);
 
     Serial.println("[Pipeline] Placeholder displayed");
@@ -957,24 +1201,159 @@ static uint8_t* downloadJpeg(const char* url, size_t& outSize) {
 
 // ─── Public API ───
 
+
+// ─── How well would this cover render? ───
+//
+// Used to choose between pressings of the same album. Decodes at a quarter
+// scale and runs the same trial the real path runs, so the answer is the
+// pipeline's own opinion rather than a proxy for it — three separate proxies
+// were tried for the tone map and all three chose wrong.
+//
+// Also returns the artwork signature, because a candidate that renders
+// beautifully is no use if it is a different sleeve. See cover_match.h.
+bool pipelineAssessJpeg(const uint8_t* jpeg, size_t len,
+                        float* scoreOut, float* sigOut) {
+    uint16_t imgW = 0, imgH = 0;
+    if (TJpgDec.getJpgSize(&imgW, &imgH, (uint8_t*)jpeg, len) != JDR_OK ||
+        !imgW || !imgH) return false;
+
+    const int div = 4;                       // plenty for both jobs
+    const int dw = imgW / div, dh = imgH / div;
+    if (dw < 16 || dh < 16) return false;
+
+    uint8_t* prevBuf = g_decodeBuf;
+    const int prevW = g_decodeW, prevH = g_decodeH;
+
+    g_decodeW = dw; g_decodeH = dh;
+    g_decodeBuf = (uint8_t*)heap_caps_malloc((size_t)dw * dh * 3, MALLOC_CAP_SPIRAM);
+    if (!g_decodeBuf) {
+        g_decodeBuf = prevBuf; g_decodeW = prevW; g_decodeH = prevH;
+        return false;
+    }
+
+    TJpgDec.setCallback(tjpgCallback);
+    TJpgDec.setJpgScale(div);
+    const bool ok = TJpgDec.drawJpg(0, 0, (uint8_t*)jpeg, len) == JDR_OK;
+    TJpgDec.setJpgScale(1);
+
+    if (ok) {
+        if (sigOut) coverSignature(g_decodeBuf, dw, dh, sigOut);
+
+        if (scoreOut) {
+            // A square canvas of the sleeve alone. The real path also extends
+            // the artwork to fill the panel, but every candidate is treated
+            // alike so the comparison holds, and the extension is derived from
+            // the sleeve anyway.
+            const int cw = 120, ch = 200;
+            uint8_t* canvas = (uint8_t*)heap_caps_malloc((size_t)cw * ch * 3,
+                                                         MALLOC_CAP_SPIRAM);
+            uint8_t* packed = (uint8_t*)heap_caps_malloc((size_t)cw * ch / 2,
+                                                         MALLOC_CAP_SPIRAM);
+            uint8_t* shown  = (uint8_t*)heap_caps_malloc((size_t)cw * ch * 3,
+                                                         MALLOC_CAP_SPIRAM);
+            if (canvas && packed && shown) {
+                for (int y = 0; y < ch; y++)
+                    for (int x = 0; x < cw; x++) {
+                        const int sx = x * dw / cw, sy = y * dh / ch;
+                        const uint8_t* sp = &g_decodeBuf[((size_t)sy * dw + sx) * 3];
+                        uint8_t* dp = &canvas[((size_t)y * cw + x) * 3];
+                        dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2];
+                    }
+                const RenderProfile& profile =
+                    renderProfile(g_app.settings.render_profile);
+                uint8_t* ref = (uint8_t*)heap_caps_malloc((size_t)cw * ch * 3,
+                                                          MALLOC_CAP_SPIRAM);
+                if (ref) memcpy(ref, canvas, (size_t)cw * ch * 3);
+
+                float best = 1e30f;
+                for (int k = 0; k < TONEMAP_SCALES * 2; k++) {
+                    if (ref) memcpy(canvas, ref, (size_t)cw * ch * 3);
+                    toneMapApply(canvas, cw, ch, TONEMAP_SCALE[k % TONEMAP_SCALES]);
+                    if (k >= TONEMAP_SCALES) gamutMapApply(canvas, cw, ch);
+                    enhanceForEink(canvas, cw, ch, profile);
+                    ditherFloydSteinberg(canvas, packed, cw, ch, profile);
+                    for (size_t i = 0; i < (size_t)cw * ch; i++) {
+                        const uint8_t idx = (i & 1) ? (packed[i >> 1] & 0x0F)
+                                                    : (packed[i >> 1] >> 4);
+                        const PaletteColor& pc = PALETTE[idx < EPD_COLORS ? idx : 1];
+                        shown[i*3] = pc.r; shown[i*3+1] = pc.g; shown[i*3+2] = pc.b;
+                    }
+                    float dE = 0.0f, hue = 0.0f;
+                    toneMapScore(canvas, shown, cw, ch, 8, &dE, &hue);
+                    const float sc = dE + TONEMAP_HUE_WEIGHT * hue;
+                    if (sc < best) best = sc;
+                }
+                heap_caps_free(ref);
+                *scoreOut = best;
+            } else {
+                *scoreOut = 1e30f;
+            }
+            heap_caps_free(canvas); heap_caps_free(packed); heap_caps_free(shown);
+        }
+    }
+
+    heap_caps_free(g_decodeBuf);
+    g_decodeBuf = prevBuf; g_decodeW = prevW; g_decodeH = prevH;
+    return ok;
+}
+
 bool pipelineProcessUrl(const char* url,
                         const char* overlayArtist, const char* overlayAlbum,
                         const char* artist, const char* title, const char* album) {
-    size_t jpegSize;
+    size_t jpegSize = 0;
     uint8_t* jpegBuf = downloadJpeg(url, jpegSize);
     if (!jpegBuf || jpegSize == 0) {
         activityLog("Artwork fetch failed");
         return false;
     }
 
-    // Save to album art history (before processJpegBuffer frees the buffer)
-    if (artist && artist[0] && title && title[0]) {
-        sdHistorySave(artist, title, album, jpegBuf, jpegSize);
+    // Look for a better-rendering scan of the SAME sleeve. Only ever a
+    // different scan — cover_match.h refuses anything that is not recognisably
+    // the same picture, because ranking on render quality alone would hang an
+    // obscure reissue on the wall in place of the famous cover.
+    if (g_app.settings.cover_variants && artist && artist[0] && album && album[0]) {
+        String better;
+        // Remembered per album. The search is a MusicBrainz query plus several
+        // Cover Art Archive downloads and assessments, and its answer never
+        // changes — including when the answer is "nothing better", which is
+        // stored as an empty string so it is not searched for again either.
+        bool known = sdHistoryGetCoverChoice(artist, album, better);
+        if (!known) {
+            if (!coverChooseVariant(artist, album, jpegBuf, jpegSize, better))
+                better = "";
+            sdHistorySetCoverChoice(artist, album, better.c_str());
+        }
+        if (better.length()) {
+            size_t altSize = 0;
+            uint8_t* altBuf = downloadJpeg(better.c_str(), altSize);
+            if (altBuf && altSize) {
+                heap_caps_free(jpegBuf);
+                jpegBuf = altBuf;
+                jpegSize = altSize;
+            } else if (altBuf) {
+                heap_caps_free(altBuf);
+            }
+        }
     }
 
-    if (processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum)) {
+    PipelineResult res = processJpegBuffer(jpegBuf, jpegSize, overlayArtist, overlayAlbum);
+
+    // Cache to history only once we know the JPEG actually decodes.  Caching
+    // first would leave undecodable artwork on the SD card forever, where the
+    // idle gallery would pick it and fail on every rotation.
+    if (res != PIPE_DECODE_FAILED && artist && artist[0] && title && title[0]) {
+        sdHistorySave(artist, title, album, jpegBuf, jpegSize);
+    }
+    heap_caps_free(jpegBuf);
+
+    if (res == PIPE_OK) {
         activityLog("Artwork render complete");
-        return true; // takes ownership of jpegBuf
+        return true;
+    }
+
+    if (res == PIPE_RESOURCE_FAILED) {
+        activityLog("Artwork render failed: out of memory");
+        return false;
     }
 
     // JPEG wasn't decodable — show placeholder with track info
@@ -990,6 +1369,31 @@ bool pipelineProcessUrl(const char* url,
 }
 
 bool pipelineProcessFile(const char* path) {
+    // A cached frame short-circuits everything: the decode, the fill, six
+    // trial renders, the tone map, the gamut map, the enhancement and the
+    // dither all produce the same bytes they produced last time. Only the 25s
+    // panel refresh is unavoidable. This is the path the idle rotation, a
+    // history tap and the boot restore all take, so it is nearly all of the
+    // repeat work the frame was doing.
+    {
+        const size_t packedSize = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
+        uint8_t* cached = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
+        if (cached) {
+            if (sdRenderCacheLoad(path, renderSignature(), cached)) {
+                Serial.printf("[Pipeline] Cache hit for %s\n", path);
+                activityLog("Cached render reused — straight to the panel");
+                esp_task_wdt_reset();
+                const unsigned long tPanel = millis();
+                displayShowImage(cached);
+                activityLogf("Panel refresh %.1fs", (millis() - tPanel) / 1000.0f);
+                heap_caps_free(cached);
+                sdSetLastShown(path);
+                return true;
+            }
+            heap_caps_free(cached);
+        }
+    }
+
     File f = SD_MMC.open(path, FILE_READ);
     if (!f) {
         Serial.printf("[Pipeline] Cannot open %s\n", path);
@@ -997,16 +1401,37 @@ bool pipelineProcessFile(const char* path) {
     }
 
     size_t fSize = f.size();
+    if (fSize == 0) {
+        f.close();
+        Serial.printf("[Pipeline] %s is empty\n", path);
+        return false;
+    }
+
     uint8_t* jpegBuf = (uint8_t*)heap_caps_malloc(fSize, MALLOC_CAP_SPIRAM);
     if (!jpegBuf) {
         f.close();
         Serial.println("[Pipeline] PSRAM alloc failed for file");
         return false;
     }
-    f.readBytes((char*)jpegBuf, fSize);
+    size_t got = f.readBytes((char*)jpegBuf, fSize);
     f.close();
+    if (got != fSize) {
+        Serial.printf("[Pipeline] Short read on %s (%u/%u bytes)\n",
+                      path, (unsigned)got, (unsigned)fSize);
+        heap_caps_free(jpegBuf);
+        return false;
+    }
 
-    return processJpegBuffer(jpegBuf, fSize); // takes ownership
+    PipelineResult res = processJpegBuffer(jpegBuf, fSize);
+    heap_caps_free(jpegBuf);
+
+    // Keep the result so the next showing of this cover is just a panel push.
+    if (res == PIPE_OK && displayCurrentFrame()) {
+        sdRenderCacheSave(path, renderSignature(), displayCurrentFrame());
+        sdSetLastShown(path);
+    }
+
+    return res == PIPE_OK;
 }
 
 void pipelineShowTestPattern() {
@@ -1034,7 +1459,11 @@ void pipelineShowTestPattern() {
         Serial.printf("[Test] Band %d: %s (index %d, y %d-%d)\n", c, COLOR_NAMES[c], c, yStart, yEnd - 1);
     }
 
-    displayShowImage(packedBuf);
+    {
+        const unsigned long tPanel = millis();
+        displayShowImage(packedBuf);
+        activityLogf("Panel refresh %.1fs", (millis() - tPanel) / 1000.0f);
+    }
     heap_caps_free(packedBuf);
     Serial.println("[Test] Color test pattern displayed");
 }
@@ -1155,10 +1584,88 @@ void pipelineShowDitherTest() {
     }
     memset(packed, 0, packedSize);
 
-    ditherFloydSteinberg(rgb, packed, W, H);
+    ditherFloydSteinberg(rgb, packed, W, H, renderProfile(g_app.settings.render_profile));
     heap_caps_free(rgb);
 
     displayShowImage(packed);
     heap_caps_free(packed);
     Serial.println("[DitherTest] Dither test pattern displayed");
+}
+
+// ─── Palette calibration card ───
+//
+// One row per pigment, each flanked by its own black and white reference chips.
+// Everything is written straight to palette indices, bypassing the dither, so
+// each area is exactly one pigment: what you photograph is ground truth rather
+// than an optical mix.
+//
+//     [K] [====== pigment 0 (black)  ======] [W]
+//     [K] [====== pigment 1 (white)  ======] [W]
+//     [K] [====== pigment 2 (green)  ======] [W]
+//     ...
+//
+// The per-row references are the important part: they let the sampler correct
+// exposure and white balance *locally*, cancelling any illumination gradient or
+// lens vignetting across the card. See simulator/calibrate_from_photo.py.
+void pipelineShowCalibrationCard() {
+    size_t packedSize = (EPD_WIDTH * EPD_HEIGHT) / 2;
+    uint8_t* packed = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
+    if (!packed) {
+        Serial.println("[Calibration] Packed alloc failed");
+        return;
+    }
+    memset(packed, 0x11, packedSize); // white field
+
+    auto setPixel = [&](int x, int y, uint8_t idx) {
+        if (x < 0 || x >= EPD_WIDTH || y < 0 || y >= EPD_HEIGHT) return;
+        int pi = y * EPD_WIDTH + x;
+        int bi = pi / 2;
+        if (pi & 1) packed[bi] = (packed[bi] & 0xF0) | (idx & 0x0F);
+        else        packed[bi] = (packed[bi] & 0x0F) | (idx << 4);
+    };
+
+    auto fillRect = [&](int x0, int y0, int w, int h, uint8_t idx) {
+        for (int y = y0; y < y0 + h; y++)
+            for (int x = x0; x < x0 + w; x++)
+                setPixel(x, y, idx);
+        // Keyline outside the rectangle, so the white chip and the white field
+        // stay distinguishable and a bad crop is visible in the photo.
+        for (int t = 0; t < CAL_KEYLINE; t++) {
+            for (int x = x0 - t - 1; x <= x0 + w + t; x++) {
+                setPixel(x, y0 - t - 1, 0);
+                setPixel(x, y0 + h + t, 0);
+            }
+            for (int y = y0 - t - 1; y <= y0 + h + t; y++) {
+                setPixel(x0 - t - 1, y, 0);
+                setPixel(x0 + w + t, y, 0);
+            }
+        }
+    };
+
+    const int xLeft  = CAL_MARGIN_X;
+    const int xPatch = xLeft + CAL_CHIP_W + CAL_CHIP_GAP;
+    const int xRight = xPatch + CAL_PATCH_W + CAL_CHIP_GAP;
+    const int half = CAL_ROW_H / CAL_CHIP_HALVES;
+
+    for (int c = 0; c < EPD_COLORS; c++) {
+        int y0 = CAL_MARGIN_Y + c * (CAL_ROW_H + CAL_ROW_GAP);
+
+        // Mirrored: black over white on the left, white over black on the
+        // right, so each reference averages to the pigment's own centroid.
+        fillRect(xLeft,  y0,        CAL_CHIP_W, half, 0);
+        fillRect(xLeft,  y0 + half, CAL_CHIP_W, half, 1);
+        fillRect(xRight, y0,        CAL_CHIP_W, half, 1);
+        fillRect(xRight, y0 + half, CAL_CHIP_W, half, 0);
+
+        fillRect(xPatch, y0, CAL_PATCH_W, CAL_ROW_H, (uint8_t)c);
+    }
+
+    Serial.printf("[Calibration] Card: %d rows, pigment x=%d w=%d, "
+                  "reference columns at x=%d and x=%d\n",
+                  EPD_COLORS, xPatch, CAL_PATCH_W, xLeft, xRight);
+
+    displayShowImage(packed);
+    heap_caps_free(packed);
+    Serial.println("[Calibration] Card displayed — photograph it square-on in even light");
+    activityLog("Calibration card displayed");
 }

@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, 'fix/**', 'feature/**']
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  firmware:
+    name: Build firmware & run native tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            firmware/.pio
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Run native unit tests
+        working-directory: firmware
+        run: pio test -e native
+
+      - name: Build ESP32-S3 firmware
+        working-directory: firmware
+        run: pio run -e esp32-s3-photopainter
+
+      - name: Upload firmware binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-bin
+          path: firmware/.pio/build/esp32-s3-photopainter/firmware.bin
+          if-no-files-found: error
+
+  simulator:
+    name: Check simulator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: simulator
+        run: pip install -r requirements.txt
+
+      - name: Byte-compile
+        working-directory: simulator
+        run: python -m compileall -q .
+
+      - name: Verify the simulator still matches the firmware palette
+        working-directory: simulator
+        run: python parity_check.py

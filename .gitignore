@@ -24,3 +24,12 @@ simulator/test_*.wav
 # Python
 __pycache__/
 *.pyc
+
+# Compiled helper tools — build with:  swiftc -O tools/snap.swift -o tools/snap
+tools/snap
+tools/Snap.app/
+
+# Compiled desktop build of the firmware dither (rebuilt on demand)
+firmware/tools/dither_cli
+firmware/tools/gamut_cli
+firmware/tools/cover_cli

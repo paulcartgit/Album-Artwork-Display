@@ -67,22 +67,104 @@
 #define VINYL_MAX_RETRIES           3           // retries before entering cooldown (first cycle)
 #define IDLE_GALLERY_INTERVAL_MS    300000      // 5 min — rotate gallery images when idle
 
+// ─── Panel care ───
+// Spectra 6 panels have a finite refresh life and each full update takes 20-25s.
+// Skipping quickly through a playlist would otherwise repaint on every track.
+#define MIN_REFRESH_INTERVAL_MS     45000       // 45s floor between refreshes
+
+// The main loop blocks for the whole panel refresh, so the watchdog has to
+// tolerate that plus a slow artwork download.
+#define WATCHDOG_TIMEOUT_S          90
+#define DISPLAY_HOLD_MS             1800000     // 30 min — keep a test/calibration pattern on screen
+
 // ─── 6-Color Palette (calibrated to GDEP073E01 actual pigment appearance) ───
 // These RGB values represent what the e-ink pigments LOOK LIKE, not ideal RGB.
-// Accurate values are critical for Floyd-Steinberg dithering quality.
+// The dither matches against these values and diffuses error against them, so
+// their accuracy directly determines output quality — see DITHERING.md.
+//
+// Measured from a RAW capture of the calibration card (simulator/
+// calibrate_from_photo.py --corners), anchored on the card's own black and
+// white chips. Two captures in different lighting agreed with each other far
+// more closely than either agreed with the previous hand-tuned values, which
+// understated all three saturated pigments.
+//
+// Adopting the measurement makes the panel BOLDER, not tamer. That is
+// counter-intuitive — a more saturated model should need less ink to hit a
+// target — but measured across a spread of real covers the chromatic share of
+// placed pigment rose on 8 of 10 (mean 32.9% -> 34.6%, Fitz and The Tantrums
+// 43.1% -> 51.3%). Re-measure with simulator/palette_ab.py before assuming
+// otherwise.
+//
+// Cross-checked since against two independently published measurements of this
+// panel (epdoptimize, and quark-zju's converter gist). Anchoring each on its
+// own black and white so exposure drops out, all three agree the chromatics
+// sit at 95-100% saturation; the old hand-tuned values were the outlier at
+// 78-83%. Ours lands closest to quark-zju's.
+//
+// Green's blue channel is the one place we disagreed with everyone: the
+// measurement gave 0x45, while the other two read 0x00 and 0x1F. Pulled to
+// 0x2E — still the greener of the published values, but no longer teal.
 struct PaletteColor {
     uint8_t r, g, b;
     uint8_t index;
 };
 
 static const PaletteColor PALETTE[EPD_COLORS] = {
-    {0x10, 0x10, 0x12, 0}, // Black  (near-black charcoal)
-    {0xD8, 0xDA, 0xD4, 1}, // White  (light grey, slight cool tint)
-    {0x30, 0x66, 0x58, 2}, // Green  (dark teal-green)
-    {0x38, 0x68, 0xC0, 3}, // Blue   (medium-bright, saturated)
-    {0x9C, 0x30, 0x2C, 4}, // Red    (dark brick-crimson)
-    {0xC8, 0xB8, 0x30, 5}, // Yellow (warm golden)
+    {0x0D, 0x0A, 0x10, 0}, // Black  (near-black charcoal)
+    {0xE0, 0xE0, 0xD9, 1}, // White  (light grey, slight warm tint)
+    {0x1F, 0x6C, 0x2E, 2}, // Green  (deep leaf-green)
+    {0x00, 0x5D, 0xAB, 3}, // Blue   (strong mid-blue)
+    {0xBD, 0x0F, 0x05, 4}, // Red    (vivid scarlet)
+    {0xFF, 0xDA, 0x1B, 5}, // Yellow (bright golden)
 };
+
+// ─── Render profiles ───
+// The rendering pipeline is heavily parameterised.  Rather than bake the
+// constants in, expose three named presets the user can pick in the portal.
+// PROFILE_NATURAL reproduces the historical (pre-profile) behaviour exactly.
+struct RenderProfile {
+    const char* name;
+    // Pre-dither enhancement (image_pipeline.cpp / enhanceForEink)
+    float sharpen;        // unsharp-mask strength
+    float contrast;       // contrast multiplier around mid-grey
+    float gamma;          // < 1 lifts midtones
+    // Dithering (dither.cpp)
+    float chromaPenaltyK;      // strength of the achromatic penalty
+    float chromaPenaltyOnset;  // chroma below which no penalty applies
+    float edgeAttenuation;     // 0 = diffuse across edges, 1 = fully blocked
+};
+
+enum RenderProfileId {
+    PROFILE_PUNCHY  = 0,
+    PROFILE_NATURAL = 1,
+    PROFILE_SOFT    = 2,
+    PROFILE_COUNT   = 3
+};
+
+static const RenderProfile RENDER_PROFILES[PROFILE_COUNT] = {
+    //  name        sharpen contrast gamma  chromaK onset  edgeAtten
+    { "Punchy",     0.65f,  1.35f,   0.85f, 7.0f,   10.0f, 0.85f },
+    { "Natural",    0.40f,  1.20f,   0.90f, 5.0f,   12.0f, 0.85f },
+    { "Soft",       0.20f,  1.08f,   0.95f, 3.5f,   16.0f, 0.70f },
+};
+
+// ─── Artwork fill ───
+// The panel is 480x800 but album art is square, so fitting it to the width
+// covers only 60% of the screen. Cover-cropping fills it but discards 40% of
+// the sleeve horizontally, which usually cuts straight through the type.
+enum FillMode {
+    FILL_FIT      = 0,  // square centred, blurred background (original behaviour)
+    FILL_ADAPTIVE = 1,  // enlarge as far as the sleeve's own detail allows
+    FILL_BLEED    = 2,  // never crop; extend the artwork to the edges
+    FILL_COVER    = 3   // always fill completely, cropping whatever it takes
+};
+
+// Zoom limits and the crop-severity threshold live in fill_policy.h,
+// which is unit-tested.
+
+inline const RenderProfile& renderProfile(uint8_t id) {
+    return RENDER_PROFILES[(id < PROFILE_COUNT) ? id : PROFILE_NATURAL];
+}
 
 // ─── App State ───
 enum AppState {
@@ -106,8 +188,21 @@ struct Settings {
     uint32_t idle_gallery_ms;
     // Display
     bool show_track_info;
-    uint8_t bg_mode;   // 0 = always solid, 1 = always blur, 2 = auto (default)
-    uint8_t bg_style;  // 0 = darken background, 1 = wash out (lighten)
+    uint8_t bg_mode;         // 0 = always solid, 1 = always blur, 2 = auto (default)
+    uint8_t bg_style;        // 0 = darken background, 1 = wash out (lighten)
+    uint8_t render_profile;  // RenderProfileId — 1 (Natural) by default
+    uint8_t fill_mode;
+    // Look for a better-rendering scan of the same sleeve on the Cover Art
+    // Archive. Off by default: it costs several seconds and a handful of
+    // downloads per new album, and the gate that keeps it honest (cover_match.h)
+    // is worth understanding before turning it on.
+    bool cover_variants;       // FillMode — how artwork fills the portrait panel
+    uint32_t min_refresh_ms; // floor between panel refreshes (protects the panel)
+    uint8_t quiet_start_hour;// local hour to stop refreshing (0-23)
+    uint8_t quiet_end_hour;  // local hour to resume (equal values = never quiet)
+    int8_t  utc_offset_hours;// for quiet hours; NTP gives us UTC
+    // Web portal access control (empty password = no auth)
+    char portal_password[64];
 };
 
 // ─── WiFi Config (stored in /config.json on SD) ───

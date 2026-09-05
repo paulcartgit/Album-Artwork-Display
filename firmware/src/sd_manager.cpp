@@ -1,6 +1,8 @@
 #include "sd_manager.h"
 #include <SD_MMC.h>
 #include <ArduinoJson.h>
+#include <ctime>
+#include "history_policy.h"
 
 bool sdInit() {
     SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3);
@@ -14,6 +16,58 @@ bool sdInit() {
     if (!SD_MMC.exists("/history")) {
         SD_MMC.mkdir("/history");
     }
+
+    // Recover from a power cut between removing the old file and renaming the
+    // new one: the temporary is complete, so promote it.
+    static const char* ATOMIC[] = {"/config.json", "/settings.json",
+                                   "/history/index.json"};
+    for (const char* path : ATOMIC) {
+        String tmp = String(path) + ".tmp";
+        if (!SD_MMC.exists(tmp)) continue;
+        if (SD_MMC.exists(path)) {
+            SD_MMC.remove(tmp);        // the real file survived; drop the leftover
+        } else {
+            Serial.printf("[SD] Recovering %s from interrupted write\n", path);
+            SD_MMC.rename(tmp, path);
+        }
+    }
+    return true;
+}
+
+// ─── Atomic file replacement ───
+// FILE_WRITE truncates the target the moment it opens. Lose power during the
+// write — and the history index is rewritten on every track change — and the
+// file is gone, taking the whole library and every pin with it. Write to a
+// temporary alongside it, flush, then swap: a failure leaves the previous file
+// completely intact.
+static bool sdWriteJsonAtomic(const char* path, const JsonDocument& doc) {
+    String tmp = String(path) + ".tmp";
+    SD_MMC.remove(tmp);
+
+    File f = SD_MMC.open(tmp, FILE_WRITE);
+    if (!f) {
+        Serial.printf("[SD] Cannot open %s\n", tmp.c_str());
+        return false;
+    }
+    size_t written = serializeJson(doc, f);
+    f.flush();
+    size_t size = f.size();
+    f.close();
+
+    // A short write means the card filled up or failed; keep the old file.
+    if (written == 0 || size != written) {
+        Serial.printf("[SD] Short write on %s (%u of %u) — keeping previous\n",
+                      tmp.c_str(), (unsigned)size, (unsigned)written);
+        SD_MMC.remove(tmp);
+        return false;
+    }
+
+    SD_MMC.remove(path);
+    if (!SD_MMC.rename(tmp, path)) {
+        Serial.printf("[SD] Rename %s failed\n", tmp.c_str());
+        SD_MMC.remove(tmp);
+        return false;
+    }
     return true;
 }
 
@@ -22,13 +76,7 @@ bool sdWriteWifiConfig(const WifiConfig& cfg) {
     doc["ssid"]     = cfg.ssid;
     doc["password"] = cfg.password;
 
-    File f = SD_MMC.open("/config.json", FILE_WRITE);
-    if (!f) {
-        Serial.println("[SD] Failed to write config.json");
-        return false;
-    }
-    serializeJson(doc, f);
-    f.close();
+    if (!sdWriteJsonAtomic("/config.json", doc)) return false;
     Serial.println("[SD] config.json written");
     return true;
 }
@@ -62,6 +110,13 @@ bool sdReadSettings(Settings& settings) {
     settings.show_track_info = true;
     settings.bg_mode = 2;  // auto
     settings.bg_style = 0; // darken
+    settings.render_profile = PROFILE_NATURAL;
+    settings.fill_mode = FILL_ADAPTIVE;
+    settings.cover_variants = false;
+    settings.min_refresh_ms = MIN_REFRESH_INTERVAL_MS;
+    settings.quiet_start_hour = 0;
+    settings.quiet_end_hour = 0;      // equal = quiet hours disabled
+    settings.utc_offset_hours = 0;
 
     File f = SD_MMC.open("/settings.json", FILE_READ);
     if (!f) return false;
@@ -90,6 +145,16 @@ bool sdReadSettings(Settings& settings) {
         settings.bg_mode = 2;
     }
     settings.bg_style = doc["bg_style"] | 0;
+    settings.render_profile = doc["render_profile"] | (uint8_t)PROFILE_NATURAL;
+    settings.fill_mode = doc["fill_mode"] | (uint8_t)FILL_ADAPTIVE;
+    settings.cover_variants = doc["cover_variants"] | false;
+    if (settings.fill_mode > FILL_COVER) settings.fill_mode = FILL_ADAPTIVE;
+    settings.min_refresh_ms = doc["min_refresh_ms"] | (uint32_t)MIN_REFRESH_INTERVAL_MS;
+    settings.quiet_start_hour = doc["quiet_start_hour"] | 0;
+    settings.quiet_end_hour = doc["quiet_end_hour"] | 0;
+    settings.utc_offset_hours = doc["utc_offset_hours"] | 0;
+    if (settings.render_profile >= PROFILE_COUNT) settings.render_profile = PROFILE_NATURAL;
+    strlcpy(settings.portal_password, doc["portal_password"] | "", sizeof(settings.portal_password));
     return true;
 }
 
@@ -105,12 +170,16 @@ bool sdWriteSettings(const Settings& settings) {
     doc["show_track_info"] = settings.show_track_info;
     doc["bg_mode"] = settings.bg_mode;
     doc["bg_style"] = settings.bg_style;
+    doc["render_profile"] = settings.render_profile;
+    doc["fill_mode"] = settings.fill_mode;
+    doc["cover_variants"] = settings.cover_variants;
+    doc["min_refresh_ms"] = settings.min_refresh_ms;
+    doc["quiet_start_hour"] = settings.quiet_start_hour;
+    doc["quiet_end_hour"] = settings.quiet_end_hour;
+    doc["utc_offset_hours"] = settings.utc_offset_hours;
+    doc["portal_password"] = settings.portal_password;
 
-    File f = SD_MMC.open("/settings.json", FILE_WRITE);
-    if (!f) return false;
-    serializeJson(doc, f);
-    f.close();
-    return true;
+    return sdWriteJsonAtomic("/settings.json", doc);
 }
 
 bool sdFileExists(const char* path) {
@@ -140,12 +209,41 @@ static bool readIndex(JsonDocument& doc) {
     return ok;
 }
 
+// Timestamps are wall-clock epoch seconds, NOT millis().  millis() restarts at
+// zero on every boot, so anything saved after a power cycle looked *older* than
+// everything already on the card and the pruner deleted the newest artwork
+// first.  Entries written by older firmware carry small millis()-derived values
+// which naturally sort below any real epoch time, so they are pruned first —
+// which is what we want, since they genuinely are the oldest.
+// See history_policy.h for the rules; they live there so they can be tested
+// without an SD card.
+static uint32_t historyTimestamp(JsonArray arr) {
+    HistoryEntryMeta metas[HISTORY_MAX];
+    int n = 0;
+    for (JsonObject obj : arr) {
+        if (n >= HISTORY_MAX) break;
+        metas[n].ts     = obj["ts"] | 0UL;
+        metas[n].pinned = obj["pin"] | false;
+        n++;
+    }
+    return historyNextTimestamp((uint32_t)time(nullptr), metas, n);
+}
+
+// Index of the entry to evict, or -1 when everything is pinned.
+static int historyPruneTarget(JsonArray arr) {
+    HistoryEntryMeta metas[HISTORY_MAX];
+    int n = 0;
+    for (JsonObject obj : arr) {
+        if (n >= HISTORY_MAX) break;
+        metas[n].ts     = obj["ts"] | 0UL;
+        metas[n].pinned = obj["pin"] | false;
+        n++;
+    }
+    return historyPruneIndex(metas, n);
+}
+
 static bool writeIndex(const JsonDocument& doc) {
-    File f = SD_MMC.open(HISTORY_INDEX, FILE_WRITE);
-    if (!f) return false;
-    serializeJson(doc, f);
-    f.close();
-    return true;
+    return sdWriteJsonAtomic(HISTORY_INDEX, doc);
 }
 
 bool sdHistorySave(const char* artist, const char* title, const char* album,
@@ -174,7 +272,7 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
     // Check if entry already exists — just bump timestamp
     for (JsonObject obj : arr) {
         if (strcmp(obj["f"] | "", fname) == 0) {
-            obj["ts"] = (unsigned long)millis();
+            obj["ts"] = historyTimestamp(arr);
             writeIndex(doc);
             Serial.printf("[History] Already cached: %s\n", fname);
             return true;
@@ -192,18 +290,7 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
 
     // Prune oldest non-pinned entry if at capacity
     while (arr.size() >= HISTORY_MAX) {
-        // Find oldest non-pinned entry by timestamp
-        int oldest = -1;
-        unsigned long oldestTs = ULONG_MAX;
-        int i = 0;
-        for (JsonObject obj : arr) {
-            bool pinned = obj["pin"] | false;
-            if (!pinned) {
-                unsigned long ts = obj["ts"] | 0UL;
-                if (ts < oldestTs) { oldestTs = ts; oldest = i; }
-            }
-            i++;
-        }
+        int oldest = historyPruneTarget(arr);
         if (oldest < 0) {
             // All entries are pinned — cannot prune
             Serial.println("[History] All entries pinned, cannot prune");
@@ -222,10 +309,13 @@ bool sdHistorySave(const char* artist, const char* title, const char* album,
     obj["a"]  = artist;
     obj["t"]  = title;
     obj["al"] = album ? album : "";
-    obj["ts"] = (unsigned long)millis();
+    obj["ts"] = historyTimestamp(arr);
     obj["on"] = true;
 
     writeIndex(doc);
+    // Saving to history means this is what went on the panel, so it is also
+    // what should come back after a restart.
+    sdSetLastShown(fpath.c_str());
     Serial.printf("[History] Saved: %s (%s — %s)\n", fname, artist, title);
     return true;
 }
@@ -271,6 +361,7 @@ bool sdHistorySetPinned(const char* file, bool pinned) {
 }
 
 bool sdHistoryDelete(const char* file) {
+    sdRenderCacheDrop(file);
     if (!file || !file[0]) return false;
     JsonDocument doc;
     if (!readIndex(doc)) return false;
@@ -325,6 +416,99 @@ static void rebuildShuffleBag() {
     g_shufflePos = 0;
 }
 
+// ─── Rendered frame cache ───
+
+#define RENDER_CACHE_MAGIC 0x50464331u   /* "PFC1" */
+
+static String cachePath(const char* file) {
+    if (!file || !*file) return "";
+    String name(file);
+    const int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    const int dot = name.lastIndexOf('.');
+    if (dot > 0) name = name.substring(0, dot);
+    return "/history/" + name + ".pf";
+}
+
+bool sdRenderCacheLoad(const char* file, uint32_t signature, uint8_t* packed) {
+    const size_t bytes = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
+    String path = cachePath(file);
+    if (!path.length() || !packed) return false;
+    File f = SD_MMC.open(path, FILE_READ);
+    if (!f) return false;
+    uint32_t magic = 0, sig = 0;
+    const bool headerOk = f.read((uint8_t*)&magic, 4) == 4 &&
+                          f.read((uint8_t*)&sig, 4) == 4 &&
+                          magic == RENDER_CACHE_MAGIC && sig == signature &&
+                          f.size() == bytes + 8;
+    if (!headerOk) { f.close(); return false; }
+    const bool ok = f.read(packed, bytes) == (int)bytes;
+    f.close();
+    return ok;
+}
+
+bool sdRenderCacheSave(const char* file, uint32_t signature, const uint8_t* packed) {
+    const size_t bytes = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
+    String path = cachePath(file);
+    if (!path.length() || !packed) return false;
+    // Temp then rename, so a reset mid-write cannot leave a truncated frame
+    // that passes the header check.
+    String tmp = path + ".tmp";
+    File f = SD_MMC.open(tmp, FILE_WRITE);
+    if (!f) return false;
+    const uint32_t magic = RENDER_CACHE_MAGIC;
+    bool ok = f.write((const uint8_t*)&magic, 4) == 4 &&
+              f.write((const uint8_t*)&signature, 4) == 4 &&
+              f.write(packed, bytes) == bytes;
+    f.close();
+    if (!ok) { SD_MMC.remove(tmp); return false; }
+    SD_MMC.remove(path);
+    return SD_MMC.rename(tmp, path);
+}
+
+void sdRenderCacheDrop(const char* file) {
+    String path = cachePath(file);
+    if (path.length()) SD_MMC.remove(path);
+}
+
+
+#define LAST_SHOWN_PATH "/last_shown.txt"
+
+bool sdSetLastShown(const char* path) {
+    if (!path || !*path) return false;
+    File f = SD_MMC.open(LAST_SHOWN_PATH, FILE_WRITE);
+    if (!f) return false;
+    f.print(path);
+    f.close();
+    return true;
+}
+
+String sdGetLastShown() {
+    File f = SD_MMC.open(LAST_SHOWN_PATH, FILE_READ);
+    if (!f) return "";
+    String p = f.readStringUntil('\n');
+    f.close();
+    p.trim();
+    // Only worth restoring if the artwork is still there.
+    if (!p.length() || !SD_MMC.exists(p)) return "";
+    return p;
+}
+
+
+String sdHistoryNewestFile() {
+    JsonDocument doc;
+    if (!readIndex(doc)) return "";
+    // The index is written newest first, so the first enabled entry is the
+    // last thing that was on the panel.
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (!(obj["on"] | true)) continue;
+        const char* f = obj["f"] | "";
+        if (f && *f) return String("/history/") + f;
+    }
+    return "";
+}
+
+
 String sdHistoryRandomFile() {
     if (g_shuffleDirty || g_shufflePos >= g_shuffleCount) {
         rebuildShuffleBag();
@@ -332,4 +516,86 @@ String sdHistoryRandomFile() {
         if (g_shuffleCount == 0) return "";
     }
     return String("/history/") + g_shuffleBag[g_shufflePos++];
+}
+
+
+// ─── Release metadata cache ───
+// Keyed by the same artist|album hash that names the artwork file, so the
+// lookup and the cover stay together.
+
+static String releaseKeyFile(const char* artist, const char* album) {
+    if (!artist || !artist[0] || !album || !album[0]) return "";
+    String key = String(artist) + "|" + String(album);
+    char fname[20];
+    snprintf(fname, sizeof(fname), "%08x.jpg", djb2(key.c_str()));
+    return String(fname);
+}
+
+bool sdHistoryGetRelease(const char* artist, const char* album, String& summary) {
+    String fname = releaseKeyFile(artist, album);
+    if (!fname.length()) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", fname.c_str()) != 0) continue;
+        if (!obj["rel"].is<const char*>()) return false;
+        summary = obj["rel"].as<const char*>();
+        return true;   // cached, even when empty: a miss is worth remembering
+    }
+    return false;
+}
+
+bool sdHistorySetRelease(const char* artist, const char* album, const char* summary) {
+    String fname = releaseKeyFile(artist, album);
+    if (!fname.length()) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", fname.c_str()) != 0) continue;
+        obj["rel"] = summary ? summary : "";
+        return writeIndex(doc);
+    }
+    return false;
+}
+
+
+bool sdHistoryGetCoverChoice(const char* artist, const char* album, String& url) {
+    String fname = releaseKeyFile(artist, album);
+    if (!fname.length()) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", fname.c_str()) != 0) continue;
+        if (!obj["cov"].is<const char*>()) return false;   // never searched
+        url = obj["cov"].as<const char*>();
+        return true;                                       // "" means "nothing better"
+    }
+    return false;
+}
+
+bool sdHistorySetCoverChoice(const char* artist, const char* album, const char* url) {
+    String fname = releaseKeyFile(artist, album);
+    if (!fname.length()) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", fname.c_str()) != 0) continue;
+        obj["cov"] = url ? url : "";
+        return writeIndex(doc);
+    }
+    return false;
+}
+
+
+bool sdHistoryLookup(const char* file, String& artist, String& album) {
+    if (!file || !file[0]) return false;
+    JsonDocument doc;
+    if (!readIndex(doc)) return false;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        if (strcmp(obj["f"] | "", file) != 0) continue;
+        artist = obj["a"] | "";
+        album  = obj["al"] | "";
+        return artist.length() > 0;
+    }
+    return false;
 }

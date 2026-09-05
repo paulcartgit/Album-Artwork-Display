@@ -7,6 +7,9 @@
 #include <GxEPD2_7C.h>
 #include <SPI.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
+#include "png_writer.h"
+#include "activity_log.h"
 
 // Page buffer: HEIGHT/4 = 120 rows. Each row = 800 pixels × 4bpp / 8 = 400 bytes.
 // Page buffer total = 120 × 400 = 48,000 bytes — fits in SRAM.
@@ -14,32 +17,47 @@ static GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT / 4> epd
     GxEPD2_730c_GDEP073E01(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY)
 );
 
-// Track whether we kicked off a refresh that hasn't finished yet
-static bool g_refreshInProgress = false;
+// Set for the duration of a refresh so other tasks can see the panel is busy.
+static volatile bool g_refreshing = false;
+static uint32_t g_refreshCount = 0;
+static unsigned long g_lastRefreshMs = 0;
 
-bool displayIsBusy() {
-    if (!g_refreshInProgress) return false;
-    // BUSY pin is active LOW on GDEP073E01
-    if (digitalRead(EPD_BUSY) == LOW) return true;
-    // Refresh finished
-    g_refreshInProgress = false;
-    Serial.println("[Display] Refresh complete (async)");
-    return false;
+static uint8_t* g_lastFrame = nullptr;   // packed 4bpp copy of what is on screen
+static uint8_t* g_png = nullptr;
+static size_t   g_pngSize = 0;
+
+const uint8_t* displayCurrentFrame() { return g_lastFrame; }
+const uint8_t* displayCurrentPng()   { return g_pngSize ? g_png : nullptr; }
+size_t displayCurrentPngSize()       { return g_pngSize; }
+
+// Encode the frame for the portal. Done here, on the task that owns the
+// buffer, so the web server only ever hands over bytes.
+static void buildPng() {
+    if (!g_lastFrame) return;
+    const size_t cap = (size_t)EPD_WIDTH * EPD_HEIGHT / 2 + 8192;
+    if (!g_png) g_png = (uint8_t*)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!g_png) {
+        activityLogf("PNG buffer alloc failed (%u free PSRAM)",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        return;
+    }
+
+    uint8_t pal[EPD_COLORS * 3];
+    for (int i = 0; i < EPD_COLORS; i++) {
+        pal[i*3] = PALETTE[i].r; pal[i*3+1] = PALETTE[i].g; pal[i*3+2] = PALETTE[i].b;
+    }
+    g_pngSize = pngWriteIndexed4(g_png, cap, g_lastFrame,
+                                 EPD_WIDTH, EPD_HEIGHT, pal, EPD_COLORS);
+    if (!g_pngSize) activityLog("PNG encode returned 0");
+
 }
 
-void displayWaitReady() {
-    if (!g_refreshInProgress) return;
-    unsigned long start = millis();
-    while (digitalRead(EPD_BUSY) == LOW) {
-        yield();
-        delay(50);
-        if (millis() - start > 20000) {
-            Serial.println("[Display] Busy timeout (20s)!");
-            break;
-        }
-    }
-    g_refreshInProgress = false;
-    Serial.printf("[Display] Wait complete (%lu ms)\n", millis() - start);
+uint32_t displayRefreshCount() { return g_refreshCount; }
+void displaySetRefreshCount(uint32_t n) { g_refreshCount = n; }
+unsigned long displayLastRefreshMs() { return g_lastRefreshMs; }
+
+bool displayIsBusy() {
+    return g_refreshing;
 }
 
 bool displayInit() {
@@ -53,17 +71,42 @@ bool displayInit() {
 
 // Callback invoked during GxEPD2's busy-wait polling — keeps WiFi alive
 static void busyYieldCallback(const void*) {
+    // The main loop is blocked in here for the whole 20-25s refresh, so the
+    // watchdog has to be fed from inside it.
+    esp_task_wdt_reset();
     delay(10);
     yield();
 }
 
-void displayShowImage(const uint8_t* packedBuffer) {
-    // Wait for any previous refresh to complete before touching the SPI bus
-    if (g_refreshInProgress) {
-        Serial.println("[Display] Waiting for previous refresh to finish...");
-        displayWaitReady();
-    }
+// GxEPD2 gives this panel a 20 s busy timeout (see the constructor in
+// GxEPD2_730c_GDEP073E01.cpp) but a full Spectra 6 refresh actually takes
+// longer than that, and longer still when cold — the serial log shows it
+// hitting the timeout at _refresh: 20001027 us on every update. GxEPD2 then
+// gives up and returns while the panel is still cycling, so we report the
+// image as displayed before it is, and the next SPI transaction can land
+// mid-refresh. Wait it out ourselves.
+static const unsigned long PANEL_SETTLE_TIMEOUT_MS = 45000;
 
+static void waitUntilPanelIdle() {
+    unsigned long start = millis();
+    // BUSY is active LOW on the GDEP073E01
+    while (digitalRead(EPD_BUSY) == LOW) {
+        if (millis() - start > PANEL_SETTLE_TIMEOUT_MS) {
+            Serial.printf("[Display] Panel still busy after %lums — giving up\n",
+                          PANEL_SETTLE_TIMEOUT_MS);
+            return;
+        }
+        esp_task_wdt_reset();
+        delay(50);
+        yield();
+    }
+    unsigned long waited = millis() - start;
+    if (waited > 50) {
+        Serial.printf("[Display] Panel settled %lums after GxEPD2 returned\n", waited);
+    }
+}
+
+void displayShowImage(const uint8_t* packedBuffer) {
     // packedBuffer: EPD_WIDTH×EPD_HEIGHT (480×800) at 4bpp, 2 pixels/byte
     // Panel native: 800×480.  Rotation 3: src(sx,sy) → native(sy, 479-sx)
     // writeNative() applies _convert_to_native internally, so we pass GxEPD2 indices as-is.
@@ -77,6 +120,22 @@ void displayShowImage(const uint8_t* packedBuffer) {
         Serial.println("[Display] Native buffer alloc failed");
         return;
     }
+
+    g_refreshing = true;
+
+    // Keep a copy so the portal can serve exactly what the panel shows.
+    size_t packedSize = (size_t)EPD_WIDTH * EPD_HEIGHT / 2;
+    if (!g_lastFrame) {
+        g_lastFrame = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_SPIRAM);
+        // Silence here cost an evening: when this allocation lost a race for
+        // PSRAM the guard below simply skipped buildPng(), so the portal
+        // served 404 and the log said nothing at all.
+        if (!g_lastFrame)
+            activityLogf("Frame copy alloc failed (%u free PSRAM) — portal has no image",
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    }
+    if (g_lastFrame) { memcpy(g_lastFrame, packedBuffer, packedSize); buildPng(); }
+
     memset(native, 0x11, nativeSize); // white fill (index 1)
 
     // Rotate portrait → native landscape
@@ -108,13 +167,16 @@ void displayShowImage(const uint8_t* packedBuffer) {
     epd.epd2.setBusyCallback(busyYieldCallback);
     epd.epd2.refresh();
     epd.epd2.setBusyCallback(nullptr);
+    waitUntilPanelIdle();
 
-    g_refreshInProgress = false;
-    Serial.println("[Display] Refresh complete");
+    g_refreshing = false;
+    g_refreshCount++;
+    g_lastRefreshMs = millis();
+    Serial.printf("[Display] Refresh complete (%u total)\n", g_refreshCount);
 }
 
 void displayShowMessage(const char* msg) {
-    displayWaitReady();
+    g_refreshing = true;
     epd.setFullWindow();
     epd.firstPage();
     do {
@@ -151,10 +213,15 @@ void displayShowMessage(const char* msg) {
             }
         }
     } while (epd.nextPage());
+    waitUntilPanelIdle();
+    g_refreshing = false;
+    g_refreshCount++;
+    g_lastRefreshMs = millis();
     Serial.printf("[Display] Message: %s\n", msg);
 }
 
 void displayClear() {
-    displayWaitReady();
+    g_refreshing = true;
     epd.clearScreen(GxEPD_WHITE);
+    g_refreshing = false;
 }
